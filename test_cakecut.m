@@ -16,7 +16,7 @@ rundir = '/data/tempo1/Shared/kangsun/Oversampling/RegridPixels/';
 plotdir = '/home/kangsun/Oversampling_matlab/plot/';
 
 % matlab code dir
-codedir = '/home/kangsun/Oversampling_matlab';
+codedir = '/home/kangsun/OMI/Oversampling_matlab/';
 
 addpath('/home/kangsun/matlab functions/export_fig/')
 addpath('/home/kangsun/matlab functions/')
