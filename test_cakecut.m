@@ -194,7 +194,7 @@ fid = fopen(input_fn,'w');
 fprintf(fid,['%8d',repmat('%15.6f',1,13),repmat('%15.6E',1,2),'\n'],savedata');
 fclose(fid);
 %%
-cd codedir
+cd(codedir)
 np = size(savedata,1);
 LAT = savedata(:,2:6);LON = savedata(:,7:11);
 Lon_left = floor(min(LON(:)));
