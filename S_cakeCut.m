@@ -1,4 +1,5 @@
 parfor ip = 1:np
+    warning off
     Lon_r = LON(ip,1:4);
     Lat_r = LAT(ip,1:4);
     Lon_c = LON(ip,5);
@@ -148,5 +149,6 @@ Sum_Above = Sum_Above+Sub_Area/pixel_area/VCD_Unc(ip)*VCD(ip);
 Sum_Below = Sum_Below+Sub_Area/pixel_area/VCD_Unc(ip);
 
 end
+warning on
 Sum_Below(Sum_Below == 0) = nan;
 Average = Sum_Above./Sum_Below;
