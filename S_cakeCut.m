@@ -1,5 +1,5 @@
+warning off
 parfor ip = 1:np
-    warning off
     Lon_r = LON(ip,1:4);
     Lat_r = LAT(ip,1:4);
     Lon_c = LON(ip,5);

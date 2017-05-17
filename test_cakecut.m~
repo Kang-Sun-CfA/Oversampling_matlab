@@ -1,4 +1,5 @@
-clc;clear
+clc;
+if ~exist('savedata','var');clear;end
 %% directory inputs
 % directory of OMI L2 data
 datadir = '/data/tempo1/Shared/OMHCHO/';
@@ -13,33 +14,36 @@ outputdir = '/data/tempo1/Shared/kangsun/Oversampling/RegridPixels/output/';
 rundir = '/data/tempo1/Shared/kangsun/Oversampling/RegridPixels/';
 
 % directory for plot
-plotdir = '/data/tempo1/Shared/kangsun/Oversampling/RegridPixels/plot/';
+plotdir = '/home/kangsun/OMI/Oversampling_matlab/plot/';
+
+% matlab code dir
+codedir = '/home/kangsun/OMI/Oversampling_matlab/';
 
 addpath('/home/kangsun/matlab functions/export_fig/')
 addpath('/home/kangsun/matlab functions/')
 %% parameter inputs
 % begin and start dates
-% Startdate = [2005 3 1;
-%     2006 3 1;
-%     2007 3 1;
-%     2008 3 1];
-% 
-% Enddate = [2005 5 31;
-%     2006 5 31;
-%     2007 5 31;
-%     2008 5 31];
+Startdate = [2005 5 1;
+    2006 5 1;
+    2007 5 1;
+    2008 5 1];
 
-Startdate = [2005 7 1];
-Enddate = [2005 7 31];
+Enddate = [2005 8 31;
+    2006 8 31;
+    2007 8 31;
+    2008 8 31];
+if ~exist('savedata','var')
+% Startdate = [2005 7 1];
+% Enddate = [2005 7 31];
 % step in dates, not very useful in this project
 % Step = 1;
-
-% do you wanna use destriped OMI data?
-if_destripe = true;
+% 
+% % do you wanna use destriped OMI data?
+% if_destripe = true;
 
 % lat lon box
-MinLat = 38; MaxLat = 43;
-MinLon = -76; MaxLon = -69;
+MinLat = 28; MaxLat = 34;
+MinLon = -99.5; MaxLon = -92.5;
 %  MinLon = -inf; MaxLon = inf;
 
 % max cloud fraction and SZA
@@ -47,10 +51,10 @@ MaxCF = 0.3;
 MaxSZA = 60;
 
 % xtrack position mask
-usextrack = [11:50];
+usextrack = [1:60];
 
 % Resolution of oversampled L3 data?
-Res = 0.05;
+Res = 0.02;
 
 % minimal number of L2 pixel per grid point?
 minave = 5;
@@ -108,6 +112,7 @@ subfilelist = filelist(useindex);
 norbit = sum(useindex);
 savedata = cell(norbit,1);
 %%
+ncore = feature('numcores');
 disp('Loading and subsetting OMI L2 data in parallel...')
 fprintf('\n')
 tic
@@ -190,8 +195,9 @@ fid = fopen(input_fn,'w');
 % print data for Lei Zhu' fortran program
 fprintf(fid,['%8d',repmat('%15.6f',1,13),repmat('%15.6E',1,2),'\n'],savedata');
 fclose(fid);
+end
 %%
-cd /data/tempo1/Shared/kangsun/Oversampling/RegridPixels/matlab_oversampling/
+cd(codedir)
 np = size(savedata,1);
 LAT = savedata(:,2:6);LON = savedata(:,7:11);
 Lon_left = floor(min(LON(:)));
@@ -204,6 +210,7 @@ ncols = (Lon_right-Lon_left)/Res;
 VCD = savedata(:,end-1);
 VCD_Unc = savedata(:,end);
 
+% base case
 Pixels_count = zeros(nrows,ncols);
 Sum_Above = zeros(nrows,ncols);
 Sum_Below = zeros(nrows,ncols);
@@ -217,168 +224,55 @@ options.use_simplified_area = false;
 options.inflate_pixel = false;
 options.inflationx = 1.5;
 options.inflationy = 2;
+
+disp('Base case, tessellation similar to LZ/KY')
 tic
-parfor ip = 1:np
-    Lon_r = LON(ip,1:4);
-    Lat_r = LAT(ip,1:4);
-    Lon_c = LON(ip,5);
-    Lat_c = LAT(ip,5);
-    
-if ~isfield(options,'inflate_pixel')
-    inflate_pixel = false;
-else
-    inflate_pixel = options.inflate_pixel;
-end
-
-if ~isfield(options,'use_SRF')
-    use_SRF = false;
-else
-    use_SRF = options.use_SRF;
-end
-
-if ~isfield(options,'use_simplified_area')
-    use_simplified_area = false;
-else
-    use_simplified_area = options.use_simplified_area;
-end
-
-pixel.nv = length(Lon_r);
-pixel.vList = [(Lon_r(:)-Lon_left)/Res,(Lat_r(:)-Lat_low)/Res];
-pixel.center = [(Lon_c-Lon_left)/Res,(Lat_c-Lat_low)/Res];
-vList = pixel.vList;
-
-% inflate_pixel and use_SRF should be used together, but don't have to
-if ~use_SRF % if not use SRF, there is no point of inflating!
-    inflate_pixel = false;
-end
-
-if inflate_pixel || use_SRF
-    leftpoint = mean(vList(1:2,:));
-    rightpoint = mean(vList(3:4,:));
-    
-    uppoint = mean(vList(2:3,:));
-    lowpoint = mean(vList([1 4],:));
-    
-    % calculate the FWHM of 2-D super gaussian SRF
-    % x is the xtrack, different from the OMI pixel paper, which used y
-    FWHMx = sqrt((leftpoint(1)-rightpoint(1))^2+(leftpoint(2)-rightpoint(2))^2);
-    % y is the along track, different from the OMI pixel paper, which used x
-    FWHMy = sqrt((uppoint(1)-lowpoint(1))^2+(uppoint(2)-lowpoint(2))^2);
-    
-    Angle = -atan((rightpoint(2)-leftpoint(2))/(rightpoint(1)-leftpoint(1)));
-    rotation_matrix = [cos(Angle), -sin(Angle);
-        sin(Angle),  cos(Angle)];
-end
-
-% m is the super gaussian exponient in x (xtrack), n is in y (along track)
-if use_SRF
-    if ~isfield(options,'m')
-        m = 4;
-    else
-        m = options.m;
-    end
-    if ~isfield(options,'n')
-        n = 2;
-    else
-        n = options.n;
-    end
-end
-
-if inflate_pixel % if inflate the pixel, update the pixel object
-    % inflation factor xtrack
-    if ~isfield(options,'inflationx')
-        inflationx = 1.5;
-    else
-        inflationx = options.inflationx;
-    end
-    % inflation factor along track
-    if ~isfield(options,'inflationy')
-        inflationy = 2;
-    else
-        inflationy = options.inflationy;
-    end
-    
-    diamond_orth = (rotation_matrix*...
-        [[leftpoint(1) uppoint(1) rightpoint(1) lowpoint(1)]-pixel.center(1);...
-        [leftpoint(2) uppoint(2) rightpoint(2) lowpoint(2)]-pixel.center(2)]);
-    
-    xleft = diamond_orth(1,1)*inflationx;
-    xright = diamond_orth(1,3)*inflationx;
-    ytop = diamond_orth(2,2)*inflationy;
-    ybottom = diamond_orth(2,4)*inflationy;
-    
-    vList_orth = [xleft xleft xright xright;
-        ybottom ytop ytop ybottom];
-    
-    vList_inflate = [cos(-Angle), -sin(-Angle);
-        sin(-Angle),  cos(-Angle)]*vList_orth;
-    
-    vList_inflate = [vList_inflate(1,:)'+pixel.center(1),vList_inflate(2,:)'+pixel.center(2)];
-    pixel.vList = vList_inflate;
-end
-% Used for the next step
-id_all = 0;
-pixel_area = 0;
-
-% Perform Horizontal cut first at the integer grid lines
-[sub_pixels,n_sub_pixels] = F_HcakeCut( pixel );
-
-Sub_Area = zeros(size(Sum_Above));
-% Then perform Vertical cut for each sub pixel obtainted
-% from the Horizontal cut at the integer grid lines
-for id_sub = 1: n_sub_pixels
-    [final_pixels, n_final_pixels] = F_VcakeCut( sub_pixels(id_sub) );
-    for id_final = 1: n_final_pixels
-        id_all = id_all + 1;
-        % temp_area is the area of each sub polygon, at this stage
-        if use_simplified_area
-            temp_area = Res^2;
-        else
-            [ifsquare,edges] = F_if_square(final_pixels(id_final));
-            if ifsquare
-                temp_area = edges(1)*edges(2)*Res^2;
-            else
-                temp_area = F_polyarea(final_pixels(id_final))*Res^2;
-            end
-        end
-        row = floor(min(final_pixels(id_final).vList(1:final_pixels(id_final).nv,2))) + 1;
-        col = floor(min(final_pixels(id_final).vList(1:final_pixels(id_final).nv,1))) + 1;
-        
-        % if necessary, update temp_area to include the weighting from SRF
-        if use_SRF
-            temp_area = temp_area * ...
-                F_2D_SG(col,row,pixel.center(1),pixel.center(2),FWHMx,FWHMy,m,n,rotation_matrix);
-        end
-        pixel_area = pixel_area + temp_area;
-        
-        % Get the overlaped area between the pixel and each cell
-        Sub_Area(row,col) = temp_area;
-        
-        Pixels_count(row,col) = Pixels_count(row,col) + 1;
-    end
-end
-% Sum weighted value and weights
-% Here use temp_area/A/VCD_Unc(p) as averaging weight, meaning that
-% averaging weight is assumed to be proportional to the ratio of the overlap area (temp_area) to the
-% pixel size (A) and inversely proportional to the error standard deviation (VCD_Unc(p)).
-% If you just want fraction of overlap area as averaging weight, use: temp_area/A
-% If you just want area weighted average, use: temp_area
-Sum_Above = Sum_Above+Sub_Area/pixel_area/VCD_Unc(ip)*VCD(ip);
-Sum_Below = Sum_Below+Sub_Area/pixel_area/VCD_Unc(ip);
-
-end
+S_cakeCut
 toc
-Sum_Below(Sum_Below == 0) = nan;
-Average = Sum_Above./Sum_Below;
-%%
-clc
-count = 0;
-parfor i = 1:12
-    count = sum(count);
-end
+plotcell{1} = Average;
+
+% super gaussian case
+Pixels_count = zeros(nrows,ncols);
+Sum_Above = zeros(nrows,ncols);
+Sum_Below = zeros(nrows,ncols);
+
+options.use_simplified_area = true;
+options.use_SRF = true;
+options.m = 4;
+optons.n = 2;
+options.inflate_pixel = true;
+options.inflationx = 1.5;
+options.inflationy = 2;
+
+disp('m = 4, n = 2')
+tic
+S_cakeCut
+toc
+plotcell{2} = Average;
+
+% standard gaussian case
+Pixels_count = zeros(nrows,ncols);
+Sum_Above = zeros(nrows,ncols);
+Sum_Below = zeros(nrows,ncols);
+
+options.use_SRF = true;
+options.use_simplified_area = true;
+options.inflate_pixel = true;
+options.m = 2;
+options.n = 2;
+options.inflationx = 2;
+options.inflationy = 2;
+
+disp('m = 2, n = 2')
+tic
+S_cakeCut
+toc
+plotcell{3} = Average;
+
 %%
 Lat_grid = Lat_low+(1:nrows)*Res-0.5*Res;
 Lon_grid = Lon_left+(1:ncols)*Res-0.5*Res;
+save('L3plot.mat','plotcell','Lat_grid','Lon_grid')
 statelist = [8, 55, 32, 24 46];
 S         = shaperead('/data/tempo1/Shared/kangsun/run_WRF/shapefiles/cb_2015_us_state_500k/cb_2015_us_state_500k.shp');
 % Slake     = shaperead('/data/tempo1/Shared/kangsun/run_WRF/shapefiles/ne_10m_lakes_north_america/ne_10m_lakes_north_america.shp');
@@ -396,15 +290,26 @@ for i = 1:length(Llake)
     end
 end
 end
-% close all
-figure('color','w','unit','inch','position',[0 1 10 8])
-set(0,'defaultaxesfontsize',13)
+close all
+figure('color','w','unit','inch','position',[0 1 10 6])
+set(0,'defaultaxesfontsize',12)
 % h = scatter(C(:,4),C(:,3),[],C(:,5));
-plotmat = Average;
+textsr = {'Tessellation only','m = 4, n = 2',...
+    'm = 2, n = 2'};
+for i = 1:3
+    ax = subplot(2,2,i);
+    pos = get(ax,'position');
+    set(ax,'position',[pos(1)-0.05 pos(2)+0.02 pos(3)*1.2 pos(4)*1.15])
+plotmat = plotcell{i}/1e16;
+% imagesc(plotmat)
+h = pcolor(double(Lon_grid),double(Lat_grid),double(plotmat));set(h,'edgecolor','none')
+% hc = colorbar;
+ylim([40 43]);xlim([-76 -70])
+text(-70.2, 40.2,textsr{i},'color','w','fontsize',13,'horizontalalignment','right')
+% axis equal
+axis off
+caxis([0 2])
 
-h = pcolor(Lon_grid,Lat_grid,plotmat);set(h,'edgecolor','none')
-hc = colorbar;
-caxis([0 2e16])
 hold on
 for istate = 1:length(S)
     plot(S(istate).X,S(istate).Y,'color','w')
@@ -413,6 +318,11 @@ end
 for ilake = lakelist
     plot(Llake(ilake).X,Llake(ilake).Y,'color','w')
 end
+end
+hc = colorbar('north');
+set(hc,'position',[0.35 0.09 0.3 0.02])
+set(get(hc,'xlabel'),'string','HCHO column [10^{16} mol cm^{-2}]')
+export_fig([plotdir,'L3_compare.pdf'])
 %%
 disp('Running Lei Zhu''s pixel-regriding program ...')
 fprintf('\n')
