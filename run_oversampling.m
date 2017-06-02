@@ -29,8 +29,17 @@ Enddate = [2005 5 31;
     2007 5 31;
     2008 5 31];
 
-Startdate = [2005 3 1];
-Enddate = [2005 3 5];
+Startdate = [2011 12 1;
+    2012 12 1;
+    2013 12 1;
+    2014 12 1;
+    2015 12 1];
+
+Enddate = [2012 3 1;
+    2013 3 1;
+    2014 3 1;
+    2015 3 1;
+    2016 3 1];
 % step in dates, not very useful in this project
 % Step = 1;
 
@@ -38,8 +47,8 @@ Enddate = [2005 3 5];
 if_destripe = true;
 
 % lat lon box
-MinLat = 35; MaxLat = 50;
-MinLon = -85; MaxLon = -70;
+MinLat = 15; MaxLat = 50;
+MinLon = 70; MaxLon = 135;
 %  MinLon = -inf; MaxLon = inf;
 
 % max cloud fraction and SZA
@@ -47,10 +56,10 @@ MaxCF = 0.3;
 MaxSZA = 60;
 
 % xtrack position mask
-usextrack = [11:50];
+usextrack = [1:60];
 
 % Resolution of oversampled L3 data?
-Res = 0.02;
+Res = 0.5;
 
 % minimal number of L2 pixel per grid point?
 minave = 5;
@@ -191,7 +200,7 @@ fid = fopen(input_fn,'w');
 fprintf(fid,['%8d',repmat('%15.6f',1,13),repmat('%15.6E',1,2),'\n'],savedata');
 fclose(fid);
 %%
-Res = 0.02;
+% Res = 0.02;
 disp('Running Lei Zhu''s pixel-regriding program ...')
 fprintf('\n')
 tic
@@ -251,7 +260,8 @@ end
 %% plot
 statelist = [8, 55, 32, 24 46];
 S         = shaperead('/data/tempo1/Shared/kangsun/run_WRF/shapefiles/cb_2015_us_state_500k/cb_2015_us_state_500k.shp');
-% Slake     = shaperead('/data/tempo1/Shared/kangsun/run_WRF/shapefiles/ne_10m_lakes_north_america/ne_10m_lakes_north_america.shp');
+
+% S = shaperead('/data/tempo1/Shared/kangsun/run_WRF/shapefiles/asia/USDoS_LSIB4b_Eurasia_Sep2012.shp');% Slake     = shaperead('/data/tempo1/Shared/kangsun/run_WRF/shapefiles/ne_10m_lakes_north_america/ne_10m_lakes_north_america.shp');
 if ~exist('lakelist','var')
 Llake     = shaperead('/data/tempo1/Shared/kangsun/run_WRF/shapefiles/ne_10m_lakes/ne_10m_lakes.shp');
 lakelist = [];
@@ -276,7 +286,7 @@ plotmat(nave < minave) = nan;
 h = pcolor(longrid,latgrid,value);set(h,'edgecolor','none')
 hc = colorbar;
 set(get(hc,'ylabel'),'string','HCHO VCD [molecules cm^{-2}]')
-caxis([0 2e16])
+caxis([0 1e16])
 xlim([min(C(:,4)) max(C(:,4))])
 ylim([min(C(:,3)) max(C(:,3))])
 set(gca,'linewidth',1)
@@ -285,12 +295,12 @@ for istate = 1:length(S)
     plot(S(istate).X,S(istate).Y,'color','w')
 end
 
-for ilake = lakelist
-    plot(Llake(ilake).X,Llake(ilake).Y,'color','w')
-end
-title(['2005-2008 JJA, Resolution = ',num2str(Res)])
+% for ilake = lakelist
+%     plot(Llake(ilake).X,Llake(ilake).Y,'color','w')
+% end
+title(['2012-2016 DJF, Resolution = ',num2str(Res)])
 xlabel('Longitude');ylabel('Latitude')
 %%
 export_fig([plotdir,'Res_',num2str(Res),'_Lat_',num2str(MinLat),'_',...
     num2str(MaxLat),'_Lon_',num2str(MinLon),'_',num2str(MaxLon),...
-    '_2005-2008 MAM.png'],'-r100')
+    '_2012-2016 DJF.png'],'-r100')

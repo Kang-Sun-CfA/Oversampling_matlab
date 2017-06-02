@@ -276,6 +276,7 @@ plotcell{3} = Average;
 Lat_grid = Lat_low+(1:nrows)*Res-0.5*Res;
 Lon_grid = Lon_left+(1:ncols)*Res-0.5*Res;
 save('L3plot.mat','plotcell','Lat_grid','Lon_grid')
+%%
 statelist = [8, 55, 32, 24 46];
 S         = shaperead('/data/tempo1/Shared/kangsun/run_WRF/shapefiles/cb_2015_us_state_500k/cb_2015_us_state_500k.shp');
 % Slake     = shaperead('/data/tempo1/Shared/kangsun/run_WRF/shapefiles/ne_10m_lakes_north_america/ne_10m_lakes_north_america.shp');
@@ -307,7 +308,7 @@ plotmat = plotcell{i}/1e16;
 % imagesc(plotmat)
 h = pcolor(double(Lon_grid),double(Lat_grid),double(plotmat));set(h,'edgecolor','none')
 % hc = colorbar;
-ylim([40 43]);xlim([-76 -70])
+% ylim([40 43]);xlim([-76 -70])
 text(-70.2, 40.2,textsr{i},'color','w','fontsize',13,'horizontalalignment','right')
 % axis equal
 axis off
@@ -325,6 +326,7 @@ end
 hc = colorbar('north');
 set(hc,'position',[0.35 0.09 0.3 0.02])
 set(get(hc,'xlabel'),'string','HCHO column [10^{16} mol cm^{-2}]')
+%%
 export_fig([plotdir,'L3_compare.pdf'])
 %%
 disp('Running Lei Zhu''s pixel-regriding program ...')

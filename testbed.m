@@ -462,3 +462,54 @@ h = pcolor((1:ncols)-1,(1:nrows)-1,Sum_Below);
 set(h,'edgecolor','w')
 colorbar
 % set(gca,'xlim',Xlim,'ylim',Ylim,'box','off')
+%% test cakecut function
+testdata = [1,34.928440,35.046413,35.157444,35.039295,35.045200,-70.678810,-70.721886,-70.306282,-70.263763,-70.486397,43.510700,0.16052000,1.6698500,1.4008900e+15,3.4824599e+15];
+
+Res = 0.02;
+
+Lon_r = testdata(7:10);
+Lat_r = testdata(2:5);
+Lon_c = testdata(11);
+Lat_c = testdata(6);
+
+VCD = testdata(end-1);
+VCD_Unc = testdata(end);
+Lon_left = floor(min(Lon_r));
+Lon_right = ceil(max(Lon_r));
+Lat_low = floor(min(Lat_r));
+Lat_up = ceil(max(Lat_r));
+
+nrows = (Lat_up-Lat_low)/Res;
+ncols = (Lon_right-Lon_left)/Res;
+
+Pixels_count = zeros(nrows,ncols);
+Sum_Above = zeros(nrows,ncols);
+Sum_Below = zeros(nrows,ncols);
+
+options = [];
+
+options.use_SRF = true;
+options.m = 2;
+options.n = 2;
+options.use_simplified_area = false;
+options.inflate_pixel = true;
+options.inflationx = 2;
+options.inflationy = 2;
+
+tic
+[Sum_Above,Sum_Below,Pixels_count] = ...
+    F_cakeCut(Sum_Above,Sum_Below,Pixels_count,...
+    Lon_r,Lat_r,Lon_c,Lat_c,Lon_left,Lat_low,VCD,VCD_Unc,Res,options);
+toc
+Sum_Below(Sum_Below == 0) = nan;
+Average = Sum_Above./Sum_Below;
+close
+h = pcolor((1:ncols)-1,(1:nrows)-1,Sum_Above);set(h,'edgecolor','w')
+hold on
+h1 = F_plot_polygon([(Lon_r(:)-Lon_left)/Res,(Lat_r(:)-Lat_low)/Res]);
+set(h1,'linewidth',2,'color','r')
+axis equal
+axis off
+%%
+% export_fig(['/data/wdocs/kangsun/www-docs/files/tessellation_unify.pdf'])
+export_fig(['/data/wdocs/kangsun/www-docs/files/srf_unify.pdf'])
