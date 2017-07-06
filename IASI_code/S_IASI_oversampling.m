@@ -247,3 +247,10 @@ end
 set(ax2,'xlim',get(ax1,'xlim'),'ylim',get(ax1,'ylim'))
 %%
 export_fig([plotdir,'Colorado_Res_',num2str(Res),'.png'],'-r150')
+%%
+% A = zeros(20,20);
+% parfor i = 1:10
+%     tmp = zeros(20,20);
+%     tmp(i,i+1) = 1;
+%     A = A+tmp;
+% end
