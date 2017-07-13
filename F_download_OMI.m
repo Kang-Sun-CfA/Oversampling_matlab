@@ -11,6 +11,10 @@ function output = F_download_OMI(inp)
 
 Startdate = inp.Startdate;
 Enddate = inp.Enddate;
+MinLat = inp.MinLat;
+MinLon = inp.MinLon;
+MaxLat = inp.MaxLat;
+MaxLon = inp.MaxLon;
 
 % if download xml, meta data files
 if_download_xml = inp.if_download_xml;

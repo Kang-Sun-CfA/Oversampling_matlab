@@ -14,6 +14,12 @@ end
 % L2dir = 'd:\Research_CfA\OMNO2\L2\';
 %% download OMNO2
 inp_download = [];
+% CONUS
+inp_download.MinLat = 25;
+inp_download.MaxLat = 50;
+inp_download.MinLon = -130;
+inp_download.MaxLon = -63;
+
 inp_download.if_download_xml = true;
 inp_download.if_download_he5 = true;
 
