@@ -23,8 +23,8 @@ inp_subset.MaxLon = -63;
 inp_subset.MaxCF = 0.3;
 inp_subset.MaxSZA = 75;
 
-inp_subset.if_download_xml = false;
-inp_subset.if_download_he5 = false;
+inp_subset.if_download_xml = true;
+inp_subset.if_download_he5 = true;
 inp_subset.if_delete_he5 = false;
 
 inp_subset.swath_BDR_fn = '/data/tempo1/Shared/kangsun/OMNO2/Important_constant/OMI_BDR.mat';
