@@ -146,7 +146,7 @@ for iday = 1:nday
                 xtrackmask = false(size(datavar.Latitude));
                 xtrackmask(usextrack,:) = true;
                 
-                xtrack_N = repmat((1:60)',[1,size(datavar.Latitude,2)]);
+                xtrack_N = repmat((1:ntrack)',[1,size(datavar.Latitude,2)]);
 
                 validmask = datavar.Latitude >= MinLat-MarginLat & datavar.Latitude <= MaxLat+MarginLat & ...
                     datavar.Longitude >= MinLon-MarginLon & datavar.Longitude <= MaxLon+MarginLon & ...
@@ -163,7 +163,8 @@ for iday = 1:nday
                 tempVCD_unc = datavar.ColumnAmountNO2TropStd.data(validmask);
                 tempAMF = datavar.AmfTrop.data(validmask);
                 tempxtrack_N = xtrack_N(validmask);
-                tempUTC = datavar.Time(validmask)/86400+TAI93ref;
+                xTime = repmat(datavar.Time(:)',[ntrack,1]);
+                tempUTC = xTime(validmask)/86400+TAI93ref;
                 corner_data_size = size(datavar.FoV75CornerLatitude);
                 if corner_data_size(3) == 4
                     Lat_lowerleft = squeeze(datavar.FoV75CornerLatitude(:,:,1));
