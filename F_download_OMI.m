@@ -9,6 +9,7 @@ function output = F_download_OMI(inp)
 % the previous function has problem sorting the downloading/subsetting,
 % keeps giving errors when using parfor.
 
+olddir = pwd;
 Startdate = inp.Startdate;
 Enddate = inp.Enddate;
 MinLat = inp.MinLat;
@@ -193,7 +194,8 @@ for iday = 1:nday
     cd(L2dir)
 end
 end
+output = [];
 output.name = output1;
 output.str = output2;
 output.exist = output3;
-
+cd(olddir);
