@@ -48,6 +48,7 @@ doy_array = day_array-datenum(Jan01_array);
 year_array = datevec_array(:,1);
 
 nday = length(day_array);
+%output = struct('name',{},'str',{},'exist',[]);
 output1 = cell(nday,1);
 output2 = cell(nday,1);
 output3 = cell(nday,1);
@@ -117,9 +118,9 @@ parfor iday = 1:nday
             end
         end
     end
-    output1{iday} = L2_file_path;
-    output2{iday} = day_str;
-    output3{iday} = day_exist;
+    %output(iday).name = L2_file_path;
+    %output(iday).str = day_str;
+    %output(iday).exist = day_exist;
     cd(L2dir)
 end
 
