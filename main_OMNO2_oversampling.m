@@ -27,14 +27,13 @@ inp_download.swath_BDR_fn = '/data/tempo1/Shared/kangsun/OMNO2/Important_constan
 inp_download.url0 = 'https://aura.gesdisc.eosdis.nasa.gov/data/Aura_OMI_Level2/OMNO2.003/';
 inp_download.L2dir = L2dir;
 
-for iyear = 2008:2008
+for iyear = 2004:2017
     inp_download.Startdate = [iyear 1 1];
-    inp_download.Enddate = [iyear 1 2];
-    inp_download.if_parallel = true;
-    % parallel download is fast, but
-    output_download_p = F_download_OMI(inp_download);
+    inp_download.Enddate = [iyear 12 31];
     inp_download.if_parallel = false;
-    output_download_s = F_download_OMI(inp_download);
+    % parallel download is fast, but
+    output_download = F_download_OMI(inp_download);
+    save([L2dir,num2str(iyear),'output_download.mat'],'output_download')
 end
 % %%
 % inp_subset = [];
