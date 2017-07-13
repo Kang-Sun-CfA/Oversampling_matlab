@@ -133,14 +133,24 @@ parfor iday = 1:nday
                     (MinLon <= orbit_ul && MaxLon >= orbit_ur) ||...
                     (MinLon <= orbit_ll && MaxLon >= orbit_lr)
                 fn = flist(ixml).name(1:end-4);
-                if ~exist(fn,'file')
+%                if ~exist(fn,'file')
                     if if_download_he5
                         % download the he5 file
                         str = ['wget --load-cookies ~/.urs_cookies --save-cookies ~/.urs_cookies --keep-session-cookies ',...
                             url1,fn];
                         unix(str);
                     end
-                end
+ %               end
+		if ~exist(fn,'file')
+   		ccount = 1;
+		while ~exist(fn,'file')
+                        str = ['wget --load-cookies ~/.urs_cookies --save-cookies ~/.urs_cookies --keep-session-cookies ',...
+                            url1,fn];
+                        unix(str);ccount = ccount+1;
+			disp(ccount)
+			if ccount > 500;break;end
+		end
+		end
                 % open the he5 file, massaging the data
                 datavar = F_read_he5(fn,swathname,varname,geovarname);
                 xtrackmask = false(size(datavar.Latitude));
