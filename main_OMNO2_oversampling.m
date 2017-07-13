@@ -12,31 +12,45 @@ if ~exist(L3dir,'dir')
 end
 % %% Kang Sun's PC
 % L2dir = 'd:\Research_CfA\OMNO2\L2\';
-%%
-inp_subset = [];
-% CONUS
-inp_subset.MinLat = 25;
-inp_subset.MaxLat = 50;
-inp_subset.MinLon = -130;
-inp_subset.MaxLon = -63;
+%% download OMNO2
+inp_download = [];
+inp_download.if_download_xml = true;
+inp_download.if_download_he5 = true;
 
-inp_subset.MaxCF = 0.3;
-inp_subset.MaxSZA = 75;
-
-inp_subset.if_download_xml = true;
-inp_subset.if_download_he5 = true;
-inp_subset.if_delete_he5 = false;
-
-inp_subset.swath_BDR_fn = '/data/tempo1/Shared/kangsun/OMNO2/Important_constant/OMI_BDR.mat';
-inp_subset.url0 = 'https://aura.gesdisc.eosdis.nasa.gov/data/Aura_OMI_Level2/OMNO2.003/';
-inp_subset.L2dir = L2dir;
+inp_download.swath_BDR_fn = '/data/tempo1/Shared/kangsun/OMNO2/Important_constant/OMI_BDR.mat';
+inp_download.url0 = 'https://aura.gesdisc.eosdis.nasa.gov/data/Aura_OMI_Level2/OMNO2.003/';
+inp_download.L2dir = L2dir;
 
 for iyear = 2008:2008
-    inp_subset.Startdate = [iyear 1 1];
-    inp_subset.Enddate = [iyear 12 31];
-    output_subset = F_download_subset_OMNO2(inp_subset);
-
-    L2g_fn = ['CONUS_',num2str(iyear),'.mat'];
-    save([L2gdir,L2g_fn],'inp_subset','output_subset')
+    inp_download.Startdate = [iyear 1 1];
+    inp_download.Enddate = [iyear 12 31];
+    output_download = F_download_OMI(inp_download);
 end
-
+% %%
+% inp_subset = [];
+% % CONUS
+% inp_subset.MinLat = 25;
+% inp_subset.MaxLat = 50;
+% inp_subset.MinLon = -130;
+% inp_subset.MaxLon = -63;
+% 
+% inp_subset.MaxCF = 0.3;
+% inp_subset.MaxSZA = 75;
+% 
+% inp_subset.if_download_xml = true;
+% inp_subset.if_download_he5 = true;
+% inp_subset.if_delete_he5 = false;
+% 
+% inp_subset.swath_BDR_fn = '/data/tempo1/Shared/kangsun/OMNO2/Important_constant/OMI_BDR.mat';
+% inp_subset.url0 = 'https://aura.gesdisc.eosdis.nasa.gov/data/Aura_OMI_Level2/OMNO2.003/';
+% inp_subset.L2dir = L2dir;
+% 
+% for iyear = 2008:2008
+%     inp_subset.Startdate = [iyear 1 1];
+%     inp_subset.Enddate = [iyear 12 31];
+%     output_subset = F_download_subset_OMNO2(inp_subset);
+% 
+%     L2g_fn = ['CONUS_',num2str(iyear),'.mat'];
+%     save([L2gdir,L2g_fn],'inp_subset','output_subset')
+% end
+% 

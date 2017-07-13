@@ -1,4 +1,6 @@
 function output = F_download_subset_OMNO2(inp)
+% !!!!!!!!!!!!!!!!!!!!! This function is no longer usefull !!!!!!!!!!!!!!!
+
 % Download NASA OMNO2 data selectively, subset and filter the data, save
 % filtered data into L2g folder for future conversion into L3 data
 % The L2 data will be saved under L2dir/yyyy/doy. If the L2 files are
