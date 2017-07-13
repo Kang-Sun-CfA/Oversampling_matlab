@@ -38,7 +38,15 @@ cd(L2dir)
 
 % location of a rough boundary of OMI swath. see /data/tempo1/Shared/kangsun/OMNO2/Important_constant/OMI_BDR.mat
 % for an example
+if ~isfield(inp,'swath_BDR_fn')
+    if if_download_he5
+        error('no bdr file!')
+    else
+        swath_BDR_fn = '';
+    end
+else
 swath_BDR_fn = inp.swath_BDR_fn;
+end
 
 url0 = inp.url0;% = 'https://aura.gesdisc.eosdis.nasa.gov/data/Aura_OMI_Level2/OMNO2.003/';
 %% define L2 variables
@@ -57,9 +65,14 @@ geovarname = {'Latitude','Longitude','Time','SolarZenithAngle',...
     'FoV75CornerLatitude','FoV75CornerLongitude'};
 
 % extent of orbit given equator crossing lon == 0
+if length(swath_BDR_fn) > 1
 bdrstruct = load(swath_BDR_fn);
 left_bdr = bdrstruct.left_bdr;
 right_bdr = bdrstruct.right_bdr;
+else
+    left_bdr = [];
+    right_bdr = [];
+end
 
 TAI93ref = datenum('Jan-01-1993');
 
@@ -74,7 +87,7 @@ nday = length(day_array);
 
 savedata = cell(nday,1);
 
-parfor iday = 1:nday
+for iday = 1:nday
     day_dir = [num2str(year_array(iday)),'/',sprintf('%03d',doy_array(iday)),'/'];
     url1 = [url0,day_dir];
     if ~exist(day_dir,'dir')
