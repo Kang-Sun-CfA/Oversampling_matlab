@@ -29,7 +29,7 @@ inp_download.L2dir = L2dir;
 
 for iyear = 2008:2008
     inp_download.Startdate = [iyear 1 1];
-    inp_download.Enddate = [iyear 12 31];
+    inp_download.Enddate = [iyear 1 2];
     inp_download.if_parallel = true;
     % parallel download is fast, but
     output_download_p = F_download_OMI(inp_download);
