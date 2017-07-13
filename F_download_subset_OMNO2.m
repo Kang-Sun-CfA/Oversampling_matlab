@@ -57,7 +57,10 @@ geovarname = {'Latitude','Longitude','Time','SolarZenithAngle',...
     'FoV75CornerLatitude','FoV75CornerLongitude'};
 
 % extent of orbit given equator crossing lon == 0
-load(swath_BDR_fn)
+bdrstruct = load(swath_BDR_fn);
+left_bdr = bdrstruct.left_bdr;
+right_bdr = bdrstruct.right_bdr;
+
 TAI93ref = datenum('Jan-01-1993');
 
 day_array = (datenum(Startdate):1:datenum(Enddate))';
@@ -218,7 +221,7 @@ output.amf = single(savedata(:,13));
 output.colno2 = single(savedata(:,14));
 output.colno2error = single(savedata(:,15));
 output.xtrackN = single(savedata(:,16));
-output.utc = single(savedata(:,17));
+output.utc = double(savedata(:,17));
 
 function datavar = F_read_he5(filename,swathname,varname,geovarname)
 % filename = '/home/kangsun/OMH2O/result/OMH2O_2005m0714t2324-o05311_test_TLCF.he5';
