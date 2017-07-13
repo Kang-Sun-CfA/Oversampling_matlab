@@ -17,7 +17,7 @@ MaxLat = inp.MaxLat;
 MaxLon = inp.MaxLon;
 
 % grey area, L2 pixel center cannot be there, but pixel boundaries can
-MarginLat = 0.5; 
+MarginLat = 0.5;
 MarginLon = 0.5;
 
 % max cloud fraction and SZA
@@ -45,7 +45,7 @@ if ~isfield(inp,'swath_BDR_fn')
         swath_BDR_fn = '';
     end
 else
-swath_BDR_fn = inp.swath_BDR_fn;
+    swath_BDR_fn = inp.swath_BDR_fn;
 end
 
 url0 = inp.url0;% = 'https://aura.gesdisc.eosdis.nasa.gov/data/Aura_OMI_Level2/OMNO2.003/';
@@ -66,9 +66,9 @@ geovarname = {'Latitude','Longitude','Time','SolarZenithAngle',...
 
 % extent of orbit given equator crossing lon == 0
 if length(swath_BDR_fn) > 1
-bdrstruct = load(swath_BDR_fn);
-left_bdr = bdrstruct.left_bdr;
-right_bdr = bdrstruct.right_bdr;
+    bdrstruct = load(swath_BDR_fn);
+    left_bdr = bdrstruct.left_bdr;
+    right_bdr = bdrstruct.right_bdr;
 else
     left_bdr = [];
     right_bdr = [];
@@ -87,7 +87,7 @@ nday = length(day_array);
 
 savedata = cell(nday,1);
 
-for iday = 1:nday
+parfor iday = 1:nday
     day_dir = [num2str(year_array(iday)),'/',sprintf('%03d',doy_array(iday)),'/'];
     url1 = [url0,day_dir];
     if ~exist(day_dir,'dir')
@@ -147,7 +147,7 @@ for iday = 1:nday
                 xtrackmask(usextrack,:) = true;
                 
                 xtrack_N = repmat((1:ntrack)',[1,size(datavar.Latitude,2)]);
-
+                
                 validmask = datavar.Latitude >= MinLat-MarginLat & datavar.Latitude <= MaxLat+MarginLat & ...
                     datavar.Longitude >= MinLon-MarginLon & datavar.Longitude <= MaxLon+MarginLon & ...
                     datavar.VcdQualityFlags.data == 0 & ...
@@ -214,11 +214,13 @@ for iday = 1:nday
                     tempxtrack_N(:),tempUTC(:)];
                 
                 tmp_savedata = cat(1,tmp_savedata,double(tempdata));
-                
-                if if_delete_he5
-                    delete(fn);
-                end
             end
+        end
+    end
+    if if_delete_he5
+        he5fn = ls('*.he5');
+        for ihe5 = 1:length(he5fn)
+            delete(strtrim(he5fn(ihe5,:)))
         end
     end
     savedata{iday} = tmp_savedata;
