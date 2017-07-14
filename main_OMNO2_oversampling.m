@@ -90,7 +90,7 @@ if if_regrid
         inp_regrid.MaxSZA = 60;
         inp_regrid.vcdname = 'colno2';
         inp_regrid.vcderrorname = 'colno2error';
-        inp_regrid.if_parallel = false;
+        inp_regrid.if_parallel = true;
         
         end_date_month = [31 28 31 30 31 30 31 31 30 31 30 31];
         if iyear == 2004 || iyear == 2008 || iyear == 2016

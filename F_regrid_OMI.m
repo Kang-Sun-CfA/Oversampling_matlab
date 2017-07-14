@@ -91,11 +91,13 @@ ncols = length(xgrid);
 xmargin = 3; % how many times to extend zonally
 ymargin = 2; % how many times to extend meridonally
 
-
 f1 = output_subset.utc >= datenum([Startdate 0 0 0]) ...
     & output_subset.utc <= datenum([Enddate 0 0 0]);
+% pixel corners are all 0 in OMNO2 orbit 04420. W. T. F.
 f2 = output_subset.latc >= MinLat-MarginLat & output_subset.latc <= MaxLat+MarginLat...
-    & output_subset.lonc >= MinLon-MarginLon & output_subset.lonc <= MaxLon+MarginLon;
+    & output_subset.lonc >= MinLon-MarginLon & output_subset.lonc <= MaxLon+MarginLon ...
+    & output_subset.latr(1) >= MinLat-MarginLat*2 & output_subset.latr(1) <= MaxLat+2*MarginLat...
+    & output_subset.lonr(1) >= MinLon-MarginLon*2 & output_subset.lonr(1) <= MaxLon+2*MarginLon;
 f3 = output_subset.sza <= MaxSZA;
 f4 = output_subset.cloudfrac <= MaxCF;
 f5 = ismember(output_subset.ift,usextrack);
