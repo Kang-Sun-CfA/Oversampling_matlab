@@ -10,8 +10,6 @@ end
 if ~exist(L3dir,'dir')
     mkdir(L3dir)
 end
-% %% Kang Sun's PC
-% L2dir = 'd:\Research_CfA\OMNO2\L2\';
 if_download = false;
 if_subset = true;
 %% download OMNO2
@@ -55,7 +53,7 @@ inp_subset.usextrack = 1:60;
 
 inp_subset.L2dir = L2dir;
 
-for iyear = 2004:2004
+for iyear = 2004:2017
     inp_subset.Startdate = [iyear 1 1];
     inp_subset.Enddate = [iyear 12 31];
     output_subset = F_subset_OMNO2(inp_subset);
