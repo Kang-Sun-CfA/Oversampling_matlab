@@ -109,7 +109,7 @@ if exist('useweekday','var')
 end
 
 nL2 = sum(validmask);
-
+if nL2 <= 0;return;end
 disp(['Regriding pixels from ',datestr([Startdate 0 0 0]),' to ',...
     datestr([Enddate 0 0 0])])
 disp([num2str(nL2),' pixels to be regridded...'])
