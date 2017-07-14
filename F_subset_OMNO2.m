@@ -55,14 +55,18 @@ lonc = single([]);
 latc = lonc;
 lonr = lonc;latr = lonc;
 sza = lonc;cloudfrac = lonc;ift = lonc;
-utc = lonc;colno2 = lonc;colno2error = lonc;
+utc = double([]);colno2 = lonc;colno2error = lonc;
 
 for iday = 1:nday
     day_dir = [L2dir,num2str(year_array(iday)),sfs,sprintf('%03d',doy_array(iday)),sfs];
-    cd(day_dir);
-    he5fn = ls([day_dir,'*.he5']);
+    %cd(day_dir);
+    he5fn = dir([day_dir,'*.he5']);
+    if isempty(he5fn);
+	warning([day_dir,' contains no HE5 files!']);
+	continue;
+    end;
     for ifile = 1:length(he5fn)
-        fn = strtrim(he5fn(ifile,:));
+        fn = [day_dir,he5fn(ifile).name];
         
         % open the he5 file, massaging the data
         datavar = F_read_he5(fn,swathname,varname,geovarname);
@@ -79,7 +83,7 @@ for iday = 1:nday
             datavar.CloudFraction.data.*datavar.CloudFraction.ScaleFactor <= MaxCF & ...
             xtrackmask;
         if sum(validmask(:)) > 0
-            disp(['You have ',sprintf('%5d',sum(validmask(:))),' valid L2 pixels on orbit ',fn(35:39),'.']);
+            disp(['You have ',sprintf('%5d',sum(validmask(:))),' valid L2 pixels on orbit ',he5fn(ifile).name(35:39),'.']);
         end
         
         tempVCD = datavar.ColumnAmountNO2Trop.data(validmask);
@@ -87,7 +91,7 @@ for iday = 1:nday
         tempAMF = datavar.AmfTrop.data(validmask);
         tempxtrack_N = xtrack_N(validmask);
         xTime = repmat(datavar.Time(:)',[ntrack,1]);
-        tempUTC = xTime(validmask)/86400+TAI93ref;
+        tempUTC = double(xTime(validmask))/86400+TAI93ref;
         corner_data_size = size(datavar.FoV75CornerLatitude);
         if corner_data_size(3) == 4
             Lat_lowerleft = squeeze(datavar.FoV75CornerLatitude(:,:,1));
