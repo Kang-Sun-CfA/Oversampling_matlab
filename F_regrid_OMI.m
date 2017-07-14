@@ -68,6 +68,16 @@ else
     n_array = inp.n_array;
 end
 
+if ~isfield(inp,'if_parallel')
+    if_parallel = false;
+else
+    if_parallel = inp.if_parallel;
+end
+
+if isfield(inp,'useweekday')
+    useweekday = inp.useweekday;
+end
+
 % define x y grids
 xgrid = (MinLon+0.5*Res):Res:MaxLon;
 ygrid = (MinLat+0.5*Res):Res:MaxLat;
@@ -84,13 +94,19 @@ ymargin = 2; % how many times to extend meridonally
 
 f1 = output_subset.utc >= datenum([Startdate 0 0 0]) ...
     & output_subset.utc <= datenum([Enddate 0 0 0]);
-f2 = output_subset.lat >= MinLat-MarginLat & output_subset.lat <= MaxLat+MarginLat...
-    & output_subset.lon >= MinLon-MarginLon & output_subset.lon <= MaxLon+MarginLon;
+f2 = output_subset.latc >= MinLat-MarginLat & output_subset.latc <= MaxLat+MarginLat...
+    & output_subset.lonc >= MinLon-MarginLon & output_subset.lonc <= MaxLon+MarginLon;
 f3 = output_subset.sza <= MaxSZA;
 f4 = output_subset.cloudfrac <= MaxCF;
 f5 = ismember(output_subset.ift,usextrack);
 
 validmask = f1&f2&f3&f4&f5;
+
+if exist('useweekday','var')
+    wkdy = weekday(output_subset.utc);
+    f6 = ismember(wkdy,useweekday);
+    validmask = validmask & f6;
+end
 
 nL2 = sum(validmask);
 
@@ -110,6 +126,7 @@ Xtrack = output_subset.ift(validmask);
 VCD = output_subset.(vcdname)(validmask);
 VCDe = output_subset.(vcderrorname)(validmask);
 
+if if_parallel
 parfor iL2 = 1:nL2
     lat_r = Lat_r(iL2,:);
     lon_r = Lon_r(iL2,:);
@@ -135,8 +152,8 @@ parfor iL2 = 1:nL2
     local_bottom = lat_c-ymargin*(lat_c-lat_min);
     local_top = lat_c+ymargin*(lat_c-lat_min);
     
-    lon_index = Lon_grid >= local_left & Lon_grid <= local_right;
-    lat_index = Lat_grid >= local_bottom & Lat_grid <= local_top;
+    lon_index = xgrid >= local_left & xgrid <= local_right;
+    lat_index = ygrid >= local_bottom & ygrid <= local_top;
     
     lon_mesh = Lon_mesh(lat_index,lon_index);
     lat_mesh = Lat_mesh(lat_index,lon_index);
@@ -154,6 +171,58 @@ parfor iL2 = 1:nL2
     Sum_Above = Sum_Above + sum_above_local;
     Sum_Below = Sum_Below + sum_below_local;
     D = D+D_local;
+end
+else
+    count = 0;
+for iL2 = 1:nL2
+    lat_r = Lat_r(iL2,:);
+    lon_r = Lon_r(iL2,:);
+    lat_c = Lat_c(iL2);
+    lon_c = Lon_c(iL2);
+    vcd = VCD(iL2);
+    vcd_unc = VCDe(iL2);
+    xtrack = Xtrack(iL2);
+    
+    inflatex = inflatex_array(xtrack);
+    inflatey = inflatey_array(xtrack);
+    lon_offset = lon_offset_array(xtrack);
+    lat_offset = lat_offset_array(xtrack);
+    m = m_array(xtrack);
+    n = n_array(xtrack);
+    A = polyarea([lon_r(:);lon_r(1)],[lat_r(:);lat_r(1)]);
+    
+    lat_min = min(lat_r);
+    lon_min = min(lon_r);
+    local_left = lon_c-xmargin*(lon_c-lon_min);
+    local_right = lon_c+xmargin*(lon_c-lon_min);
+    
+    local_bottom = lat_c-ymargin*(lat_c-lat_min);
+    local_top = lat_c+ymargin*(lat_c-lat_min);
+    
+    lon_index = xgrid >= local_left & xgrid <= local_right;
+    lat_index = ygrid >= local_bottom & ygrid <= local_top;
+    
+    lon_mesh = Lon_mesh(lat_index,lon_index);
+    lat_mesh = Lat_mesh(lat_index,lon_index);
+    
+    SG = F_2D_SG_affine(lon_mesh,lat_mesh,lon_r,lat_r,lon_c,lat_c,...
+        m,n,inflatex,inflatey,lon_offset,lat_offset);
+    
+    sum_above_local = zeros(nrows,ncols,'single');
+    sum_below_local = zeros(nrows,ncols,'single');
+    D_local = zeros(nrows,ncols,'single');
+    
+    D_local(lat_index,lon_index) = SG;
+    sum_above_local(lat_index,lon_index) = SG/A/vcd_unc*vcd;
+    sum_below_local(lat_index,lon_index) = SG/A/vcd_unc;
+    Sum_Above = Sum_Above + sum_above_local;
+    Sum_Below = Sum_Below + sum_below_local;
+    D = D+D_local;
+    if iL2 == count*round(nL2/10)
+        disp([num2str(count*10),' % finished'])
+        count = count+1;
+    end
+end
 end
 output_regrid.A = Sum_Above;
 output_regrid.B = Sum_Below;
