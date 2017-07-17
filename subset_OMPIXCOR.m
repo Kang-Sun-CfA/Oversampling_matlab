@@ -8,7 +8,7 @@ if ispc
     L2dir = 'D:\Research_CfA\OMPIXCOR\L2\';
     L2gdir = 'D:\Research_CfA\OMPIXCOR\L2g\';
 else
-    L2dir = '/data/tempo1/Shared/kangsun/OMPIXCOR/L2_data';
+    L2dir = '/data/tempo1/Shared/kangsun/OMPIXCOR/L2_data/';
     L2gdir = '/data/tempo1/Shared/kangsun/OMPIXCOR/L2g/';
 end
 inp_subset = [];
