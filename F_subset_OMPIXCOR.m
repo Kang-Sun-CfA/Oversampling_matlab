@@ -77,7 +77,7 @@ for iday = 1:nday
             datavar.Longitude >= MinLon-MarginLon & datavar.Longitude <= MaxLon+MarginLon & ...
             xtrackmask;
         if sum(validmask(:)) > 0
-            disp(['You have ',sprintf('%5d',sum(validmask(:))),' valid L2 pixels on orbit ',he5fn(ifile).name(35:39),'.']);
+            disp(['You have ',sprintf('%5d',sum(validmask(:))),' valid L2 pixels on orbit ',he5fn(ifile).name(3+(35:39)),'.']);
         end
         
         tempxtrack_N = xtrack_N(validmask);

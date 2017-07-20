@@ -24,7 +24,7 @@ inp_subset.MaxSZA = 75;
 inp_subset.usextrack = 1:60;
 
 inp_subset.L2dir = L2dir;
-for iyear = 2004:2017
+for iyear = 2012:2017
     inp_subset.Startdate = [iyear 1 1];
     inp_subset.Enddate = [iyear 12 31];
     output_subset = F_subset_OMPIXCOR(inp_subset);
