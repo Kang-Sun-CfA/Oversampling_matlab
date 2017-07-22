@@ -38,7 +38,7 @@ varname = {'AMFCloudFraction','ReferenceSectorCorrectedVerticalColumn',...
 geovarname = {'Latitude','Longitude','TimeUTC','SolarZenithAngle',...
     'XtrackQualityFlags'};
 
-TAI93ref = datenum('Jan-01-1993');
+%TAI93ref = datenum('Jan-01-1993');
 
 disp('Reading the OMI L2 file name list ....')
 fprintf('\n')
@@ -136,8 +136,9 @@ for iorbit = 1:norbit
     tempSZA = datavar.SolarZenithAngle(validmask);
     tempCF = datavar.AMFCloudFraction.data(validmask);
     tempxtrack_N = xtrack_N(validmask);
-    xTime = repmat(datavar.TimeUTC(:)',[ntrack,1]);
-    tempUTC = double(xTime(validmask))/86400+TAI93ref;
+    tempUTC = repmat(datenum(datavar.TimeUTC')',[ntrack,1]);
+    tempUTC = tempUTC(validmask);
+   % tempUTC = double(xTime(validmask))/86400+TAI93ref;
 
     lonc = cat(1,lonc,single(tempLonC(:)));
         latc = cat(1,latc,single(tempLatC(:)));
