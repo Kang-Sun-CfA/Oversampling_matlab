@@ -175,7 +175,7 @@ parfor iL2 = 1:nL2
     D = D+D_local;
 end
 else
-    count = 0;
+    count = 1;
 for iL2 = 1:nL2
     lat_r = Lat_r(iL2,:);
     lon_r = Lon_r(iL2,:);
@@ -220,6 +220,7 @@ for iL2 = 1:nL2
     Sum_Above = Sum_Above + sum_above_local;
     Sum_Below = Sum_Below + sum_below_local;
     D = D+D_local;
+    
     if iL2 == count*round(nL2/10)
         disp([num2str(count*10),' % finished'])
         count = count+1;
