@@ -87,7 +87,7 @@ else
 end
 
 f1 = output_subset.utc >= datenum([Startdate 0 0 0]) ...
-    & output_subset.utc <= datenum([Enddate 0 0 0]);
+    & output_subset.utc <= datenum([Enddate 23 59 59]);
 % pixel corners are all 0 in OMNO2 orbit 04420. W. T. F.
 f2 = output_subset.latc >= min_lat-0.5 & output_subset.latc <= max_lat+0.5...
     & output_subset.lonc >= min_lon-0.5 & output_subset.lonc <= max_lon+0.5 ...
@@ -108,7 +108,7 @@ end
 nL2 = sum(validmask);
 if nL2 <= 0;return;end
 disp(['Regriding pixels from ',datestr([Startdate 0 0 0]),' to ',...
-    datestr([Enddate 0 0 0])])
+    datestr([Enddate 23 59 59])])
 disp([num2str(nL2),' pixels to be regridded...'])
 
 Sum_Above = zeros(nrows,ncols,'single');
