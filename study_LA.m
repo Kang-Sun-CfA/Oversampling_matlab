@@ -146,7 +146,7 @@ opengl software
 plotmat = log10(double(tmpa./tmpb));
 plotmat(plotmat < Clim(1)) = Clim(1);
 close all
-figure('color','w','unit','inch','position',[15 0 10 10/inp.max_x*inp.max_y])
+figure('color','w','unit','inch','position',[0 0 10 10/inp.max_x*inp.max_y])
 axes('position',[0.1 0.1 0.8 0.8])
 h = pcolor(outp{1,1}.xgrid,outp{1,1}.ygrid,...
     plotmat);
@@ -182,7 +182,35 @@ end
 
 % plot(carx,cary,'--y',cowx,cowy,'--w','linewidth',2)
 hold off
+%% plot on google map
+clc
+opengl software
+plotmat = log10(double(tmpa./tmpb));
+plotmat(plotmat < Clim(1)) = Clim(1);
+close all
+figure('color','w','unit','inch','position',[0 0 10 10/inp.max_x*inp.max_y])
+axes('position',[0.1 0.1 0.8 0.8])
+h = pcolor(outp{1,1}.lonmesh,outp{1,1}.latmesh,...
+    plotmat);
+caxis(Clim)
+alpha(h,0.75)
 
+hc = colorbar;
+set(hc,'position',[0.12 0.2 0.01 0.3])
+sbxlim = get(hc,'ylim');
+sbxtick = interp1(Clim,sbxlim,log10(Ytick*1e15));
+set(hc,'ytick',sbxtick,'yticklabel',Ytick)
+set(get(hc,'ylabel'),'string','IASI NH_3 column [10^{15} molec cm^{-2}]')
+
+set(h,'edgecolor','none');
+axis off
+%%
+hold on
+plot_google_map('MapType','terrain')
+hold off
+%%
+addpath('c:\users\Kang Sun\dropbox\matlab functions\export_fig')
+export_fig('d:\research_cfa\IASI\LA_NH3_title.png','-r300')
 else
 addpath('/home/kangsun/OMI/Oversampling_matlab/')
 inp = [];
@@ -251,7 +279,7 @@ opengl software
 plotmat = log10(double(tmpa./tmpb));
 plotmat(plotmat < Clim(1)) = Clim(1);
 close all
-figure('color','w','unit','inch','position',[15 0 10 10/inp.max_x*inp.max_y])
+figure('color','w','unit','inch','position',[0 0 10 10/inp.max_x*inp.max_y])
 axes('position',[0.1 0.1 0.8 0.8])
 h = pcolor(outp_no2{1,1}.xgrid,outp_no2{1,1}.ygrid,...
     plotmat);
@@ -295,6 +323,35 @@ end
 % end
 % plot(carx,cary,'--y',cowx,cowy,'--w','linewidth',2)
 hold off
+%% plot on google map
+clc
+opengl software
+plotmat = log10(double(tmpa./tmpb));
+plotmat(plotmat < Clim(1)) = Clim(1);
+close all
+figure('color','w','unit','inch','position',[0 0 10 10/inp.max_x*inp.max_y])
+axes('position',[0.1 0.1 0.8 0.8])
+h = pcolor(outp{1,1}.lonmesh,outp{1,1}.latmesh,...
+    plotmat);
+caxis(Clim)
+alpha(h,0.75)
+
+hc = colorbar;
+set(hc,'position',[0.12 0.2 0.01 0.3])
+sbxlim = get(hc,'ylim');
+sbxtick = interp1(Clim,sbxlim,log10(Ytick*1e15));
+set(hc,'ytick',sbxtick,'yticklabel',Ytick)
+set(get(hc,'ylabel'),'string','OMI NO_2 column [10^{15} molec cm^{-2}]')
+
+set(h,'edgecolor','none');
+axis off
+%%
+hold on
+plot_google_map('MapType','terrain')
+hold off
+%%
+addpath('c:\users\Kang Sun\dropbox\matlab functions\export_fig')
+export_fig('d:\research_cfa\IASI\LA_NO2_title.png','-r300')
 
 %%
 car_mean = nan(length(run_year),12);
