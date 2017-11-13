@@ -334,7 +334,7 @@ for iwd = 1:nwd
                    y_offset = y_offset_array(xtrack);
                    m = m_array(xtrack);
                    n = n_array(xtrack);
-                   A = A_array(xtrack);
+                   Aera = A_array(xtrack);
                    
                    y_min_local = min(y_r);
                    x_min_local = min(x_r);
@@ -358,8 +358,8 @@ for iwd = 1:nwd
                    D_local = zeros(nrows,ncols,'single');
                    
                    D_local(y_index,x_index) = SG;
-                   sum_above_local(y_index,x_index) = SG/A/vcd_unc*vcd;
-                   sum_below_local(y_index,x_index) = SG/A/vcd_unc;
+                   sum_above_local(y_index,x_index) = SG/Area/vcd_unc*vcd;
+                   sum_below_local(y_index,x_index) = SG/Area/vcd_unc;
                    Sum_Above = Sum_Above + sum_above_local;
                    Sum_Below = Sum_Below + sum_below_local;
                    Sum_SG = Sum_SG+D_local;
@@ -387,8 +387,8 @@ for iwd = 1:nwd
                    D_local = zeros(nrows,ncols,'single');
                    
                    D_local(y_index,x_index) = SG;
-                   sum_above_local(y_index,x_index) = SG/A/vcd_unc*vcd;
-                   sum_below_local(y_index,x_index) = SG/A/vcd_unc;
+                   sum_above_local(y_index,x_index) = SG/Area/vcd_unc*vcd;
+                   sum_below_local(y_index,x_index) = SG/Area/vcd_unc;
                    Sum_Abover = Sum_Abover + sum_above_local;
                    Sum_Belowr = Sum_Belowr + sum_below_local;
                    Sum_SGr = Sum_SGr+D_local;
