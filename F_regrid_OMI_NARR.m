@@ -334,7 +334,7 @@ for iwd = 1:nwd
                    y_offset = y_offset_array(xtrack);
                    m = m_array(xtrack);
                    n = n_array(xtrack);
-                   Aera = A_array(xtrack);
+                   Area = A_array(xtrack);
                    
                    y_min_local = min(y_r);
                    x_min_local = min(x_r);
@@ -439,13 +439,20 @@ function outp = F_latlon2xy(inp)
 
 % Written by Kang Sun on 2017/09/23
 
+% major bug-fix on 2017/11/20 to use mercator projection near equator
+% instead of lambert
+
 clon = inp.clon;
 clat = inp.clat;
 
 if clon < 0
     clon = 360+clon;
 end
-mstruct = defaultm('lambertstd');
+if abs(clat) < 15
+    mstruct = defaultm('mercator');
+else
+    mstruct = defaultm('lambertstd');
+end
 mstruct.origin = [clat clon 0];
 mstruct.mapparallels = clat;
 mstruct.nparallels = 1;

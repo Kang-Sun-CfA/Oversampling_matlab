@@ -264,13 +264,20 @@ function outp = F_latlon2xy(inp)
 
 % Written by Kang Sun on 2017/09/23
 
+% major bug-fix on 2017/11/20 to use mercator projection near equator
+% instead of lambert
+
 clon = inp.clon;
 clat = inp.clat;
 
 if clon < 0
     clon = 360+clon;
 end
-mstruct = defaultm('lambertstd');
+if abs(clat) < 15
+    mstruct = defaultm('mercator');
+else
+    mstruct = defaultm('lambertstd');
+end
 mstruct.origin = [clat clon 0];
 mstruct.mapparallels = clat;
 mstruct.nparallels = 1;
