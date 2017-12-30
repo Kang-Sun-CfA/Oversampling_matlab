@@ -63,7 +63,7 @@ for iyear in runyear:
                 f6 = np.in1d(data['omipix'],usextrack)
 
                 validmask = f1 & f2 & f3 & f4 & f5 & f6
-                print 'You have '+'%s'%np.sum(validmask)+' valid L2 pixels on '+'%04d'%iyear+'m'+'%02d'%imonth+'%02d'%iday
+                print( 'You have '+'%s'%np.sum(validmask)+' valid L2 pixels on '+'%04d'%iyear+'m'+'%02d'%imonth+'%02d'%iday)
                 line = np.concatenate((line,data['omiline'][validmask]))
                 pix = np.concatenate((pix,data['omipix'][validmask]))
                 lat_r = np.concatenate((lat_r,data['omilat'][0:4,validmask].T))
@@ -96,7 +96,7 @@ for iyear in runyear:
                 month = np.concatenate((month,data['omimon'][validmask]))
                 hour = np.concatenate((hour,data['omiutc'][validmask]))
             else:
-                print 'L2 file '+fn+' does not exist...'
+                print( 'L2 file '+fn+' does not exist...')
                 continue
     output_subset = {}
     output_subset['line'] = line
