@@ -3,7 +3,7 @@
 # yes! I do use python
 
 import numpy as np
-from scipy.io.idl import readsav
+from scipy.io import readsav
 from scipy.io import savemat 
 import os
 
