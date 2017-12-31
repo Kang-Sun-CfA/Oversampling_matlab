@@ -52,8 +52,10 @@ for iyear in runyear:
     for imonth in runmonth:
         for iday in runday:
             fn = L2dir+'%04d'%iyear+'/OMI-Aura_L2-PROFOZ_'+'%04d'%iyear+'m'+'%02d'%imonth+'%02d'%iday+'.xdr'
-            data = readsav(fn,python_dict=True,uncompressed_file_name=tmpfn,verbose=True)
+            
             if os.path.isfile(fn):
+				data = readsav(fn,python_dict=True,uncompressed_file_name=tmpfn,verbose=True)
+				os.remove(tmpfn)
                 f1 = data['omisza'] <= MaxSZA
                 f2 = data['omicfrac'] <= MaxCF
                 f3 = data['omidescend'] == 0;
