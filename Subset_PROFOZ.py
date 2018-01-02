@@ -49,10 +49,10 @@ for iyear in runyear:
     year = np.ndarray([0],np.int16)
     month = np.ndarray([0],np.int16)
     hour = np.ndarray([0],np.float32)
-	sza = np.ndarray([0],np.float32)
-	alb_0 = np.ndarray([0],np.float32)
-	alb_1 = np.ndarray([0],np.float32)
-	bro = np.ndarray([0],np.float32)
+    sza = np.ndarray([0],np.float32)
+    alb_0 = np.ndarray([0],np.float32)
+    alb_1 = np.ndarray([0],np.float32)
+    bro = np.ndarray([0],np.float32)
     for imonth in runmonth:
         for iday in runday:
             fn = L2dir+'%04d'%iyear+'/OMI-Aura_L2-PROFOZ_'+'%04d'%iyear+'m'+'%02d'%imonth+'%02d'%iday+'.xdr'
@@ -101,10 +101,10 @@ for iyear in runyear:
                 month = np.concatenate((month,data['omimon'][validmask]))
                 hour = np.concatenate((hour,data['omiutc'][validmask]))
 				
-				sza = np.concatenate((sza,data['omisza'][validmask]))
-				alb_0 = np.concatenate((alb_0,data['omiofitvar'][2,0,validmask]))
-				alb_1 = np.concatenate((alb_1,data['omiofitvar'][2,2,validmask]))
-				bro = np.concatenate((bro,data['omiofitvar'][0,2,validmask]))
+                sza = np.concatenate((sza,data['omisza'][validmask]))
+                alb_0 = np.concatenate((alb_0,data['omiofitvar'][2,0,validmask]))
+                alb_1 = np.concatenate((alb_1,data['omiofitvar'][2,2,validmask]))
+                bro = np.concatenate((bro,data['omiofitvar'][0,2,validmask]))
             else:
                 print( 'L2 file '+fn+' does not exist...')
                 continue
@@ -130,7 +130,7 @@ for iyear in runyear:
     output_subset['year'] = year
     output_subset['month'] = month
 	
-	output_subset['sza'] = sza
+    output_subset['sza'] = sza
     output_subset['alb_0'] = alb_0
     output_subset['alb_1'] = alb_1
     output_subset['bro'] = bro
