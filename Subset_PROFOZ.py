@@ -70,7 +70,7 @@ for iyear in runyear:
                 validmask = f1 & f2 & f3 & f4 & f5 & f6
                 print( 'You have '+'%s'%np.sum(validmask)+' valid L2 pixels on '+'%04d'%iyear+'m'+'%02d'%imonth+'%02d'%iday)
                 line = np.concatenate((line,data['omiline'][validmask]))
-                ift = np.concatenate((pix,data['omipix'][validmask]))
+                ift = np.concatenate((ift,data['omipix'][validmask]))
                 lat_r = np.concatenate((lat_r,data['omilat'][0:4,validmask].T))
                 lon_r = np.concatenate((lon_r,data['omilon'][0:4,validmask].T))
                 lat_c = np.concatenate((lat_c,data['omilat'][4,validmask]))
