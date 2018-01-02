@@ -79,7 +79,11 @@ else
 end
 
 vcdname = inp.vcdname;
-vcderrorname = inp.vcderrorname;
+if ~isfield(inp,'vcderrorname')
+    vcderrorname = 'none';
+else
+    vcderrorname = inp.vcderrorname;
+end
 
 % parameters to define pixel SRF
 if ~isfield(inp,'inflatex_array')
@@ -127,11 +131,11 @@ f2 = output_subset.lat_c >= min_lat-0.5 & output_subset.lat_c <= max_lat+0.5...
     & output_subset.lon_c >= min_lon-0.5 & output_subset.lon_c <= max_lon+0.5 ...
     & output_subset.lat_r(:,1) >= min_lat-1 & output_subset.lat_r(:,1) <= max_lat+1 ...
     & output_subset.lon_r(:,1) >= min_lon-1 & output_subset.lon_r(:,1) <= max_lon+1;
-% f3 = output_subset.sza <= MaxSZA;
+f3 = output_subset.sza <= MaxSZA;
 f4 = output_subset.cloudfrac <= MaxCF;
 f5 = ismember(output_subset.ift,usextrack);
 
-validmask = f1&f2&f4&f5;
+validmask = f1&f2&f3&f4&f5;
 
 if exist('useweekday','var')
     wkdy = weekday(output_subset.utc);
@@ -151,7 +155,11 @@ Lat_c = output_subset.lat_c(validmask);
 Lon_c = output_subset.lon_c(validmask);
 Xtrack = output_subset.ift(validmask);
 VCD = output_subset.(vcdname)(validmask);
-VCDe = output_subset.(vcderrorname)(validmask);
+if strcmpi(vcderrorname,'none')
+    VCDe = ones(size(VCD),'single');
+else
+    VCDe = output_subset.(vcderrorname)(validmask);
+end
 UTC = output_subset.utc(validmask);
 
 [UTC, I] = sort(UTC);

@@ -35,7 +35,7 @@ Enddate = inp.Enddate;
 
 % max cloud fraction and SZA
 MaxCF = inp.MaxCF;
-% MaxSZA = inp.MaxSZA;
+MaxSZA = inp.MaxSZA;
 
 % xtrack to use
 if ~isfield(inp,'usextrack')
@@ -45,8 +45,11 @@ else
 end
 
 vcdname = inp.vcdname;
-vcderrorname = inp.vcderrorname;
-
+if ~isfield(inp,'vcderrorname')
+    vcderrorname = 'none';
+else
+    vcderrorname = inp.vcderrorname;
+end
 % parameters to define pixel SRF
 if ~isfield(inp,'inflatex_array')
     inflatex_array = ones(1,30);
@@ -105,11 +108,11 @@ f2 = output_subset.lat_c >= MinLat-MarginLat & output_subset.lat_c <= MaxLat+Mar
     & output_subset.lon_c >= MinLon-MarginLon & output_subset.lon_c <= MaxLon+MarginLon ...
     & output_subset.lat_r(:,1) >= MinLat-MarginLat*2 & output_subset.lat_r(:,1) <= MaxLat+2*MarginLat...
     & output_subset.lon_r(:,1) >= MinLon-MarginLon*2 & output_subset.lon_r(:,1) <= MaxLon+2*MarginLon;
-% f3 = output_subset.sza <= MaxSZA;
+f3 = output_subset.sza <= MaxSZA;
 f4 = output_subset.cloudfrac <= MaxCF;
 f5 = ismember(output_subset.ift,usextrack);
 
-validmask = f1&f2&f4&f5;
+validmask = f1&f2&f3&f4&f5;
 
 if exist('useweekday','var')
     wkdy = weekday(output_subset.utc);
@@ -133,7 +136,11 @@ Lat_c = output_subset.lat_c(validmask);
 Lon_c = output_subset.lon_c(validmask);
 Xtrack = output_subset.ift(validmask);
 VCD = output_subset.(vcdname)(validmask);
-VCDe = output_subset.(vcderrorname)(validmask);
+if strcmpi(vcderrorname,'none')
+    VCDe = ones(size(VCD),'single');
+else
+    VCDe = output_subset.(vcderrorname)(validmask);
+end
 
 if if_parallel
 parfor iL2 = 1:nL2
