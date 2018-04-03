@@ -9,6 +9,8 @@ function output_regrid = F_regrid_OMI(inp,output_subset)
 % covered by more L2 pixels.
 
 % written by Kang Sun on 2017/07/14
+% updated on 2018/03/28 to include sigma^2 weighting and remove very
+% negative column values.
 
 output_regrid = [];
 Res = inp.Res;
@@ -25,6 +27,11 @@ if isfield(inp,'MarginLat')
     MarginLat = inp.MarginLat;
 else
     MarginLat = 0.5;
+end
+if isfield(inp,'errorpower')
+    errorpower = inp.errorpower;
+else
+    errorpower = 1;
 end
 Startdate = inp.Startdate;
 Enddate = inp.Enddate;
@@ -102,7 +109,9 @@ f3 = output_subset.sza <= MaxSZA;
 f4 = output_subset.cloudfrac <= MaxCF;
 f5 = ismember(output_subset.ift,usextrack);
 
-validmask = f1&f2&f3&f4&f5;
+% add on 2018/03/28 for OMCHOCHO
+f7 = output_subset.(vcdname) > -1e10;
+validmask = f1&f2&f3&f4&f5&f7;
 
 if exist('useweekday','var')
     wkdy = weekday(output_subset.utc);
@@ -126,7 +135,7 @@ Lat_c = output_subset.latc(validmask);
 Lon_c = output_subset.lonc(validmask);
 Xtrack = output_subset.ift(validmask);
 VCD = output_subset.(vcdname)(validmask);
-VCDe = output_subset.(vcderrorname)(validmask);
+VCDe = (output_subset.(vcderrorname)(validmask)).^errorpower;
 
 if if_parallel
 parfor iL2 = 1:nL2
