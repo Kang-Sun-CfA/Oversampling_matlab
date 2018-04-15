@@ -110,7 +110,7 @@ f4 = output_subset.cloudfrac <= MaxCF;
 f5 = ismember(output_subset.ift,usextrack);
 
 % add on 2018/03/28 for OMCHOCHO
-f7 = output_subset.(vcdname) > -1e10;
+f7 = output_subset.(vcdname) > -1e26;
 validmask = f1&f2&f3&f4&f5&f7;
 
 if exist('useweekday','var')

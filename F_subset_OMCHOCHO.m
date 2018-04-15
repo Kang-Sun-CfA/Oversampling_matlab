@@ -1,6 +1,7 @@
 function output = F_subset_OMCHOCHO(inp)
 % subset SAO OMCHOCHO, output consistent format like F_subset_IASI.m
 % updated from F_subset_OMBRO.m by Kang Sun on 2018/03/28
+% updated on 2018/04/04 to add additional filters
 
 sfs = filesep;
 olddir = pwd;
@@ -35,7 +36,8 @@ swathname = 'OMI Total Column Amount CHOCHO';
 % variables to read from OMI L2 files
 varname = {'AMFCloudFraction','ColumnAmountDestriped',...
     'ColumnUncertainty','MainDataQualityFlag','PixelCornerLatitudes',...
-    'PixelCornerLongitudes','AirMassFactor','AirMassFactorDiagnosticFlag'};
+    'PixelCornerLongitudes','AirMassFactor','AirMassFactorDiagnosticFlag',...
+    'FittingRMS'};
 % geovarname = {'Latitude','Longitude','TimeUTC','SolarZenithAngle',...
 %     'XTrackQualityFlags'};
 geovarname = {'Latitude','Longitude','TimeUTC','SolarZenithAngle'};
@@ -98,9 +100,11 @@ for iday = 1:nday
             datavar.MainDataQualityFlag.data == 0 & ...
             datavar.SolarZenithAngle <= MaxSZA & ...
             datavar.AMFCloudFraction.data <= MaxCF & ...
-            xtrackmask;
+            xtrackmask & ...
+            datavar.ColumnAmountDestriped.data > -1e26 & ...
+            datavar.FittingRMS.data < 5e-3;
         if sum(validmask(:)) > 0
-            disp(['You have ',sprintf('%5d',sum(validmask(:))),' valid L2 pixels on orbit ',he5fn(ifile).name(35:39),'.']);
+            disp(['You have ',sprintf('%5d',sum(validmask(:))),' valid L2 pixels on orbit ',he5fn(ifile).name(40:44),'.']);
         end
         
         tempVCD = datavar.ColumnAmountDestriped.data(validmask);
