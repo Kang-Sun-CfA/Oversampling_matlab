@@ -9,6 +9,9 @@ function output = F_download_OMI(inp)
 % the previous function has problem sorting the downloading/subsetting,
 % keeps giving errors when using parfor.
 
+% add --no-check-certificate for wget to work in ubuntu --- so weired. On
+% 2018/05/15
+
 olddir = pwd;
 Startdate = inp.Startdate;
 Enddate = inp.Enddate;
@@ -134,7 +137,7 @@ for iday = 1:nday
     cd(day_dir)
     % wget commend to download all xml meta data
     if if_download_xml
-        str = ['wget --load-cookies ~/.urs_cookies --save-cookies ~/.urs_cookies --keep-session-cookies -r -c -nH -nd -np -A xml "',...
+        str = ['wget --load-cookies ~/.urs_cookies --save-cookies ~/.urs_cookies --keep-session-cookies --no-check-certificate -r -c -nH -nd -np -A xml "',...
             url1,'"'];
         unix(str);
     end
@@ -179,7 +182,7 @@ for iday = 1:nday
                 if ~exist(fn,'file')
                     if if_download_he5
                         % download the he5 file
-                        str = ['wget --load-cookies ~/.urs_cookies --save-cookies ~/.urs_cookies --keep-session-cookies ',...
+                        str = ['wget --load-cookies ~/.urs_cookies --save-cookies ~/.urs_cookies --keep-session-cookies --no-check-certificate ',...
                             url1,fn];
                         unix(str);
                         day_str{count} = str;
