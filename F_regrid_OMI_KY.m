@@ -1,16 +1,5 @@
-function output_regrid = F_regrid_OMI(inp,output_subset)
-% function to take in the output from F_subset_OMNO2.m or F_subset_OMHCHO.m
-% and regrid these L2 data to a L3 grid, defined by a lat lon box and
-% resolution (Res).
-
-% the output contains four matrices, A, B, C, and D. A and B are cumulative
-% terms. C = A./B is the regridded concentration over this period. D is the
-% sum of unnormalized spatial response function. Large D means L3 grid is
-% covered by more L2 pixels.
-
-% written by Kang Sun on 2017/07/14
-% updated on 2018/03/28 to include sigma^2 weighting and remove very
-% negative column values.
+function output_regrid = F_regrid_OMI_KY(inp,output_subset)
+% updated from F_regrid_OMI.m to add Kai Yang discretization on 2018/07/17
 
 output_regrid = [];
 Res = inp.Res;
@@ -90,9 +79,12 @@ xgrid = (MinLon+0.5*Res):Res:MaxLon;
 ygrid = (MinLat+0.5*Res):Res:MaxLat;
 nrows = length(ygrid);
 ncols = length(xgrid);
+xgridr = [xgrid-0.5*Res xgrid(end)+0.5*Res];
+ygridr = [ygrid-0.5*Res ygrid(end)+0.5*Res];
 
 % define x y mesh
 [Lon_mesh, Lat_mesh] = meshgrid(single(xgrid),single(ygrid));
+[Lon_meshr, Lat_meshr] = meshgrid(single(xgridr),single(ygridr));
 
 % construct a rectangle envelopes the orginal pixel
 xmargin = 3; % how many times to extend zonally
@@ -163,14 +155,23 @@ parfor iL2 = 1:nL2
     local_bottom = lat_c-ymargin*(lat_c-lat_min);
     local_top = lat_c+ymargin*(lat_c-lat_min);
     
-    lon_index = xgrid >= local_left & xgrid <= local_right;
-    lat_index = ygrid >= local_bottom & ygrid <= local_top;
+    lon_index = find(xgrid >= local_left & xgrid <= local_right);
+    lat_index = find(ygrid >= local_bottom & ygrid <= local_top);
     
     lon_mesh = Lon_mesh(lat_index,lon_index);
     lat_mesh = Lat_mesh(lat_index,lon_index);
     
-    SG = F_2D_SG_affine(lon_mesh,lat_mesh,lon_r,lat_r,lon_c,lat_c,...
+    if isempty(lat_index) || isempty(lon_index)
+        SG = F_2D_SG_affine(lon_mesh,lat_mesh,lon_r,lat_r,lon_c,lat_c,...
         m,n,inflatex,inflatey,lon_offset,lat_offset);
+    else
+        
+    lon_meshr = Lon_meshr([lat_index lat_index(end)+1],[lon_index lon_index(end)+1]);
+    lat_meshr = Lat_meshr([lat_index lat_index(end)+1],[lon_index lon_index(end)+1]);
+    
+    SG = F_2D_SG_OMI_KY(lon_meshr,lat_meshr,lon_mesh,lat_mesh,lon_r,lat_r,lon_c,lat_c,...
+        m,n,inflatex,inflatey,lon_offset,lat_offset);
+    end
     
     sum_above_local = zeros(nrows,ncols,'single');
     sum_below_local = zeros(nrows,ncols,'single');
@@ -210,14 +211,23 @@ for iL2 = 1:nL2
     local_bottom = lat_c-ymargin*(lat_c-lat_min);
     local_top = lat_c+ymargin*(lat_c-lat_min);
     
-    lon_index = xgrid >= local_left & xgrid <= local_right;
-    lat_index = ygrid >= local_bottom & ygrid <= local_top;
+    lon_index = find(xgrid >= local_left & xgrid <= local_right);
+    lat_index = find(ygrid >= local_bottom & ygrid <= local_top);
     
     lon_mesh = Lon_mesh(lat_index,lon_index);
     lat_mesh = Lat_mesh(lat_index,lon_index);
     
-    SG = F_2D_SG_affine(lon_mesh,lat_mesh,lon_r,lat_r,lon_c,lat_c,...
+    if isempty(lat_index) || isempty(lon_index)
+        SG = F_2D_SG_affine(lon_mesh,lat_mesh,lon_r,lat_r,lon_c,lat_c,...
         m,n,inflatex,inflatey,lon_offset,lat_offset);
+    else
+        
+    lon_meshr = Lon_meshr([lat_index lat_index(end)+1],[lon_index lon_index(end)+1]);
+    lat_meshr = Lat_meshr([lat_index lat_index(end)+1],[lon_index lon_index(end)+1]);
+    
+    SG = F_2D_SG_OMI_KY(lon_meshr,lat_meshr,lon_mesh,lat_mesh,lon_r,lat_r,lon_c,lat_c,...
+        m,n,inflatex,inflatey,lon_offset,lat_offset);
+    end
     
     sum_above_local = zeros(nrows,ncols,'single');
     sum_below_local = zeros(nrows,ncols,'single');
