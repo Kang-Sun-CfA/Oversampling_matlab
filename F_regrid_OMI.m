@@ -111,7 +111,10 @@ f5 = ismember(output_subset.ift,usextrack);
 
 % add on 2018/03/28 for OMCHOCHO
 f7 = output_subset.(vcdname) > -1e26;
-validmask = f1&f2&f3&f4&f5&f7;
+% add on 2018/09/10 to make sure uncertainties are all positive
+f8 = output_subset.(vcderrorname) > 0;
+
+validmask = f1&f2&f3&f4&f5&f7&f8;
 
 if exist('useweekday','var')
     wkdy = weekday(output_subset.utc);
