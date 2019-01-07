@@ -28,7 +28,7 @@ fixedPoints = [-FWHMx,-FWHMy;
     FWHMx, FWHMy;
     FWHMx, -FWHMy]/2;
 
-tform = fitgeotrans(fixedPoints,vList,'projective');
+tform = fitgeotrans(fixedPoints,vList,'affine');
 
 xym1 = [lon_mesh(:)-lon_c-lon_offset, lat_mesh(:)-lat_c-lat_offset];
 xym2 = transformPointsInverse(tform,xym1);

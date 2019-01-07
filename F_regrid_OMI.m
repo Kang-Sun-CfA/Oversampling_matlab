@@ -189,6 +189,7 @@ end
 else
     count = 1;
 for iL2 = 1:nL2
+%     tic
     lat_r = Lat_r(iL2,:);
     lon_r = Lon_r(iL2,:);
     lat_c = Lat_c(iL2);
@@ -204,7 +205,8 @@ for iL2 = 1:nL2
     m = m_array(xtrack);
     n = n_array(xtrack);
     A = polyarea([lon_r(:);lon_r(1)],[lat_r(:);lat_r(1)]);
-    
+%     toc
+%     tic
     lat_min = min(lat_r);
     lon_min = min(lon_r);
     local_left = lon_c-xmargin*(lon_c-lon_min);
@@ -218,21 +220,20 @@ for iL2 = 1:nL2
     
     lon_mesh = Lon_mesh(lat_index,lon_index);
     lat_mesh = Lat_mesh(lat_index,lon_index);
-    
+%     toc
+%     tic
     SG = F_2D_SG_affine(lon_mesh,lat_mesh,lon_r,lat_r,lon_c,lat_c,...
         m,n,inflatex,inflatey,lon_offset,lat_offset);
+%     toc
+%     tic
+%     sum_above_local = zeros(nrows,ncols,'single');
+%     sum_below_local = zeros(nrows,ncols,'single');
+%     D_local = zeros(nrows,ncols,'single');
     
-    sum_above_local = zeros(nrows,ncols,'single');
-    sum_below_local = zeros(nrows,ncols,'single');
-    D_local = zeros(nrows,ncols,'single');
-    
-    D_local(lat_index,lon_index) = SG;
-    sum_above_local(lat_index,lon_index) = SG/A/vcd_unc*vcd;
-    sum_below_local(lat_index,lon_index) = SG/A/vcd_unc;
-    Sum_Above = Sum_Above + sum_above_local;
-    Sum_Below = Sum_Below + sum_below_local;
-    D = D+D_local;
-    
+    Sum_Above(lat_index,lon_index) = Sum_Above(lat_index,lon_index) + SG/A/vcd_unc*vcd;
+    Sum_Below(lat_index,lon_index) = Sum_Below(lat_index,lon_index) + SG/A/vcd_unc;
+    D(lat_index,lon_index) = D(lat_index,lon_index)+SG;
+%     toc
     if iL2 == count*round(nL2/10)
         disp([num2str(count*10),' % finished'])
         count = count+1;
@@ -276,12 +277,14 @@ fixedPoints = [-FWHMx,-FWHMy;
     -FWHMx, FWHMy;
     FWHMx, FWHMy;
     FWHMx, -FWHMy]/2;
-
+% tic
 tform = fitgeotrans(fixedPoints,vList,'projective');
-
+% toc
+% tic
 xym1 = [lon_mesh(:)-lon_c-lon_offset, lat_mesh(:)-lat_c-lat_offset];
 xym2 = transformPointsInverse(tform,xym1);
-
+% toc
+% tic
 FWHMy = FWHMy*inflatey;
 FWHMx = FWHMx*inflatex;
 
@@ -289,4 +292,7 @@ wx = FWHMx/2/(log(2))^(1/m);
 wy = FWHMy/2/(log(2))^(1/n);
 
 SG = exp(-(abs(xym2(:,1))/wx).^m-(abs(xym2(:,2))/wy).^n);
+% toc
+% tic
 SG = reshape(SG(:),size(lon_mesh,1),size(lon_mesh,2));
+% toc
