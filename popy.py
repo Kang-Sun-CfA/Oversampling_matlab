@@ -410,6 +410,9 @@ class popy(object):
         self.C = C 
         self.mean_sample_weight = mean_sample_weight
         self.num_samples = num_samples
+    
+    def F_plot_oversampled_vcd(self):
+        fig = plt.figure(1)
 
 
 #### testing real data
@@ -425,33 +428,33 @@ class popy(object):
 #plt.contour(omi_popy.xgrid,omi_popy.ygrid,omi_popy.C['vcd'])
 
 ### testing IASI-like pixles
-iasi_popy = popy(sensor_name="IASI",grid_size=1,west=-180,east=180,south=-30,north=30)
-iasi_popy.k1 = 2
-iasi_popy.k2 = 2
-iasi_popy.k3 = 1
-l2g_data = {'lonc':np.float32([-175,105]),'latc':np.float32([0,10]),
-            'u':np.float32([5,10]),'v':np.float32([0.9,1.8]),'t':np.float32([1.36,1.1]),
-            'vcd':np.float32([0.5,1]),'vcde':np.float32([0.25,.5]),
-            'albedo':np.float32([0.5,0.2]),'cloud_fraction':np.float32([0.,0.]),
-            'UTC_matlab_datenum':np.float32([737456,737457])}
-
-iasi_popy.F_regrid(l2g_data)
-
-
-plt.contour(iasi_popy.xgrid,iasi_popy.ygrid,iasi_popy.num_samples)
-
-
-### testing longitude -180/180 discontinuity, omi-like pixels
-omi_popy = popy(sensor_name="OMI",grid_size=1,west=-180,east=180,south=-30,north=30)
-l2g_data = {'lonc':np.float32([-175,105]),'latc':np.float32([0,10]),
-            'lonr':np.float32([[175, 170, -165, -160],[90, 95, 120, 115]]),
-            'latr':np.float32([[-5, 5, 5, -5],[5, 15, 15, 5]]),
-            'vcd':np.float32([0.5,1]),'vcde':np.float32([0.25,.5]),
-            'albedo':np.float32([0.5,0.2]),'cloud_fraction':np.float32([0.,0.]),
-            'UTC_matlab_datenum':np.float32([737456,737457])}
-
-omi_popy.F_regrid(l2g_data)
-plt.contour(omi_popy.xgrid,omi_popy.ygrid,omi_popy.num_samples)
+#iasi_popy = popy(sensor_name="IASI",grid_size=1,west=-180,east=180,south=-30,north=30)
+#iasi_popy.k1 = 2
+#iasi_popy.k2 = 2
+#iasi_popy.k3 = 1
+#l2g_data = {'lonc':np.float32([-175,105]),'latc':np.float32([0,10]),
+#            'u':np.float32([5,10]),'v':np.float32([0.9,1.8]),'t':np.float32([1.36,1.1]),
+#            'vcd':np.float32([0.5,1]),'vcde':np.float32([0.25,.5]),
+#            'albedo':np.float32([0.5,0.2]),'cloud_fraction':np.float32([0.,0.]),
+#            'UTC_matlab_datenum':np.float32([737456,737457])}
+#
+#iasi_popy.F_regrid(l2g_data)
+#
+#
+#plt.contour(iasi_popy.xgrid,iasi_popy.ygrid,iasi_popy.num_samples)
+#
+#
+#### testing longitude -180/180 discontinuity, omi-like pixels
+#omi_popy = popy(sensor_name="OMI",grid_size=1,west=-180,east=180,south=-30,north=30)
+#l2g_data = {'lonc':np.float32([-175,105]),'latc':np.float32([0,10]),
+#            'lonr':np.float32([[175, 170, -165, -160],[90, 95, 120, 115]]),
+#            'latr':np.float32([[-5, 5, 5, -5],[5, 15, 15, 5]]),
+#            'vcd':np.float32([0.5,1]),'vcde':np.float32([0.25,.5]),
+#            'albedo':np.float32([0.5,0.2]),'cloud_fraction':np.float32([0.,0.]),
+#            'UTC_matlab_datenum':np.float32([737456,737457])}
+#
+#omi_popy.F_regrid(l2g_data)
+#plt.contour(omi_popy.xgrid,omi_popy.ygrid,omi_popy.num_samples)
 #import matplotlib.pyplot as plt
 #plt.contour(omi_popy.xgrid,omi_popy.ygrid,num_samples)
 #plt.colorbar
