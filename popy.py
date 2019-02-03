@@ -411,8 +411,8 @@ class popy(object):
         self.mean_sample_weight = mean_sample_weight
         self.num_samples = num_samples
     
-    def F_plot_oversampled_vcd(self):
-        fig = plt.figure(1)
+    def F_plot_oversampled_variable(self,plot_variable,save_fig_path=''):
+        plt.pcolor(self.xgrid,self.ygrid,self.C[plot_variable])
 
 
 #### testing real data
