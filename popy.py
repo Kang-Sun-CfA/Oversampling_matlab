@@ -3,6 +3,8 @@
 Created on Sat Jan 26 15:50:30 2019
 
 @author: Kang Sun
+
+updated on 2019/03/09 to match measures l3 format
 """
 
 import numpy as np
@@ -15,46 +17,97 @@ import matplotlib.pyplot as plt
 
 class popy(object):
     
-    def __init__(self,sensor_name,\
+    def __init__(self,instrum,product,\
                  grid_size=0.1,west=-180,east=180,south=-90,north=90,\
                  start_year=1995,start_month=1,start_day=1,\
                  start_hour=0,start_minute=0,start_second=0,\
                  end_year=2025,end_month=12,end_day=31,\
                  end_hour=0,end_minute=0,end_second=0):
         
-        self.sensor_name = sensor_name
+        self.instrum = instrum
+        self.product = product
         
-        if(sensor_name == "OMI"):
+        if(instrum == "OMI"):
             k1 = 4
             k2 = 2
             k3 = 1
             error_model = "linear"
-            oversampling_list = ['vcd','albedo','cloud_fraction','cloud_height']
-        elif(sensor_name == "IASI"):
-            k1 = 2
+            oversampling_list = ['column_amount','black_sky_albedo','white_sky_albedo',\
+                                 'amf','cloud_fraction','cloud_pressure','terrain_height']
+            xmargin = 1.5
+            ymargin = 2
+        elif(instrum == "GOME-1"):
+            k1 = 4
             k2 = 2
-            k3 = 9
-            error_model = "square"
-            oversampling_list = ['vcd']
-        elif(sensor_name == "CrIS"):
-            k1 = 2
+            k3 = 1
+            error_model = "linear"
+            oversampling_list = ['column_amount','black_sky_albedo','white_sky_albedo',\
+                                 'amf','cloud_fraction','cloud_pressure','terrain_height']
+            xmargin = 1.5
+            ymargin = 1.5
+        elif(instrum == "SCIAMACHY"):
+            k1 = 4
             k2 = 2
-            k3 = 4
-            error_model = "log"
-            oversampling_list = ['vcd']
-        elif(sensor_name == "OMPS"):
+            k3 = 1
+            error_model = "linear"
+            oversampling_list = ['column_amount','black_sky_albedo','white_sky_albedo',\
+                                 'amf','cloud_fraction','cloud_pressure','terrain_height']
+            xmargin = 1.5
+            ymargin = 1.5
+        elif(instrum == "GOME-2A"):
+            k1 = 4
+            k2 = 2
+            k3 = 1
+            error_model = "linear"
+            oversampling_list = ['column_amount','black_sky_albedo','white_sky_albedo',\
+                                 'amf','cloud_fraction','cloud_pressure','terrain_height']
+            xmargin = 1.5
+            ymargin = 1.5
+        elif(instrum == "GOME-2B"):
+            k1 = 4
+            k2 = 2
+            k3 = 1
+            error_model = "linear"
+            oversampling_list = ['column_amount','black_sky_albedo','white_sky_albedo',\
+                                 'amf','cloud_fraction','cloud_pressure','terrain_height']
+            xmargin = 1.5
+            ymargin = 1.5
+        elif(instrum == "OMPS-NM"):
             k1 = 6
             k2 = 2
             k3 = 3
             error_model = "linear"
-            oversampling_list = ['vcd','albedo','cloud_fraction','cloud_height']
+            oversampling_list = ['column_amount','black_sky_albedo','white_sky_albedo',\
+                                 'amf','cloud_fraction','cloud_pressure','terrain_height']
+            xmargin = 1.5
+            ymargin = 1.5
+        elif(instrum == "IASI"):
+            k1 = 2
+            k2 = 2
+            k3 = 9
+            error_model = "square"
+            oversampling_list = ['column_amount']
+            xmargin = 2
+            ymargin = 2
+        elif(instrum == "CrIS"):
+            k1 = 2
+            k2 = 2
+            k3 = 4
+            error_model = "log"
+            oversampling_list = ['column_amount']
+            xmargin = 2
+            ymargin = 2
         else:
             k1 = 2
             k2 = 2
             k3 = 1
             error_model = "linear"
-            oversampling_list = ['vcd']
+            oversampling_list = ['column_amount']
+            xmargin = 2
+            ymargin = 2
         
+        self.xmargin = xmargin
+        self.ymargin = ymargin
         self.k1 = k1
         self.k2 = k2
         self.k3 = k3
@@ -96,6 +149,9 @@ class popy(object):
         
         self.start_python_datetime = start_python_datetime
         self.end_python_datetime = end_python_datetime
+        # python iso string is stupid, why no Z?
+        self.tstart = start_python_datetime.strftime('%Y-%m-%d %H:%M:%SZ')
+        self.tend = end_python_datetime.strftime('%Y-%m-%d %H:%M:%SZ')
         # most of my data are saved in matlab format, where time is defined as UTC days since 0000, Jan 0
         start_matlab_datenum = (start_python_datetime.toordinal()\
                                 +start_python_datetime.hour/24.\
@@ -130,9 +186,9 @@ class popy(object):
             elif key_name == 'latr':
                 l2g_data['latr'] = mat_data['output_subset']['latr'][0][0]
             elif key_name in {'colnh3','colno2','colhcho','colchocho'}:
-                l2g_data['vcd'] = mat_data['output_subset'][key_name][0][0].flatten()
+                l2g_data['column_amount'] = mat_data['output_subset'][key_name][0][0].flatten()
             elif key_name in {'colnh3error','colno2error','colhchoerror','colchochoerror'}:
-                l2g_data['vcde'] = mat_data['output_subset'][key_name][0][0].flatten()
+                l2g_data['column_uncertainty'] = mat_data['output_subset'][key_name][0][0].flatten()
             elif key_name in {'ift','ifov'}:
                 l2g_data['across_track_position'] = mat_data['output_subset'][key_name][0][0].flatten()
             elif key_name == 'cloudfrac':
@@ -287,8 +343,8 @@ class popy(object):
             print('%d pixels to be regridded...' %nl2)
         
         #construct a rectangle envelopes the orginal pixel
-        xmargin = 3  #how many times to extend zonally
-        ymargin = 2 #how many times to extend meridonally
+        xmargin = self.xmargin  #how many times to extend zonally
+        ymargin = self.ymargin #how many times to extend meridonally
         
         mean_sample_weight = np.zeros((nrows,ncols))
         num_samples = np.zeros((nrows,ncols))
@@ -297,7 +353,7 @@ class popy(object):
         count = 0
         for il2 in range(nl2):
             local_l2g_data = {k:v[il2,] for (k,v) in l2g_data.items()}
-            if self.sensor_name in {"OMI","OMPS","GOME","GOME2","SCIAMACHY"}:
+            if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B","SCIAMACHY"}:
                 latc = local_l2g_data['latc']
                 lonc = local_l2g_data['lonc']
                 latr = local_l2g_data['latr']
@@ -375,11 +431,11 @@ class popy(object):
             num_samples[np.ix_(lat_index,lon_index)]+SG
             
             if error_model == "square":
-                uncertainty_weight = local_l2g_data['vcde']**2
+                uncertainty_weight = local_l2g_data['column_uncertainty']**2
             elif error_model == "log":
-                uncertainty_weight = np.log10(local_l2g_data['vcde'])
+                uncertainty_weight = np.log10(local_l2g_data['column_uncertainty'])
             else:
-                uncertainty_weight = local_l2g_data['vcde']
+                uncertainty_weight = local_l2g_data['column_uncertainty']
             
             mean_sample_weight[np.ix_(lat_index,lon_index)] =\
             mean_sample_weight[np.ix_(lat_index,lon_index)]+\
@@ -388,7 +444,7 @@ class popy(object):
             for ivar in range(nvar_oversampling):
                 local_var = local_l2g_data[oversampling_list[ivar]]
                 if error_model == 'log':
-                    if oversampling_list[ivar] == 'vcd':
+                    if oversampling_list[ivar] == 'column_amount':
                         local_var = np.log10(local_var)
                 tmp_var = SG/area_weight/uncertainty_weight*local_var
                 tmp_var = tmp_var[:,:,np.newaxis]
