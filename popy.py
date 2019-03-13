@@ -32,10 +32,12 @@ class popy(object):
             k2 = 2
             k3 = 1
             error_model = "linear"
-            oversampling_list = ['column_amount','black_sky_albedo','white_sky_albedo',\
+            oversampling_list = ['column_amount','albedo','black_sky_albedo','white_sky_albedo',\
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
             xmargin = 1.5
             ymargin = 2
+            maxsza = 60
+            maxcf = 0.3
         elif(instrum == "GOME-1"):
             k1 = 4
             k2 = 2
@@ -45,6 +47,8 @@ class popy(object):
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
             xmargin = 1.5
             ymargin = 1.5
+            maxsza = 60
+            maxcf = 0.3
         elif(instrum == "SCIAMACHY"):
             k1 = 4
             k2 = 2
@@ -54,6 +58,8 @@ class popy(object):
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
             xmargin = 1.5
             ymargin = 1.5
+            maxsza = 60
+            maxcf = 0.3
         elif(instrum == "GOME-2A"):
             k1 = 4
             k2 = 2
@@ -63,6 +69,8 @@ class popy(object):
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
             xmargin = 1.5
             ymargin = 1.5
+            maxsza = 60
+            maxcf = 0.3
         elif(instrum == "GOME-2B"):
             k1 = 4
             k2 = 2
@@ -72,6 +80,8 @@ class popy(object):
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
             xmargin = 1.5
             ymargin = 1.5
+            maxsza = 60
+            maxcf = 0.3
         elif(instrum == "OMPS-NM"):
             k1 = 6
             k2 = 2
@@ -81,6 +91,8 @@ class popy(object):
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
             xmargin = 1.5
             ymargin = 1.5
+            maxsza = 60
+            maxcf = 0.3
         elif(instrum == "IASI"):
             k1 = 2
             k2 = 2
@@ -89,6 +101,8 @@ class popy(object):
             oversampling_list = ['column_amount']
             xmargin = 2
             ymargin = 2
+            maxsza = 60
+            maxcf = 0.25
         elif(instrum == "CrIS"):
             k1 = 2
             k2 = 2
@@ -97,6 +111,8 @@ class popy(object):
             oversampling_list = ['column_amount']
             xmargin = 2
             ymargin = 2
+            maxsza = 60
+            maxcf = 0.25
         else:
             k1 = 2
             k2 = 2
@@ -105,9 +121,13 @@ class popy(object):
             oversampling_list = ['column_amount']
             xmargin = 2
             ymargin = 2
+            maxsza = 60
+            maxcf = 0.3
         
         self.xmargin = xmargin
         self.ymargin = ymargin
+        self.maxsza = maxsza
+        self.maxcf = maxcf
         self.k1 = k1
         self.k2 = k2
         self.k3 = k3
@@ -122,8 +142,8 @@ class popy(object):
         self.south = south
         self.north = north
         
-        xgrid = np.arange(west,east,grid_size,dtype=np.float32)+grid_size/2
-        ygrid = np.arange(south,north,grid_size,dtype=np.float32)+grid_size/2
+        xgrid = np.arange(west,east,grid_size,dtype=np.float64)+grid_size/2
+        ygrid = np.arange(south,north,grid_size,dtype=np.float64)+grid_size/2
         [xmesh,ymesh] = np.meshgrid(xgrid,ygrid)
         
         xgridr = np.hstack((np.arange(west,east,grid_size),east))
@@ -150,8 +170,8 @@ class popy(object):
         self.start_python_datetime = start_python_datetime
         self.end_python_datetime = end_python_datetime
         # python iso string is stupid, why no Z?
-        self.tstart = start_python_datetime.strftime('%Y-%m-%d %H:%M:%SZ')
-        self.tend = end_python_datetime.strftime('%Y-%m-%d %H:%M:%SZ')
+        self.tstart = start_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+        self.tend = end_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
         # most of my data are saved in matlab format, where time is defined as UTC days since 0000, Jan 0
         start_matlab_datenum = (start_python_datetime.toordinal()\
                                 +start_python_datetime.hour/24.\
@@ -233,8 +253,129 @@ class popy(object):
             print('%d pixels fall in the spatiotemporal window...' %nl2)
         
         del mat_data    
-        return l2g_data
+        self.l2g_data = l2g_data
+        self.nl2 = nl2
     
+    def F_merge_l2g_data(self,l2g_data0,l2g_data1):
+        if not l2g_data0:
+            return l2g_data1
+        common_keys = set(l2g_data0).intersection(set(l2g_data1))
+        for key in common_keys:
+            l2g_data0[key] = np.concatenate((l2g_data0[key],l2g_data1[key]),0)
+        return l2g_data0
+    
+    def F_read_he5(self,fn,swathname,data_fields,geo_fields,data_fields_l2g=[],geo_fields_l2g=[]):
+        import h5py
+        outp_he5 = {}
+        if not data_fields_l2g:
+            data_fields_l2g = data_fields
+        if not geo_fields_l2g:
+            geo_fields_l2g = geo_fields
+        with h5py.File(fn,mode='r') as f:
+            for i in range(len(data_fields)):
+                DATAFIELD_NAME = '/HDFEOS/SWATHS/'+swathname+'/Data Fields/'+data_fields[i]
+                data = f[DATAFIELD_NAME]
+                data = data[:]
+                #scale = f[DATAFIELD_NAME].attrs['ScaleFactor']
+                #offset = f[DATAFIELD_NAME].attrs['Offset']
+                #data = scale * (data - offset)
+                missing_value = f[DATAFIELD_NAME].attrs['MissingValue']
+                fill_value = f[DATAFIELD_NAME].attrs['_FillValue']
+                # how damn it to check if data is integer?!! this piece does not seem to work
+                if data_fields[i] in {'ColumnAmountDestriped','ColumnUncertainty'}:
+                    data[data == missing_value] = np.nan
+                    data[data == fill_value] = np.nan
+                outp_he5[data_fields_l2g[i]] = data
+                    
+            for i in range(len(geo_fields)):
+                DATAFIELD_NAME = '/HDFEOS/SWATHS/'+swathname+'/Geolocation Fields/'+geo_fields[i]
+                data = f[DATAFIELD_NAME]
+                data = data[:]
+                #scale = f[DATAFIELD_NAME].attrs['ScaleFactor']
+                #offset = f[DATAFIELD_NAME].attrs['Offset']
+                #data = scale * (data - offset)
+                #print(data.dtype)
+                outp_he5[geo_fields_l2g[i]] = data
+                #print(outp_he5[DATAFIELD_NAME].dtype)
+            TimeUTC = outp_he5['TimeUTC'].astype(np.int)
+            # python datetime is idiot!!!
+            UTC_matlab_datenum = np.zeros((TimeUTC.shape[0],1),dtype=np.float64)
+            for i in range(TimeUTC.shape[0]):
+                tmp = datetime.datetime(year=TimeUTC[i,0],month=TimeUTC[i,1],day=TimeUTC[i,2],\
+                                        hour=TimeUTC[i,3],minute=TimeUTC[i,4],second=TimeUTC[i,5])
+                UTC_matlab_datenum[i] = (tmp.toordinal()\
+                                  +tmp.hour/24.\
+                                  +tmp.minute/1440.\
+                                  +tmp.second/86400.+366.)
+                outp_he5['UTC_matlab_datenum'] = np.tile(UTC_matlab_datenum,(1,outp_he5['latc'].shape[1]))
+                outp_he5['across_track_position'] = np.tile(np.arange\
+                        (1.,outp_he5['latc'].shape[1]+1),\
+                        (outp_he5['latc'].shape[0],1)).astype(np.int16)
+        return outp_he5
+
+    def F_subset_OMCHOCHO(self,l2_dir):
+       import glob
+       data_fields = ['AMFCloudFraction','AMFCloudPressure','AirMassFactor','Albedo',\
+                      'ColumnAmountDestriped','ColumnUncertainty','MainDataQualityFlag',\
+                      'PixelCornerLatitudes','PixelCornerLongitudes']
+       data_fields_l2g = ['cloud_fraction','cloud_pressure','amf','albedo',\
+                          'column_amount','column_uncertainty','MainDataQualityFlag',\
+                          'PixelCornerLatitudes','PixelCornerLongitudes']
+       geo_fields = ['Latitude','Longitude','TimeUTC','SolarZenithAngle','TerrainHeight']
+       geo_fields_l2g = ['latc','lonc','TimeUTC','SolarZenithAngle','terrain_height']
+       swathname = 'OMI Total Column Amount CHOCHO'
+       maxsza = self.maxsza
+       maxcf = self.maxcf
+       west = self.west
+       east = self.east
+       south = self.south
+       north = self.north
+       start_date = self.start_python_datetime.date()
+       end_date = self.end_python_datetime.date()
+       days = (end_date-start_date).days+1
+       DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+       l2g_data = {}
+       for DATE in DATES:
+           date_dir = l2_dir+DATE.strftime("%Y/%m/%d/")
+           flist = glob.glob(date_dir+'*.he5')
+           for fn in flist:
+               if self.show_progress:
+                   print('Loading '+fn)
+               outp_he5 = self.F_read_he5(fn,swathname,data_fields,geo_fields,data_fields_l2g,geo_fields_l2g)
+               f1 = outp_he5['SolarZenithAngle'] <= maxsza
+               f2 = outp_he5['cloud_fraction'] <= maxcf
+               f3 = outp_he5['MainDataQualityFlag'] == 0              
+               f4 = outp_he5['latc'] >= south
+               f5 = outp_he5['latc'] <= north
+               tmplon = outp_he5['lonc']-west
+               tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+               f6 = tmplon >= 0
+               f7 = tmplon <= east-west
+               f8 = outp_he5['UTC_matlab_datenum'] >= self.start_matlab_datenum
+               f9 = outp_he5['UTC_matlab_datenum'] <= self.end_matlab_datenum
+               validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+               if self.show_progress:
+                   print('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+               l2g_data0 = {}
+               # python vs. matlab orders are messed up. holly shit
+               Lat_lowerleft = outp_he5['PixelCornerLatitudes'][0:-1,0:-1][validmask]
+               Lat_upperleft = outp_he5['PixelCornerLatitudes'][1:,0:-1][validmask]
+               Lat_lowerright = outp_he5['PixelCornerLatitudes'][0:-1,1:][validmask]
+               Lat_upperright = outp_he5['PixelCornerLatitudes'][1:,1:][validmask]               
+               Lon_lowerleft = outp_he5['PixelCornerLongitudes'][0:-1,0:-1][validmask]
+               Lon_upperleft = outp_he5['PixelCornerLongitudes'][1:,0:-1][validmask]
+               Lon_lowerright = outp_he5['PixelCornerLongitudes'][0:-1,1:][validmask]
+               Lon_upperright = outp_he5['PixelCornerLongitudes'][1:,1:][validmask]
+               l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
+               l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+               for key in outp_he5.keys():
+                   if key not in {'MainDataQualityFlag','PixelCornerLatitudes','PixelCornerLongitudes','TimeUTC'}:
+                       l2g_data0[key] = outp_he5[key][validmask]
+               l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+       self.l2g_data = l2g_data
+       nl2 = len(l2g_data['latc'])
+       self.nl2 = nl2
+                  
     def F_generalized_SG(self,x,y,fwhmx,fwhmy):
         k1 = self.k1
         k2 = self.k2
@@ -284,7 +425,7 @@ class popy(object):
         minlat_e = X[1,].min()
         return X, minlon_e, minlat_e
     
-    def F_regrid(self,l2g_data):
+    def F_regrid(self,do_standard_error=False):
         
         def F_reference2west(west,data):
             if data.size > 1:
@@ -314,6 +455,7 @@ class popy(object):
         ymesh = self.ymesh
         grid_size = self.grid_size
         oversampling_list = self.oversampling_list[:]
+        l2g_data = self.l2g_data
         for key in self.oversampling_list:
             if key not in l2g_data.keys():
                 oversampling_list.remove(key)
@@ -324,7 +466,7 @@ class popy(object):
         
         start_matlab_datenum = self.start_matlab_datenum
         end_matlab_datenum = self.end_matlab_datenum
-        
+                
         max_ncol = np.round(360/grid_size)
         
         tmplon = l2g_data['lonc']-west
@@ -333,11 +475,16 @@ class popy(object):
         validmask = (tmplon >= 0) & (tmplon <= east-west) &\
         (l2g_data['latc'] >= south) & (l2g_data['latc'] <= north) &\
         (l2g_data['UTC_matlab_datenum'] >= start_matlab_datenum) &\
-        (l2g_data['UTC_matlab_datenum'] <= end_matlab_datenum)
+        (l2g_data['UTC_matlab_datenum'] <= end_matlab_datenum) &\
+        (l2g_data['column_amount'] > -1e25)
+        #(not np.isnan(l2g_data['column_amount'])) &\
+        #(not np.isnan(l2g_data['column_uncertainty']))
         
         nl20 = len(l2g_data['latc'])
         l2g_data = {k:v[validmask,] for (k,v) in l2g_data.items()}
         nl2 = len(l2g_data['latc'])
+        self.nl2 = nl2
+        self.l2g_data = l2g_data
         if self.show_progress:
             print('%d pixels in the L2g data' %nl20)
             print('%d pixels to be regridded...' %nl2)
@@ -346,7 +493,7 @@ class popy(object):
         xmargin = self.xmargin  #how many times to extend zonally
         ymargin = self.ymargin #how many times to extend meridonally
         
-        mean_sample_weight = np.zeros((nrows,ncols))
+        total_sample_weight = np.zeros((nrows,ncols))
         num_samples = np.zeros((nrows,ncols))
         sum_aboves = np.zeros((nrows,ncols,nvar_oversampling))
         
@@ -380,7 +527,7 @@ class popy(object):
                 south_extent = north_extent
                 
                 lat_index = np.arange(latc_index-south_extent,latc_index+north_extent+1,dtype = int)
-                lat_index = lat_index[(lat_index > 0) & (lat_index < nrows)]
+                lat_index = lat_index[(lat_index >= 0) & (lat_index < nrows)]
                 #xmesh[lat_index,:][:,lon_index]
                 patch_xmesh = F_reference2west(patch_west,xmesh[np.ix_(lat_index,lon_index)])
                 patch_ymesh = ymesh[np.ix_(lat_index,lon_index)]
@@ -391,7 +538,7 @@ class popy(object):
                 
                 SG = self.F_2D_SG_transform(patch_xmesh,patch_ymesh,patch_lonr,latr,
                                             patch_lonc,latc)
-            elif self.sensor_name in {"IASI","CrIS"}:
+            elif self.instrum in {"IASI","CrIS"}:
                 latc = local_l2g_data['latc']
                 lonc = local_l2g_data['lonc']
                 u = local_l2g_data['u']
@@ -416,7 +563,7 @@ class popy(object):
                 south_extent = north_extent
                 
                 lat_index = np.arange(latc_index-south_extent,latc_index+north_extent+1,dtype = int)
-                lat_index = lat_index[(lat_index > 0) & (lat_index < nrows)]
+                lat_index = lat_index[(lat_index >= 0) & (lat_index < nrows)]
                 
                 patch_xmesh = F_reference2west(patch_west,xmesh[np.ix_(lat_index,lon_index)])
                 patch_ymesh = ymesh[np.ix_(lat_index,lon_index)]
@@ -437,8 +584,8 @@ class popy(object):
             else:
                 uncertainty_weight = local_l2g_data['column_uncertainty']
             
-            mean_sample_weight[np.ix_(lat_index,lon_index)] =\
-            mean_sample_weight[np.ix_(lat_index,lon_index)]+\
+            total_sample_weight[np.ix_(lat_index,lon_index)] =\
+            total_sample_weight[np.ix_(lat_index,lon_index)]+\
             SG/area_weight/uncertainty_weight
             
             for ivar in range(nvar_oversampling):
@@ -462,13 +609,145 @@ class popy(object):
         np.seterr(divide='ignore', invalid='ignore')
         for ikey in range(len(oversampling_list)):
             C[oversampling_list[ikey]] = sum_aboves[:,:,ikey].squeeze()\
-            /mean_sample_weight
+            /total_sample_weight
         self.C = C 
-        self.mean_sample_weight = mean_sample_weight
+        self.total_sample_weight = total_sample_weight
         self.num_samples = num_samples
+        if not do_standard_error:
+            return
+        
+        if self.show_progress:
+            print('OK, do standard error for weighted mean, looping through l2g_data, again...')
+        
+        #P_bar = self.total_sample_weight/nl2
+        X_bar = self.C['column_amount']
+        sum_above_SE = np.zeros((nrows,ncols))
+        count = 0
+        for il2 in range(nl2):
+            local_l2g_data = {k:v[il2,] for (k,v) in l2g_data.items()}
+            if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B","SCIAMACHY"}:
+                latc = local_l2g_data['latc']
+                lonc = local_l2g_data['lonc']
+                latr = local_l2g_data['latr']
+                lonr = local_l2g_data['lonr']
+                
+                lonc_index = np.argmin(np.abs(xgrid-lonc))
+                latc_index = np.argmin(np.abs(ygrid-latc))
+                
+                west_extent = np.round(
+                        np.max([F_lon_distance(lonr[0],lonc),F_lon_distance(lonr[1],lonc)])
+                        /grid_size*xmargin)
+                east_extent = np.round(
+                        np.max([F_lon_distance(lonc,lonr[2]),F_lon_distance(lonc,lonr[3])])
+                        /grid_size*xmargin)
+                
+                lon_index = np.arange(lonc_index-west_extent,lonc_index+east_extent+1,dtype = int)
+                lon_index[lon_index < 0] = lon_index[lon_index < 0]+max_ncol
+                lon_index[lon_index >= max_ncol] = lon_index[lon_index >= max_ncol]-max_ncol
+                lon_index = lon_index[lon_index < ncols]
+                
+                patch_west = xgrid[lon_index[0]]
+                
+                north_extent = np.ceil((latr.max()-latr.min())/2/grid_size*ymargin)
+                south_extent = north_extent
+                
+                lat_index = np.arange(latc_index-south_extent,latc_index+north_extent+1,dtype = int)
+                lat_index = lat_index[(lat_index >= 0) & (lat_index < nrows)]
+                #xmesh[lat_index,:][:,lon_index]
+                patch_xmesh = F_reference2west(patch_west,xmesh[np.ix_(lat_index,lon_index)])
+                patch_ymesh = ymesh[np.ix_(lat_index,lon_index)]
+                patch_lonr = F_reference2west(patch_west,lonr)
+                patch_lonc = F_reference2west(patch_west,lonc)
+                # this is not exactly accurate, may try sum(SG[:])
+                area_weight = Polygon(np.column_stack([patch_lonr[:],latr[:]])).area
+                
+                SG = self.F_2D_SG_transform(patch_xmesh,patch_ymesh,patch_lonr,latr,
+                                            patch_lonc,latc)
+            elif self.instrum in {"IASI","CrIS"}:
+                latc = local_l2g_data['latc']
+                lonc = local_l2g_data['lonc']
+                u = local_l2g_data['u']
+                v = local_l2g_data['v']
+                t = local_l2g_data['t']
+                
+                lonc_index = np.argmin(np.abs(xgrid-lonc))
+                latc_index = np.argmin(np.abs(ygrid-latc))
+                
+                X, minlon_e, minlat_e = self.F_construct_ellipse(v,u,t,10)
+                west_extent = np.round(np.abs(minlon_e)/grid_size*xmargin)
+                east_extent = west_extent
+                
+                lon_index = np.arange(lonc_index-west_extent,lonc_index+east_extent+1,dtype = int)
+                lon_index[lon_index < 0] = lon_index[lon_index < 0]+max_ncol
+                lon_index[lon_index >= max_ncol] = lon_index[lon_index >= max_ncol]-max_ncol
+                lon_index = lon_index[lon_index < ncols]
+                
+                patch_west = xgrid[lon_index[0]]
+                
+                north_extent = np.ceil(np.abs(minlat_e)/grid_size*xmargin)
+                south_extent = north_extent
+                
+                lat_index = np.arange(latc_index-south_extent,latc_index+north_extent+1,dtype = int)
+                lat_index = lat_index[(lat_index >= 0) & (lat_index < nrows)]
+                
+                patch_xmesh = F_reference2west(patch_west,xmesh[np.ix_(lat_index,lon_index)])
+                patch_ymesh = ymesh[np.ix_(lat_index,lon_index)]
+                patch_lonc = F_reference2west(patch_west,lonc)
+                
+                area_weight = u*v
+                
+                SG = self.F_2D_SG_rotate(patch_xmesh,patch_ymesh,patch_lonc,latc,\
+                                         2*v,2*u,-t)
+            if error_model == "square":
+                uncertainty_weight = local_l2g_data['column_uncertainty']**2
+            elif error_model == "log":
+                uncertainty_weight = np.log10(local_l2g_data['column_uncertainty'])
+            else:
+                uncertainty_weight = local_l2g_data['column_uncertainty']
+            
+            # Cochran 1977 method, in https://doi.org/10.1016/1352-2310(94)00210-C, simplified by K. Sun
+            P_i = SG/area_weight/uncertainty_weight
+            local_var = local_l2g_data['column_amount']
+            if error_model == 'log':
+                local_var = np.log10(local_var)
+            local_X_bar = X_bar[np.ix_(lat_index,lon_index)]
+            #local_P_bar = P_bar[np.ix_(lat_index,lon_index)]
+            #tmp_var = (P_i*local_X_bar-local_P_bar*local_X_bar)**2\
+            #-2*local_X_bar*(P_i-local_P_bar)*(P_i*local_var-local_P_bar*local_X_bar)\
+            #+local_X_bar**2*(P_i-local_P_bar)**2
+            tmp_var = (P_i*(local_var-local_X_bar))**2
+            sum_above_SE[np.ix_(lat_index,lon_index)] =\
+            sum_above_SE[np.ix_(lat_index,lon_index)]+tmp_var
+            
+            if self.show_progress:
+                if il2 == count*np.round(nl2/10.):
+                    print('%d%% finished' %(count*10))
+                    count = count + 1
+        
+        variance_of_weighted_mean\
+        = sum_above_SE/(self.total_sample_weight**2)
+        
+        # the following should be more accurate but I don't like it, as it makes trouble when merging. Plus in general nl2/(nl2-1) ~ 1
+        if nl2 > 1:
+            variance_of_weighted_mean\
+            = variance_of_weighted_mean*nl2/(nl2-1)
+        
+        self.standard_error_of_weighted_mean = np.sqrt(variance_of_weighted_mean)
+    
+    def F_unload_l2g_data(self):
+        if hasattr(self,'l2g_data'):
+            print('l2g_data is not there!')
+        else:
+            print('Unloading l2g_data from the popy object...')
+            del self.l2g_data
+            if hasattr(self,'nl2'):
+                del self.nl2
     
     def F_plot_oversampled_variable(self,plot_variable,save_fig_path=''):
-        plt.pcolor(self.xgrid,self.ygrid,self.C[plot_variable])
+        if plot_variable == 'standard_error_of_weighted_mean':
+            plt.pcolor(self.xgrid,self.ygrid,self.standard_error_of_weighted_mean)
+        else:
+            plt.pcolor(self.xgrid,self.ygrid,self.C[plot_variable])
 
 
 #### testing real data
