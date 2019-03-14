@@ -38,6 +38,8 @@ class popy(object):
             ymargin = 2
             maxsza = 60
             maxcf = 0.3
+            if product == 'H2O':
+                maxcf = 0.15
         elif(instrum == "GOME-1"):
             k1 = 4
             k2 = 2
@@ -317,10 +319,10 @@ class popy(object):
        import glob
        data_fields = ['AMFCloudFraction','AMFCloudPressure','AirMassFactor','Albedo',\
                       'ColumnAmountDestriped','ColumnUncertainty','MainDataQualityFlag',\
-                      'PixelCornerLatitudes','PixelCornerLongitudes']
+                      'PixelCornerLatitudes','PixelCornerLongitudes','FittingRMS']
        data_fields_l2g = ['cloud_fraction','cloud_pressure','amf','albedo',\
                           'column_amount','column_uncertainty','MainDataQualityFlag',\
-                          'PixelCornerLatitudes','PixelCornerLongitudes']
+                          'PixelCornerLatitudes','PixelCornerLongitudes','FittingRMS']
        geo_fields = ['Latitude','Longitude','TimeUTC','SolarZenithAngle','TerrainHeight']
        geo_fields_l2g = ['latc','lonc','TimeUTC','SolarZenithAngle','terrain_height']
        swathname = 'OMI Total Column Amount H2O'
@@ -353,7 +355,9 @@ class popy(object):
                f7 = tmplon <= east-west
                f8 = outp_he5['UTC_matlab_datenum'] >= self.start_matlab_datenum
                f9 = outp_he5['UTC_matlab_datenum'] <= self.end_matlab_datenum
-               validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+               f10 = outp_he5['FittingRMS'] < 0.005
+               f11 = outp_he5['cloud_pressure'] > 750.
+               validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9 & f10 & f11
                if self.show_progress:
                    print('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
                l2g_data0 = {}
