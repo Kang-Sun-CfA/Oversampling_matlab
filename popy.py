@@ -279,12 +279,12 @@ class popy(object):
                 #scale = f[DATAFIELD_NAME].attrs['ScaleFactor']
                 #offset = f[DATAFIELD_NAME].attrs['Offset']
                 #data = scale * (data - offset)
-                missing_value = f[DATAFIELD_NAME].attrs['MissingValue']
-                fill_value = f[DATAFIELD_NAME].attrs['_FillValue']
-                # how damn it to check if data is integer?!! this piece does not seem to work
-                if data_fields[i] in {'ColumnAmountDestriped','ColumnUncertainty'}:
-                    data[data == missing_value] = np.nan
-                    data[data == fill_value] = np.nan
+                #missing_value = f[DATAFIELD_NAME].attrs['MissingValue']
+                #fill_value = f[DATAFIELD_NAME].attrs['_FillValue']
+                ## how damn it to check if data is integer?!! this piece does not seem to work
+                #if data_fields[i] in {'ColumnAmountDestriped','ColumnUncertainty'}:
+                #    data[data == missing_value] = np.nan
+                #    data[data == fill_value] = np.nan
                 outp_he5[data_fields_l2g[i]] = data
                     
             for i in range(len(geo_fields)):
@@ -312,7 +312,72 @@ class popy(object):
                         (1.,outp_he5['latc'].shape[1]+1),\
                         (outp_he5['latc'].shape[0],1)).astype(np.int16)
         return outp_he5
-
+    
+    def F_subset_OMH2O(self,l2_dir):
+       import glob
+       data_fields = ['AMFCloudFraction','AMFCloudPressure','AirMassFactor','Albedo',\
+                      'ColumnAmountDestriped','ColumnUncertainty','MainDataQualityFlag',\
+                      'PixelCornerLatitudes','PixelCornerLongitudes']
+       data_fields_l2g = ['cloud_fraction','cloud_pressure','amf','albedo',\
+                          'column_amount','column_uncertainty','MainDataQualityFlag',\
+                          'PixelCornerLatitudes','PixelCornerLongitudes']
+       geo_fields = ['Latitude','Longitude','TimeUTC','SolarZenithAngle','TerrainHeight']
+       geo_fields_l2g = ['latc','lonc','TimeUTC','SolarZenithAngle','terrain_height']
+       swathname = 'OMI Total Column Amount H2O'
+       maxsza = self.maxsza
+       maxcf = self.maxcf
+       west = self.west
+       east = self.east
+       south = self.south
+       north = self.north
+       start_date = self.start_python_datetime.date()
+       end_date = self.end_python_datetime.date()
+       days = (end_date-start_date).days+1
+       DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+       l2g_data = {}
+       for DATE in DATES:
+           date_dir = l2_dir+DATE.strftime("%Y/")
+           flist = glob.glob(date_dir+'OMI-Aura_L2_OMH2O_'+DATE.strftime("%Ym%m%d")+'*.he5')
+           for fn in flist:
+               if self.show_progress:
+                   print('Loading '+fn)
+               outp_he5 = self.F_read_he5(fn,swathname,data_fields,geo_fields,data_fields_l2g,geo_fields_l2g)
+               f1 = outp_he5['SolarZenithAngle'] <= maxsza
+               f2 = outp_he5['cloud_fraction'] <= maxcf
+               f3 = outp_he5['MainDataQualityFlag'] == 0              
+               f4 = outp_he5['latc'] >= south
+               f5 = outp_he5['latc'] <= north
+               tmplon = outp_he5['lonc']-west
+               tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+               f6 = tmplon >= 0
+               f7 = tmplon <= east-west
+               f8 = outp_he5['UTC_matlab_datenum'] >= self.start_matlab_datenum
+               f9 = outp_he5['UTC_matlab_datenum'] <= self.end_matlab_datenum
+               validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+               if self.show_progress:
+                   print('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+               l2g_data0 = {}
+               # python vs. matlab orders are messed up.
+               Lat_lowerleft = outp_he5['PixelCornerLatitudes'][0:-1,0:-1][validmask]
+               Lat_upperleft = outp_he5['PixelCornerLatitudes'][1:,0:-1][validmask]
+               Lat_lowerright = outp_he5['PixelCornerLatitudes'][0:-1,1:][validmask]
+               Lat_upperright = outp_he5['PixelCornerLatitudes'][1:,1:][validmask]               
+               Lon_lowerleft = outp_he5['PixelCornerLongitudes'][0:-1,0:-1][validmask]
+               Lon_upperleft = outp_he5['PixelCornerLongitudes'][1:,0:-1][validmask]
+               Lon_lowerright = outp_he5['PixelCornerLongitudes'][0:-1,1:][validmask]
+               Lon_upperright = outp_he5['PixelCornerLongitudes'][1:,1:][validmask]
+               l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
+               l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+               for key in outp_he5.keys():
+                   if key not in {'MainDataQualityFlag','PixelCornerLatitudes','PixelCornerLongitudes','TimeUTC'}:
+                       l2g_data0[key] = outp_he5[key][validmask]
+               l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+       self.l2g_data = l2g_data
+       if not l2g_data:
+           self.nl2 = 0
+       else:
+           self.nl2 = len(l2g_data['latc'])
+    
     def F_subset_OMCHOCHO(self,l2_dir):
        import glob
        data_fields = ['AMFCloudFraction','AMFCloudPressure','AirMassFactor','Albedo',\
@@ -357,7 +422,7 @@ class popy(object):
                if self.show_progress:
                    print('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
                l2g_data0 = {}
-               # python vs. matlab orders are messed up. holly shit
+               # python vs. matlab orders are messed up. 
                Lat_lowerleft = outp_he5['PixelCornerLatitudes'][0:-1,0:-1][validmask]
                Lat_upperleft = outp_he5['PixelCornerLatitudes'][1:,0:-1][validmask]
                Lat_lowerright = outp_he5['PixelCornerLatitudes'][0:-1,1:][validmask]
@@ -373,9 +438,11 @@ class popy(object):
                        l2g_data0[key] = outp_he5[key][validmask]
                l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
        self.l2g_data = l2g_data
-       nl2 = len(l2g_data['latc'])
-       self.nl2 = nl2
-                  
+       if not l2g_data:
+           self.nl2 = 0
+       else:
+           self.nl2 = len(l2g_data['latc'])
+    
     def F_generalized_SG(self,x,y,fwhmx,fwhmy):
         k1 = self.k1
         k2 = self.k2
