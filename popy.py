@@ -932,6 +932,8 @@ class popy(object):
         import matplotlib.pyplot as plt
         # conda install -c anaconda basemap
         from mpl_toolkits.basemap import Basemap
+        # otherwise won't work at ssh
+        plt.switch_backend('agg')
         fig1 = plt.gcf()
         # Draw an equidistant cylindrical projection using the low resolution
         # coastline database.
