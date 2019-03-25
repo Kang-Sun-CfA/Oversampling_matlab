@@ -5,6 +5,8 @@ Created on Sat Jan 26 15:50:30 2019
 @author: Kang Sun
 
 updated on 2019/03/09 to match measures l3 format
+
+updated on 2019/03/25 to use control.txt
 """
 
 import numpy as np
@@ -13,7 +15,7 @@ import cv2
 # conda install -c scitools/label/archive shapely
 from shapely.geometry import Polygon
 import datetime
-import matplotlib.pyplot as plt
+import os
 
 class popy(object):
     
@@ -315,72 +317,184 @@ class popy(object):
                         (outp_he5['latc'].shape[0],1)).astype(np.int16)
         return outp_he5
     
+    def F_subset_OMHCHO_control(self,control_path):
+        if os.path.isfile(control_path):
+            import yaml
+            if self.show_progress:
+                print('Loading control.txt file')
+            with open(control_path,'r') as stream:
+                control = yaml.load(stream)
+        else:
+            print('This function only accept control.txt. L2 directory does not work.')
+            return
+        l2_list = control['Input Files']['OMHCHO']
+        l2_dir = control['Runtime Parameters']['Lv2Dir']
+        
+        data_fields = ['AMFCloudFraction','AMFCloudPressure','AirMassFactor','Albedo',\
+                       'ReferenceSectorCorrectedVerticalColumn','ColumnUncertainty','MainDataQualityFlag',\
+                       'PixelCornerLatitudes','PixelCornerLongitudes','FittingRMS']
+        data_fields_l2g = ['cloud_fraction','cloud_pressure','amf','albedo',\
+                           'column_amount','column_uncertainty','MainDataQualityFlag',\
+                           'PixelCornerLatitudes','PixelCornerLongitudes','FittingRMS']
+        geo_fields = ['Latitude','Longitude','TimeUTC','SolarZenithAngle','TerrainHeight']
+        geo_fields_l2g = ['latc','lonc','TimeUTC','SolarZenithAngle','terrain_height']
+        swathname = 'OMI Total Column Amount HCHO'
+        maxsza = float(control['Runtime Parameters']['maxSZA'])
+        maxcf = float(control['Runtime Parameters']['maxCfr'])
+        west = float(control['Runtime Parameters']['minLon'])
+        east = float(control['Runtime Parameters']['maxLon'])
+        south = float(control['Runtime Parameters']['minLat'])
+        north = float(control['Runtime Parameters']['maxLat'])
+        self.maxsza = maxsza
+        self.maxcf = maxcf
+        self.west = west
+        self.east = east
+        self.south = south
+        self.north = north
+        start_python_datetime = datetime.datetime.strptime(
+                control['Runtime Parameters']['StartTime'],'%Y-%m-%dT%H:%M:%Sz')
+        end_python_datetime = datetime.datetime.strptime(
+                control['Runtime Parameters']['EndTime'],'%Y-%m-%dT%H:%M:%Sz')
+        self.start_python_datetime = start_python_datetime
+        self.end_python_datetime = end_python_datetime
+        
+        self.tstart = start_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+        self.tend = end_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+        # most of my data are saved in matlab format, where time is defined as UTC days since 0000, Jan 0
+        start_matlab_datenum = (start_python_datetime.toordinal()\
+                                +start_python_datetime.hour/24.\
+                                +start_python_datetime.minute/1440.\
+                                +start_python_datetime.second/86400.+366.)
+        
+        end_matlab_datenum = (end_python_datetime.toordinal()\
+                                +end_python_datetime.hour/24.\
+                                +end_python_datetime.minute/1440.\
+                                +end_python_datetime.second/86400.+366.)
+        self.start_matlab_datenum = start_matlab_datenum
+        self.end_matlab_datenum = end_matlab_datenum
+        
+        self.grid_size = float(control['Runtime Parameters']['res'])
+        
+        if self.show_progress:
+            print('The following parameters from control.txt will overwrite intital popy values:')
+            print('maxsza = '+'%s'%maxsza)
+            print('maxcf  = '+'%s'%maxcf)
+            print('west   = '+'%s'%west)
+            print('east   = '+'%s'%east)
+            print('south  = '+'%s'%south)
+            print('north  = '+'%s'%north)
+            print('tstart = '+self.tstart)
+            print('tend   = '+self.tend)
+            print('res    = '+'%s'%self.grid_size)
+        
+        l2g_data = {}
+        for fn in l2_list:
+            fn_dir = l2_dir+fn
+            if self.show_progress:
+                print('Loading'+fn_dir)
+            outp_he5 = self.F_read_he5(fn_dir,swathname,data_fields,geo_fields,data_fields_l2g,geo_fields_l2g)
+            f1 = outp_he5['SolarZenithAngle'] <= maxsza
+            f2 = outp_he5['cloud_fraction'] <= maxcf
+            f3 = outp_he5['MainDataQualityFlag'] == 0              
+            f4 = outp_he5['latc'] >= south
+            f5 = outp_he5['latc'] <= north
+            tmplon = outp_he5['lonc']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp_he5['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp_he5['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+            if self.show_progress:
+                print('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            l2g_data0 = {}
+            
+            Lat_lowerleft = outp_he5['PixelCornerLatitudes'][0:-1,0:-1][validmask]
+            Lat_upperleft = outp_he5['PixelCornerLatitudes'][1:,0:-1][validmask]
+            Lat_lowerright = outp_he5['PixelCornerLatitudes'][0:-1,1:][validmask]
+            Lat_upperright = outp_he5['PixelCornerLatitudes'][1:,1:][validmask]               
+            Lon_lowerleft = outp_he5['PixelCornerLongitudes'][0:-1,0:-1][validmask]
+            Lon_upperleft = outp_he5['PixelCornerLongitudes'][1:,0:-1][validmask]
+            Lon_lowerright = outp_he5['PixelCornerLongitudes'][0:-1,1:][validmask]
+            Lon_upperright = outp_he5['PixelCornerLongitudes'][1:,1:][validmask]
+            l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
+            l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+            for key in outp_he5.keys():
+                if key not in {'MainDataQualityFlag','PixelCornerLatitudes','PixelCornerLongitudes','TimeUTC'}:
+                    l2g_data0[key] = outp_he5[key][validmask]
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
+        
     def F_subset_OMH2O(self,l2_dir):
-       import glob
-       data_fields = ['AMFCloudFraction','AMFCloudPressure','AirMassFactor','Albedo',\
-                      'ColumnAmountDestriped','ColumnUncertainty','MainDataQualityFlag',\
-                      'PixelCornerLatitudes','PixelCornerLongitudes','FittingRMS']
-       data_fields_l2g = ['cloud_fraction','cloud_pressure','amf','albedo',\
-                          'column_amount','column_uncertainty','MainDataQualityFlag',\
-                          'PixelCornerLatitudes','PixelCornerLongitudes','FittingRMS']
-       geo_fields = ['Latitude','Longitude','TimeUTC','SolarZenithAngle','TerrainHeight']
-       geo_fields_l2g = ['latc','lonc','TimeUTC','SolarZenithAngle','terrain_height']
-       swathname = 'OMI Total Column Amount H2O'
-       maxsza = self.maxsza
-       maxcf = self.maxcf
-       west = self.west
-       east = self.east
-       south = self.south
-       north = self.north
-       start_date = self.start_python_datetime.date()
-       end_date = self.end_python_datetime.date()
-       days = (end_date-start_date).days+1
-       DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
-       l2g_data = {}
-       for DATE in DATES:
-           date_dir = l2_dir+DATE.strftime("%Y/")
-           flist = glob.glob(date_dir+'OMI-Aura_L2_OMH2O_'+DATE.strftime("%Ym%m%d")+'*.he5')
-           for fn in flist:
-               if self.show_progress:
-                   print('Loading '+fn)
-               outp_he5 = self.F_read_he5(fn,swathname,data_fields,geo_fields,data_fields_l2g,geo_fields_l2g)
-               f1 = outp_he5['SolarZenithAngle'] <= maxsza
-               f2 = outp_he5['cloud_fraction'] <= maxcf
-               f3 = outp_he5['MainDataQualityFlag'] == 0              
-               f4 = outp_he5['latc'] >= south
-               f5 = outp_he5['latc'] <= north
-               tmplon = outp_he5['lonc']-west
-               tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
-               f6 = tmplon >= 0
-               f7 = tmplon <= east-west
-               f8 = outp_he5['UTC_matlab_datenum'] >= self.start_matlab_datenum
-               f9 = outp_he5['UTC_matlab_datenum'] <= self.end_matlab_datenum
-               f10 = outp_he5['FittingRMS'] < 0.005
-               f11 = outp_he5['cloud_pressure'] > 750.
-               validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9 & f10 & f11
-               if self.show_progress:
-                   print('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
-               l2g_data0 = {}
-               # python vs. matlab orders are messed up.
-               Lat_lowerleft = outp_he5['PixelCornerLatitudes'][0:-1,0:-1][validmask]
-               Lat_upperleft = outp_he5['PixelCornerLatitudes'][1:,0:-1][validmask]
-               Lat_lowerright = outp_he5['PixelCornerLatitudes'][0:-1,1:][validmask]
-               Lat_upperright = outp_he5['PixelCornerLatitudes'][1:,1:][validmask]               
-               Lon_lowerleft = outp_he5['PixelCornerLongitudes'][0:-1,0:-1][validmask]
-               Lon_upperleft = outp_he5['PixelCornerLongitudes'][1:,0:-1][validmask]
-               Lon_lowerright = outp_he5['PixelCornerLongitudes'][0:-1,1:][validmask]
-               Lon_upperright = outp_he5['PixelCornerLongitudes'][1:,1:][validmask]
-               l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
-               l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
-               for key in outp_he5.keys():
-                   if key not in {'MainDataQualityFlag','PixelCornerLatitudes','PixelCornerLongitudes','TimeUTC'}:
-                       l2g_data0[key] = outp_he5[key][validmask]
-               l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
-       self.l2g_data = l2g_data
-       if not l2g_data:
-           self.nl2 = 0
-       else:
-           self.nl2 = len(l2g_data['latc'])
+        import glob
+        data_fields = ['AMFCloudFraction','AMFCloudPressure','AirMassFactor','Albedo',\
+                       'ColumnAmountDestriped','ColumnUncertainty','MainDataQualityFlag',\
+                       'PixelCornerLatitudes','PixelCornerLongitudes','FittingRMS']
+        data_fields_l2g = ['cloud_fraction','cloud_pressure','amf','albedo',\
+                           'column_amount','column_uncertainty','MainDataQualityFlag',\
+                           'PixelCornerLatitudes','PixelCornerLongitudes','FittingRMS']
+        geo_fields = ['Latitude','Longitude','TimeUTC','SolarZenithAngle','TerrainHeight']
+        geo_fields_l2g = ['latc','lonc','TimeUTC','SolarZenithAngle','terrain_height']
+        swathname = 'OMI Total Column Amount H2O'
+        maxsza = self.maxsza
+        maxcf = self.maxcf
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        start_date = self.start_python_datetime.date()
+        end_date = self.end_python_datetime.date()
+        days = (end_date-start_date).days+1
+        DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+        l2g_data = {}
+        for DATE in DATES:
+            date_dir = l2_dir+DATE.strftime("%Y/")
+            flist = glob.glob(date_dir+'OMI-Aura_L2_OMH2O_'+DATE.strftime("%Ym%m%d")+'*.he5')
+            for fn in flist:
+                if self.show_progress:
+                    print('Loading '+fn)
+                outp_he5 = self.F_read_he5(fn,swathname,data_fields,geo_fields,data_fields_l2g,geo_fields_l2g)
+                f1 = outp_he5['SolarZenithAngle'] <= maxsza
+                f2 = outp_he5['cloud_fraction'] <= maxcf
+                f3 = outp_he5['MainDataQualityFlag'] == 0              
+                f4 = outp_he5['latc'] >= south
+                f5 = outp_he5['latc'] <= north
+                tmplon = outp_he5['lonc']-west
+                tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+                f6 = tmplon >= 0
+                f7 = tmplon <= east-west
+                f8 = outp_he5['UTC_matlab_datenum'] >= self.start_matlab_datenum
+                f9 = outp_he5['UTC_matlab_datenum'] <= self.end_matlab_datenum
+                f10 = outp_he5['FittingRMS'] < 0.005
+                f11 = outp_he5['cloud_pressure'] > 750.
+                validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9 & f10 & f11
+                if self.show_progress:
+                    print('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+                l2g_data0 = {}
+                # python vs. matlab orders are messed up.
+                Lat_lowerleft = outp_he5['PixelCornerLatitudes'][0:-1,0:-1][validmask]
+                Lat_upperleft = outp_he5['PixelCornerLatitudes'][1:,0:-1][validmask]
+                Lat_lowerright = outp_he5['PixelCornerLatitudes'][0:-1,1:][validmask]
+                Lat_upperright = outp_he5['PixelCornerLatitudes'][1:,1:][validmask]               
+                Lon_lowerleft = outp_he5['PixelCornerLongitudes'][0:-1,0:-1][validmask]
+                Lon_upperleft = outp_he5['PixelCornerLongitudes'][1:,0:-1][validmask]
+                Lon_lowerright = outp_he5['PixelCornerLongitudes'][0:-1,1:][validmask]
+                Lon_upperright = outp_he5['PixelCornerLongitudes'][1:,1:][validmask]
+                l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
+                l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+                for key in outp_he5.keys():
+                    if key not in {'MainDataQualityFlag','PixelCornerLatitudes','PixelCornerLongitudes','TimeUTC'}:
+                        l2g_data0[key] = outp_he5[key][validmask]
+                l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
     
     def F_subset_OMCHOCHO(self,l2_dir):
        import glob
@@ -815,10 +929,30 @@ class popy(object):
                 del self.nl2
     
     def F_plot_oversampled_variable(self,plot_variable,save_fig_path=''):
+        import matplotlib.pyplot as plt
+        # conda install -c anaconda basemap
+        from mpl_toolkits.basemap import Basemap
+        fig1 = plt.gcf()
+        # Draw an equidistant cylindrical projection using the low resolution
+        # coastline database.
+        m = Basemap(projection='cyl', resolution='l',
+                    llcrnrlat=self.south, urcrnrlat = self.north,
+                    llcrnrlon=self.west, urcrnrlon = self.east)
+        m.drawcoastlines(linewidth=0.5)
+        m.drawparallels(np.arange(-90., 120., 30.), labels=[1, 0, 0, 0])
+        m.drawmeridians(np.arange(-180, 180., 45.), labels=[0, 0, 0, 1])
         if plot_variable == 'standard_error_of_weighted_mean':
-            plt.pcolor(self.xgrid,self.ygrid,self.standard_error_of_weighted_mean)
+            data = self.standard_error_of_weighted_mean
         else:
-            plt.pcolor(self.xgrid,self.ygrid,self.C[plot_variable])
+            data = self.C[plot_variable]
+        m.pcolormesh(self.xgrid,self.ygrid,data,latlon=True,cmap='jet')
+        cb = m.colorbar()
+        cb.set_label(r'molc cm$^{-2}$')
+        plt.title(self.tstart+'-'+self.tend,fontsize=8)
+        if save_fig_path:
+            fig1.savefig(save_fig_path,dpi=200)
+        plt.close()
+            
 
 
 #### testing real data
