@@ -928,7 +928,8 @@ class popy(object):
             if hasattr(self,'nl2'):
                 del self.nl2
     
-    def F_plot_oversampled_variable(self,plot_variable,save_fig_path=''):
+    def F_plot_oversampled_variable(self,plot_variable,save_fig_path='',\
+                                    vmin=np.nan,vmax=np.nan,dpi=200):
         import matplotlib.pyplot as plt
         # conda install -c anaconda basemap
         from mpl_toolkits.basemap import Basemap
@@ -948,11 +949,17 @@ class popy(object):
         else:
             data = self.C[plot_variable]
         m.pcolormesh(self.xgrid,self.ygrid,data,latlon=True,cmap='jet')
+        vmin0,vmax0 = plt.gci().get_clim()
+        if np.isnan(vmin):
+            vmin = vmin0
+        if np.isnan(vmax):
+            vmax = vmax0
+        plt.clim(vmin,vmax)
         cb = m.colorbar()
         cb.set_label(r'molc cm$^{-2}$')
         plt.title(self.tstart+'-'+self.tend,fontsize=8)
         if save_fig_path:
-            fig1.savefig(save_fig_path,dpi=200)
+            fig1.savefig(save_fig_path,dpi=dpi)
         plt.close()
             
 
