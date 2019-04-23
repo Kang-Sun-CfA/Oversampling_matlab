@@ -280,7 +280,8 @@ class popy(object):
         return l2g_data0
     
     def F_read_S5P_nc(self,fn,data_fields,data_fields_l2g=[]):
-        """ function to read tropomi's level netcdf file to a dictionary
+        """ 
+        function to read tropomi's level 2 netcdf file to a dictionary
         fn: file name
         data_fields: a list of string containing absolution path of variables to extract
         data_fields_l2g: what do you want to call the variables in the output
@@ -554,7 +555,8 @@ class popy(object):
             self.nl2 = len(l2g_data['latc'])
     
     def F_subset_S5PNO2(self,path):
-        """ function to subset tropomi no2 level data, calling self.F_read_S5P_nc
+        """ 
+        function to subset tropomi no2 level data, calling self.F_read_S5P_nc
         path: directory containing S5PNO2 level files, OR path to control.txt
         updated on 2019/04/22
         """
@@ -776,13 +778,24 @@ class popy(object):
        else:
            self.nl2 = len(l2g_data['latc'])
     
-    def F_save_l2g_to_mat(self,file_path):
-        """ save l2g dictionary to .mat file
+    def F_save_l2g_to_mat(self,file_path,data_fields=[],data_fields_l2g=[]):
+        """ 
+        save l2g dictionary to .mat file
         file_path: absolute path to the .mat file to save
+        data_fields and data_fields_l2g: two one-on-one lists of variable names;
+        field in data_fields will be saved as field in data_fields_l2g
         updated on 2019/04/22
         """
         import scipy.io
-        l2g_data = self.l2g_data
+        l2g_data = self.l2g_data.copy()
+        for i in range(len(data_fields)):
+            if data_fields[i] in l2g_data.keys():
+                l2g_data[data_fields_l2g[i]] = l2g_data.pop(data_fields[i])
+        # trying to reshape 1d arrays to (nl2, 1), but did not work
+#        for key in l2g_data.keys():
+#            if key not in {'latr','lonr'}:
+#                l2g_data[key] = np.reshape(l2g_data[key],(len(l2g_data[key]),1))
+        scipy.io.savemat(file_path,{'output_subset':l2g_data})
         
         
     def F_generalized_SG(self,x,y,fwhmx,fwhmy):
