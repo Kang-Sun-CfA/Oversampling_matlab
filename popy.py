@@ -4,9 +4,9 @@ Created on Sat Jan 26 15:50:30 2019
 
 @author: Kang Sun
 
-updated on 2019/03/09 to match measures l3 format
-
-updated on 2019/03/25 to use control.txt
+2019/03/09: match measures l3 format
+2019/03/25: use control.txt
+2019/04/22: include S5PNO2
 """
 
 import numpy as np
@@ -34,7 +34,7 @@ class popy(object):
             k2 = 2
             k3 = 1
             error_model = "linear"
-            oversampling_list = ['column_amount','albedo','black_sky_albedo','white_sky_albedo',\
+            oversampling_list = ['column_amount','albedo',\
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
             xmargin = 1.5
             ymargin = 2
@@ -47,7 +47,7 @@ class popy(object):
             k2 = 2
             k3 = 1
             error_model = "linear"
-            oversampling_list = ['column_amount','black_sky_albedo','white_sky_albedo',\
+            oversampling_list = ['column_amount','albedo',\
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
             xmargin = 1.5
             ymargin = 1.5
@@ -58,7 +58,7 @@ class popy(object):
             k2 = 2
             k3 = 1
             error_model = "linear"
-            oversampling_list = ['column_amount','black_sky_albedo','white_sky_albedo',\
+            oversampling_list = ['column_amount','albedo',\
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
             xmargin = 1.5
             ymargin = 1.5
@@ -69,7 +69,7 @@ class popy(object):
             k2 = 2
             k3 = 1
             error_model = "linear"
-            oversampling_list = ['column_amount','black_sky_albedo','white_sky_albedo',\
+            oversampling_list = ['column_amount','albedo',\
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
             xmargin = 1.5
             ymargin = 1.5
@@ -80,7 +80,7 @@ class popy(object):
             k2 = 2
             k3 = 1
             error_model = "linear"
-            oversampling_list = ['column_amount','black_sky_albedo','white_sky_albedo',\
+            oversampling_list = ['column_amount','albedo',\
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
             xmargin = 1.5
             ymargin = 1.5
@@ -91,8 +91,19 @@ class popy(object):
             k2 = 2
             k3 = 3
             error_model = "linear"
-            oversampling_list = ['column_amount','black_sky_albedo','white_sky_albedo',\
+            oversampling_list = ['column_amount','albedo',\
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
+            xmargin = 1.5
+            ymargin = 1.5
+            maxsza = 60
+            maxcf = 0.3
+        elif(instrum == "TROPOMI"):
+            k1 = 4
+            k2 = 2
+            k3 = 1
+            error_model = "linear"
+            oversampling_list = ['column_amount','albedo',\
+                                 'cloud_fraction']
             xmargin = 1.5
             ymargin = 1.5
             maxsza = 60
@@ -268,6 +279,49 @@ class popy(object):
             l2g_data0[key] = np.concatenate((l2g_data0[key],l2g_data1[key]),0)
         return l2g_data0
     
+    def F_read_S5P_nc(self,fn,data_fields,data_fields_l2g=[]):
+        """ function to read tropomi's level netcdf file to a dictionary
+        fn: file name
+        data_fields: a list of string containing absolution path of variables to extract
+        data_fields_l2g: what do you want to call the variables in the output
+        updated on 2019/04/22
+        """
+        from netCDF4 import Dataset
+        ncid = Dataset(fn,'r')
+        outp = {}
+        for i in range(len(data_fields)):
+            tmp = ncid[data_fields[i]]
+            tmpdtype = tmp.dtype
+            if not data_fields_l2g:
+                varname = tmp.name
+            else:
+                varname = data_fields_l2g[i]
+            if tmpdtype is "str":
+                outp[varname] = tmp[:]
+            else:
+                outp[varname] = np.squeeze(tmp[:])
+                ## scale factor already applied?! so confusing
+#                try:
+#                    outp[varname] = outp[varname]*tmp.scale_factor
+#                    if tmp.scale_factor != 1:
+#                        print(varname+' has a scale_factor of '+'%s'%tmp.scale_factor)
+#                except Exception:
+#                    #print(e)
+#                    print(varname+' has no scale_factor!')
+        
+        UTC_matlab_datenum = np.zeros((len(outp['time_utc']),1),dtype=np.float64)
+        for i in range(len(outp['time_utc'])):
+            tmp = datetime.datetime.strptime(outp['time_utc'][i],'%Y-%m-%dT%H:%M:%S.%fZ')
+            UTC_matlab_datenum[i] = (tmp.toordinal()\
+                                  +tmp.hour/24.\
+                                  +tmp.minute/1440.\
+                                  +tmp.second/86400.\
+                                  +tmp.microsecond/86400/1000000+366.)
+        outp['UTC_matlab_datenum'] = np.tile(UTC_matlab_datenum,(1,outp['latc'].shape[1]))
+        outp['across_track_position'] = np.tile(np.arange(1.,outp['latc'].shape[1]+1),\
+            (outp['latc'].shape[0],1)).astype(np.int16)
+        return outp
+        
     def F_read_he5(self,fn,swathname,data_fields,geo_fields,data_fields_l2g=[],geo_fields_l2g=[]):
         import h5py
         outp_he5 = {}
@@ -311,12 +365,82 @@ class popy(object):
                                   +tmp.hour/24.\
                                   +tmp.minute/1440.\
                                   +tmp.second/86400.+366.)
-                outp_he5['UTC_matlab_datenum'] = np.tile(UTC_matlab_datenum,(1,outp_he5['latc'].shape[1]))
-                outp_he5['across_track_position'] = np.tile(np.arange\
-                        (1.,outp_he5['latc'].shape[1]+1),\
-                        (outp_he5['latc'].shape[0],1)).astype(np.int16)
+            outp_he5['UTC_matlab_datenum'] = np.tile(UTC_matlab_datenum,(1,outp_he5['latc'].shape[1]))
+            outp_he5['across_track_position'] = np.tile(np.arange\
+                    (1.,outp_he5['latc'].shape[1]+1),\
+                    (outp_he5['latc'].shape[0],1)).astype(np.int16)
         return outp_he5
     
+    def F_update_popy_with_control_file(self,control_path):
+        """ function to update self with parameters found in control.txt
+        control_path: absolution path to control.txt
+        updated on 2019/04/22
+        """
+        import yaml
+        with open(control_path,'r') as stream:
+            control = yaml.load(stream)
+        l2_list = control['Input Files']['OMHCHO']
+        l2_dir = control['Runtime Parameters']['Lv2Dir']
+        
+        maxsza = float(control['Runtime Parameters']['maxSZA'])
+        maxcf = float(control['Runtime Parameters']['maxCfr'])
+        west = float(control['Runtime Parameters']['minLon'])
+        east = float(control['Runtime Parameters']['maxLon'])
+        south = float(control['Runtime Parameters']['minLat'])
+        north = float(control['Runtime Parameters']['maxLat'])
+        grid_size = float(control['Runtime Parameters']['res'])
+        maxMDQF= int(control['Runtime Parameters']['maxMDQF'])
+        maxEXTQF= int(control['Runtime Parameters']['maxEXTQF'])
+        self.maxsza = maxsza
+        self.maxcf = maxcf
+        self.west = west
+        self.east = east
+        self.south = south
+        self.north = north
+        self.grid_size = grid_size
+        xgrid = np.arange(west,east,grid_size,dtype=np.float64)+grid_size/2
+        ygrid = np.arange(south,north,grid_size,dtype=np.float64)+grid_size/2
+        [xmesh,ymesh] = np.meshgrid(xgrid,ygrid)
+
+        xgridr = np.hstack((np.arange(west,east,grid_size),east))
+        ygridr = np.hstack((np.arange(south,north,grid_size),north))
+        [xmeshr,ymeshr] = np.meshgrid(xgridr,ygridr)
+
+        self.xgrid = xgrid
+        self.ygrid = ygrid
+        self.xmesh = xmesh
+        self.ymesh = ymesh
+        self.xgridr = xgridr
+        self.ygridr = ygridr
+        self.xmeshr = xmeshr
+        self.ymeshr = ymeshr
+        self.nrows = len(ygrid)
+        self.ncols = len(xgrid)
+        
+        start_python_datetime = datetime.datetime.strptime(
+                control['Runtime Parameters']['StartTime'],'%Y-%m-%dT%H:%M:%Sz')
+        end_python_datetime = datetime.datetime.strptime(
+                control['Runtime Parameters']['EndTime'],'%Y-%m-%dT%H:%M:%Sz')
+        self.start_python_datetime = start_python_datetime
+        self.end_python_datetime = end_python_datetime
+        
+        self.tstart = start_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+        self.tend = end_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+        # most of my data are saved in matlab format, where time is defined as UTC days since 0000, Jan 0
+        start_matlab_datenum = (start_python_datetime.toordinal()\
+                                +start_python_datetime.hour/24.\
+                                +start_python_datetime.minute/1440.\
+                                +start_python_datetime.second/86400.+366.)
+        
+        end_matlab_datenum = (end_python_datetime.toordinal()\
+                                +end_python_datetime.hour/24.\
+                                +end_python_datetime.minute/1440.\
+                                +end_python_datetime.second/86400.+366.)
+        self.start_matlab_datenum = start_matlab_datenum
+        self.end_matlab_datenum = end_matlab_datenum
+        self.l2_list = l2_list
+        self.l2_dir = l2_dir
+            
     def F_subset_OMHCHO_control(self,control_path):
         if os.path.isfile(control_path):
             import yaml
@@ -428,7 +552,98 @@ class popy(object):
             self.nl2 = 0
         else:
             self.nl2 = len(l2g_data['latc'])
-        
+    
+    def F_subset_S5PNO2(self,path):
+        """ function to subset tropomi no2 level data, calling self.F_read_S5P_nc
+        path: directory containing S5PNO2 level files, OR path to control.txt
+        updated on 2019/04/22
+        """
+        maxsza = self.maxsza
+        maxcf = self.maxcf
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        start_date = self.start_python_datetime.date()
+        end_date = self.end_python_datetime.date()
+        days = (end_date-start_date).days+1
+        DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+        # find out list of l2 files to subset
+        if os.path.isfile(path):
+            self.F_update_popy_with_control_file(path)
+            l2_list = self.l2_list
+            l2_dir = self.l2_dir
+        else:
+            import glob
+            l2_dir = path
+            l2_list = []
+            cwd = os.getcwd()
+            os.chdir(l2_dir)
+            for DATE in DATES:
+                flist = glob.glob('S5P_OFFL_L2__NO2____'+DATE.strftime("%Y%m%d")+'T*.nc')
+                l2_list = l2_list+flist
+            os.chdir(cwd)
+            self.l2_dir = l2_dir
+            self.l2_list = l2_list
+        # absolute path of useful variables in the nc file
+        data_fields = ['/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/cloud_fraction_crb_nitrogendioxide_window',\
+               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds',\
+               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds',\
+               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/solar_zenith_angle',\
+               '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_albedo_nitrogendioxide_window',\
+               '/PRODUCT/latitude',\
+               '/PRODUCT/longitude',\
+               '/PRODUCT/qa_value',\
+               '/PRODUCT/time_utc',\
+               '/PRODUCT/nitrogendioxide_tropospheric_column',\
+               '/PRODUCT/nitrogendioxide_tropospheric_column_precision']    
+        # standardized variable names in l2g file. should map one-on-one to data_fields
+        data_fields_l2g = ['cloud_fraction','latitude_bounds','longitude_bounds','SolarZenithAngle',\
+                           'albedo','latc','lonc','qa_value','time_utc',\
+                           'column_amount','column_uncertainty']
+        l2g_data = {}
+        for fn in l2_list:
+            fn_dir = l2_dir+fn
+            if self.show_progress:
+                print('Loading'+fn_dir)
+            outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
+            f1 = outp_nc['SolarZenithAngle'] <= maxsza
+            f2 = outp_nc['cloud_fraction'] <= maxcf
+            # ridiculously, qa_value has a scale_factor of 0.01. so error-prone
+            f3 = outp_nc['qa_value'] >= 0.5              
+            f4 = outp_nc['latc'] >= south
+            f5 = outp_nc['latc'] <= north
+            tmplon = outp_nc['lonc']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp_nc['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp_nc['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+            if self.show_progress:
+                print('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            l2g_data0 = {}
+            # yep it's indeed messed up
+            Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][:,:,0])[validmask]
+            Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][:,:,3])[validmask]
+            Lat_lowerright = np.squeeze(outp_nc['latitude_bounds'][:,:,1])[validmask]
+            Lat_upperright = np.squeeze(outp_nc['latitude_bounds'][:,:,2])[validmask]
+            Lon_lowerleft = np.squeeze(outp_nc['longitude_bounds'][:,:,0])[validmask]
+            Lon_upperleft = np.squeeze(outp_nc['longitude_bounds'][:,:,3])[validmask]
+            Lon_lowerright = np.squeeze(outp_nc['longitude_bounds'][:,:,1])[validmask]
+            Lon_upperright = np.squeeze(outp_nc['longitude_bounds'][:,:,2])[validmask]
+            l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
+            l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+            for key in outp_nc.keys():
+                if key not in {'latitude_bounds','longitude_bounds','time_utc'}:
+                    l2g_data0[key] = outp_nc[key][validmask]
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
+            
     def F_subset_OMH2O(self,l2_dir):
         import glob
         data_fields = ['AMFCloudFraction','AMFCloudPressure','AirMassFactor','Albedo',\
@@ -561,6 +776,15 @@ class popy(object):
        else:
            self.nl2 = len(l2g_data['latc'])
     
+    def F_save_l2g_to_mat(self,file_path):
+        """ save l2g dictionary to .mat file
+        file_path: absolute path to the .mat file to save
+        updated on 2019/04/22
+        """
+        import scipy.io
+        l2g_data = self.l2g_data
+        
+        
     def F_generalized_SG(self,x,y,fwhmx,fwhmy):
         k1 = self.k1
         k2 = self.k2
@@ -685,7 +909,7 @@ class popy(object):
         count = 0
         for il2 in range(nl2):
             local_l2g_data = {k:v[il2,] for (k,v) in l2g_data.items()}
-            if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B","SCIAMACHY"}:
+            if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B","SCIAMACHY","TROPOMI"}:
                 latc = local_l2g_data['latc']
                 lonc = local_l2g_data['lonc']
                 latr = local_l2g_data['latr']
