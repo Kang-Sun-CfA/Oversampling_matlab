@@ -26,12 +26,14 @@ class popy(object):
                  start_hour=0,start_minute=0,start_second=0,\
                  end_year=2025,end_month=12,end_day=31,\
                  end_hour=0,end_minute=0,end_second=0,\
-                 log_path='log.popy'):
-        self.logger = logging.getLogger(log_path)
-        self.logger.info('creating an instance of popy')
+                 logger_level='info'):
         
         self.instrum = instrum
         self.product = product
+        self.logger = logging.getLogger(instrum+'_'+product+'.log').setLevel(logging.INFO)
+#        if logger_level == 'info':
+#            self.logger.setLevel(logging.INFO)
+        self.logger.info('creating an instance of popy')
         
         if(instrum == "OMI"):
             k1 = 4
@@ -44,6 +46,8 @@ class popy(object):
             ymargin = 2
             maxsza = 60
             maxcf = 0.3
+            self.maxMDQF = 0
+            self.maxEXTQF = 0
             if product == 'H2O':
                 maxcf = 0.15
         elif(instrum == "GOME-1"):
@@ -112,6 +116,7 @@ class popy(object):
             ymargin = 1.5
             maxsza = 60
             maxcf = 0.3
+            self.min_qa_value = 0.5
         elif(instrum == "IASI"):
             k1 = 2
             k2 = 2
@@ -264,12 +269,12 @@ class popy(object):
                         "%d-%b-%Y %H:%M:%S")
         l2g_data = {k:v[validmask,] for (k,v) in l2g_data.items()}
         nl2 = len(l2g_data['latc'])
-        if self.show_progress:
-            print('Loading and subsetting file '+mat_filename+'...')
-            print('containing %d pixels...' %nl20)
-            print('min observation time at '+min_time)
-            print('max observation time at '+max_time)
-            print('%d pixels fall in the spatiotemporal window...' %nl2)
+        
+        self.logger.info('Loading and subsetting file '+mat_filename+'...')
+        self.logger.info('containing %d pixels...' %nl20)
+        self.logger.info('min observation time at '+min_time)
+        self.logger.info('max observation time at '+max_time)
+        self.logger.info('%d pixels fall in the spatiotemporal window...' %nl2)
         
         del mat_data    
         self.l2g_data = l2g_data
@@ -341,29 +346,15 @@ class popy(object):
                 DATAFIELD_NAME = '/HDFEOS/SWATHS/'+swathname+'/Data Fields/'+data_fields[i]
                 data = f[DATAFIELD_NAME]
                 data = data[:]
-                #scale = f[DATAFIELD_NAME].attrs['ScaleFactor']
-                #offset = f[DATAFIELD_NAME].attrs['Offset']
-                #data = scale * (data - offset)
-                #missing_value = f[DATAFIELD_NAME].attrs['MissingValue']
-                #fill_value = f[DATAFIELD_NAME].attrs['_FillValue']
-                ## how damn it to check if data is integer?!! this piece does not seem to work
-                #if data_fields[i] in {'ColumnAmountDestriped','ColumnUncertainty'}:
-                #    data[data == missing_value] = np.nan
-                #    data[data == fill_value] = np.nan
                 outp_he5[data_fields_l2g[i]] = data
                     
             for i in range(len(geo_fields)):
                 DATAFIELD_NAME = '/HDFEOS/SWATHS/'+swathname+'/Geolocation Fields/'+geo_fields[i]
                 data = f[DATAFIELD_NAME]
                 data = data[:]
-                #scale = f[DATAFIELD_NAME].attrs['ScaleFactor']
-                #offset = f[DATAFIELD_NAME].attrs['Offset']
-                #data = scale * (data - offset)
-                #print(data.dtype)
                 outp_he5[geo_fields_l2g[i]] = data
-                #print(outp_he5[DATAFIELD_NAME].dtype)
             TimeUTC = outp_he5['TimeUTC'].astype(np.int)
-            # python datetime is idiot!!!
+            # python datetime does not allow vectorization
             UTC_matlab_datenum = np.zeros((TimeUTC.shape[0],1),dtype=np.float64)
             for i in range(TimeUTC.shape[0]):
                 tmp = datetime.datetime(year=TimeUTC[i,0],month=TimeUTC[i,1],day=TimeUTC[i,2],\
@@ -408,6 +399,8 @@ class popy(object):
         self.south = south
         self.north = north
         self.grid_size = grid_size
+        self.maxMDQF = maxMDQF
+        self.maxEXTQF = maxEXTQF
         xgrid = np.arange(west,east,grid_size,dtype=np.float64)+grid_size/2
         ygrid = np.arange(south,north,grid_size,dtype=np.float64)+grid_size/2
         [xmesh,ymesh] = np.meshgrid(xgrid,ygrid)
@@ -450,19 +443,53 @@ class popy(object):
         self.end_matlab_datenum = end_matlab_datenum
         self.l2_list = l2_list
         self.l2_dir = l2_dir
+        self.logger.info('The following parameters from control.txt will overwrite intital popy values:')
+        self.logger.info('maxsza = '+'%s'%maxsza)
+        self.logger.info('maxcf  = '+'%s'%maxcf)
+        self.logger.info('west   = '+'%s'%west)
+        self.logger.info('east   = '+'%s'%east)
+        self.logger.info('south  = '+'%s'%south)
+        self.logger.info('north  = '+'%s'%north)
+        self.logger.info('tstart = '+self.tstart)
+        self.logger.info('tend   = '+self.tend)
+        self.logger.info('res    = '+'%s'%self.grid_size)
             
-    def F_subset_OMHCHO_control(self,control_path):
-        if os.path.isfile(control_path):
-            import yaml
-            if self.show_progress:
-                print('Loading control.txt file')
-            with open(control_path,'r') as stream:
-                control = yaml.load(stream)
+    def F_subset_OMHCHO(self,path):
+        """ 
+        function to subset omi hcho level 2 data, calling self.F_read_he5
+        path: directory containing omhcho level 2 files, OR path to control.txt
+        updated on 2019/04/23
+        """
+        # find out list of l2 files to subset
+        if os.path.isfile(path):
+            self.F_update_popy_with_control_file(path)
+            l2_list = self.l2_list
+            l2_dir = self.l2_dir
         else:
-            print('This function only accept control.txt. L2 directory does not work.')
-            return
-        l2_list = control['Input Files']['OMHCHO']
-        l2_dir = control['Runtime Parameters']['Lv2Dir']
+            import glob
+            l2_dir = path
+            l2_list = []
+            cwd = os.getcwd()
+            os.chdir(l2_dir)
+            start_date = self.start_python_datetime.date()
+            end_date = self.end_python_datetime.date()
+            days = (end_date-start_date).days+1
+            DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+            for DATE in DATES:
+                flist = glob.glob('OMI-Aura_L2-OMHCHO_'+DATE.strftime("%Ym%m%d")+'t*.he5')
+                l2_list = l2_list+flist
+            os.chdir(cwd)
+            self.l2_dir = l2_dir
+            self.l2_list = l2_list
+        
+        maxsza = self.maxsza
+        maxcf = self.maxcf
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        maxMDQF = self.maxMDQF
+        maxEXTQF = self.maxEXTQF
         
         data_fields = ['AMFCloudFraction','AMFCloudPressure','AirMassFactor','Albedo',\
                        'ReferenceSectorCorrectedVerticalColumn','ColumnUncertainty','MainDataQualityFlag',\
@@ -470,66 +497,20 @@ class popy(object):
         data_fields_l2g = ['cloud_fraction','cloud_pressure','amf','albedo',\
                            'column_amount','column_uncertainty','MainDataQualityFlag',\
                            'PixelCornerLatitudes','PixelCornerLongitudes','FittingRMS']
-        geo_fields = ['Latitude','Longitude','TimeUTC','SolarZenithAngle','TerrainHeight']
-        geo_fields_l2g = ['latc','lonc','TimeUTC','SolarZenithAngle','terrain_height']
+        geo_fields = ['Latitude','Longitude','TimeUTC','SolarZenithAngle',\
+                      'TerrainHeight','XtrackQualityFlagsExpanded']
+        geo_fields_l2g = ['latc','lonc','TimeUTC','SolarZenithAngle',\
+                          'terrain_height','XtrackQualityFlagsExpanded']
         swathname = 'OMI Total Column Amount HCHO'
-        maxsza = float(control['Runtime Parameters']['maxSZA'])
-        maxcf = float(control['Runtime Parameters']['maxCfr'])
-        west = float(control['Runtime Parameters']['minLon'])
-        east = float(control['Runtime Parameters']['maxLon'])
-        south = float(control['Runtime Parameters']['minLat'])
-        north = float(control['Runtime Parameters']['maxLat'])
-        self.maxsza = maxsza
-        self.maxcf = maxcf
-        self.west = west
-        self.east = east
-        self.south = south
-        self.north = north
-        start_python_datetime = datetime.datetime.strptime(
-                control['Runtime Parameters']['StartTime'],'%Y-%m-%dT%H:%M:%Sz')
-        end_python_datetime = datetime.datetime.strptime(
-                control['Runtime Parameters']['EndTime'],'%Y-%m-%dT%H:%M:%Sz')
-        self.start_python_datetime = start_python_datetime
-        self.end_python_datetime = end_python_datetime
-        
-        self.tstart = start_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
-        self.tend = end_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
-        # most of my data are saved in matlab format, where time is defined as UTC days since 0000, Jan 0
-        start_matlab_datenum = (start_python_datetime.toordinal()\
-                                +start_python_datetime.hour/24.\
-                                +start_python_datetime.minute/1440.\
-                                +start_python_datetime.second/86400.+366.)
-        
-        end_matlab_datenum = (end_python_datetime.toordinal()\
-                                +end_python_datetime.hour/24.\
-                                +end_python_datetime.minute/1440.\
-                                +end_python_datetime.second/86400.+366.)
-        self.start_matlab_datenum = start_matlab_datenum
-        self.end_matlab_datenum = end_matlab_datenum
-        
-        self.grid_size = float(control['Runtime Parameters']['res'])
-        
-        if self.show_progress:
-            print('The following parameters from control.txt will overwrite intital popy values:')
-            print('maxsza = '+'%s'%maxsza)
-            print('maxcf  = '+'%s'%maxcf)
-            print('west   = '+'%s'%west)
-            print('east   = '+'%s'%east)
-            print('south  = '+'%s'%south)
-            print('north  = '+'%s'%north)
-            print('tstart = '+self.tstart)
-            print('tend   = '+self.tend)
-            print('res    = '+'%s'%self.grid_size)
-        
+                
         l2g_data = {}
         for fn in l2_list:
             fn_dir = l2_dir+fn
-            if self.show_progress:
-                print('Loading'+fn_dir)
+            self.logger.info('Loading'+fn_dir)
             outp_he5 = self.F_read_he5(fn_dir,swathname,data_fields,geo_fields,data_fields_l2g,geo_fields_l2g)
             f1 = outp_he5['SolarZenithAngle'] <= maxsza
             f2 = outp_he5['cloud_fraction'] <= maxcf
-            f3 = outp_he5['MainDataQualityFlag'] == 0              
+            f3 = outp_he5['MainDataQualityFlag'] <= maxMDQF              
             f4 = outp_he5['latc'] >= south
             f5 = outp_he5['latc'] <= north
             tmplon = outp_he5['lonc']-west
@@ -538,9 +519,10 @@ class popy(object):
             f7 = tmplon <= east-west
             f8 = outp_he5['UTC_matlab_datenum'] >= self.start_matlab_datenum
             f9 = outp_he5['UTC_matlab_datenum'] <= self.end_matlab_datenum
-            validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
-            if self.show_progress:
-                print('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            f10 = outp_he5['XtrackQualityFlagsExpanded'] <= maxEXTQF
+            validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9 & f10
+            self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            
             l2g_data0 = {}
             
             Lat_lowerleft = outp_he5['PixelCornerLatitudes'][0:-1,0:-1][validmask]
@@ -554,7 +536,8 @@ class popy(object):
             l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
             l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
             for key in outp_he5.keys():
-                if key not in {'MainDataQualityFlag','PixelCornerLatitudes','PixelCornerLongitudes','TimeUTC'}:
+                if key not in {'MainDataQualityFlag','PixelCornerLatitudes',\
+                               'PixelCornerLongitudes','TimeUTC','XtrackQualityFlagsExpanded'}:
                     l2g_data0[key] = outp_he5[key][validmask]
             l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
         self.l2g_data = l2g_data
@@ -565,20 +548,10 @@ class popy(object):
     
     def F_subset_S5PNO2(self,path):
         """ 
-        function to subset tropomi no2 level data, calling self.F_read_S5P_nc
+        function to subset tropomi no2 level 2 data, calling self.F_read_S5P_nc
         path: directory containing S5PNO2 level files, OR path to control.txt
         updated on 2019/04/22
-        """
-        maxsza = self.maxsza
-        maxcf = self.maxcf
-        west = self.west
-        east = self.east
-        south = self.south
-        north = self.north
-        start_date = self.start_python_datetime.date()
-        end_date = self.end_python_datetime.date()
-        days = (end_date-start_date).days+1
-        DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+        """      
         # find out list of l2 files to subset
         if os.path.isfile(path):
             self.F_update_popy_with_control_file(path)
@@ -590,12 +563,25 @@ class popy(object):
             l2_list = []
             cwd = os.getcwd()
             os.chdir(l2_dir)
+            start_date = self.start_python_datetime.date()
+            end_date = self.end_python_datetime.date()
+            days = (end_date-start_date).days+1
+            DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
             for DATE in DATES:
                 flist = glob.glob('S5P_OFFL_L2__NO2____'+DATE.strftime("%Y%m%d")+'T*.nc')
                 l2_list = l2_list+flist
             os.chdir(cwd)
             self.l2_dir = l2_dir
             self.l2_list = l2_list
+        
+        maxsza = self.maxsza
+        maxcf = self.maxcf
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        min_qa_value = self.min_qa_value
+        
         # absolute path of useful variables in the nc file
         data_fields = ['/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/cloud_fraction_crb_nitrogendioxide_window',\
                '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds',\
@@ -613,16 +599,16 @@ class popy(object):
         data_fields_l2g = ['cloud_fraction','latitude_bounds','longitude_bounds','SolarZenithAngle',\
                            'vza','albedo','latc','lonc','qa_value','time_utc',\
                            'column_amount','column_uncertainty']
+        self.logger.info('Read, subset, and store level 2 data to l2g_data')
         l2g_data = {}
         for fn in l2_list:
             fn_dir = l2_dir+fn
-            if self.show_progress:
-                print('Loading'+fn_dir)
+            self.logger.info('Loading'+fn_dir)
             outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
             f1 = outp_nc['SolarZenithAngle'] <= maxsza
             f2 = outp_nc['cloud_fraction'] <= maxcf
             # ridiculously, qa_value has a scale_factor of 0.01. so error-prone
-            f3 = outp_nc['qa_value'] >= 0.5              
+            f3 = outp_nc['qa_value'] >= min_qa_value              
             f4 = outp_nc['latc'] >= south
             f5 = outp_nc['latc'] <= north
             tmplon = outp_nc['lonc']-west
@@ -632,8 +618,7 @@ class popy(object):
             f8 = outp_nc['UTC_matlab_datenum'] >= self.start_matlab_datenum
             f9 = outp_nc['UTC_matlab_datenum'] <= self.end_matlab_datenum
             validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
-            if self.show_progress:
-                print('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
             l2g_data0 = {}
             # yep it's indeed messed up
             Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][:,:,0])[validmask]
@@ -893,7 +878,7 @@ class popy(object):
         for key in self.oversampling_list:
             if key not in l2g_data.keys():
                 oversampling_list.remove(key)
-                print('You asked to oversample '+key+', but I cannot find it in your data!')
+                self.logger.warning('You asked to oversample '+key+', but I cannot find it in your data!')
         self.oversampling_list_final = oversampling_list
         nvar_oversampling = len(oversampling_list)
         error_model = self.error_model
@@ -919,9 +904,8 @@ class popy(object):
         nl2 = len(l2g_data['latc'])
         self.nl2 = nl2
         self.l2g_data = l2g_data
-        if self.show_progress:
-            print('%d pixels in the L2g data' %nl20)
-            print('%d pixels to be regridded...' %nl2)
+        self.logger.info('%d pixels in the L2g data' %nl20)
+        self.logger.info('%d pixels to be regridded...' %nl2)
         
         #construct a rectangle envelopes the orginal pixel
         xmargin = self.xmargin  #how many times to extend zonally
@@ -930,6 +914,11 @@ class popy(object):
         total_sample_weight = np.zeros((nrows,ncols))
         num_samples = np.zeros((nrows,ncols))
         sum_aboves = np.zeros((nrows,ncols,nvar_oversampling))
+        quality_flag = np.full((nrows,ncols),2,dtype=np.int8)
+        # To only average cloud pressure using pixels where cloud fraction > 0.0
+        pres_total_sample_weight = np.zeros((nrows,ncols))
+        pres_num_samples = np.zeros((nrows,ncols))
+        pres_sum_aboves = np.zeros((nrows,ncols))
         
         count = 0
         for il2 in range(nl2):
@@ -1011,6 +1000,10 @@ class popy(object):
             num_samples[np.ix_(lat_index,lon_index)] =\
             num_samples[np.ix_(lat_index,lon_index)]+SG
             
+            if local_l2g_data['cloud_fraction'] > 0.0:
+                pres_num_samples[np.ix_(lat_index,lon_index)] =\
+                    pres_num_samples[np.ix_(lat_index,lon_index)]+SG
+                    
             if error_model == "square":
                 uncertainty_weight = local_l2g_data['column_uncertainty']**2
             elif error_model == "log":
@@ -1022,6 +1015,11 @@ class popy(object):
             total_sample_weight[np.ix_(lat_index,lon_index)]+\
             SG/area_weight/uncertainty_weight
             
+            if local_l2g_data['cloud_fraction'] > 0.0:
+                pres_total_sample_weight[np.ix_(lat_index,lon_index)] =\
+                    pres_total_sample_weight[np.ix_(lat_index,lon_index)]+\
+                    SG/area_weight/uncertainty_weight
+            
             for ivar in range(nvar_oversampling):
                 local_var = local_l2g_data[oversampling_list[ivar]]
                 if error_model == 'log':
@@ -1031,27 +1029,51 @@ class popy(object):
                 tmp_var = tmp_var[:,:,np.newaxis]
                 sum_aboves[np.ix_(lat_index,lon_index,[ivar])] =\
                 sum_aboves[np.ix_(lat_index,lon_index,[ivar])]+tmp_var
+                
+                if local_l2g_data['cloud_fraction'] > 0.0 and\
+                        oversampling_list[ivar] == 'cloud_pressure':
+                    tmp_var = SG/area_weight/uncertainty_weight*local_var
+                    tmp_var = tmp_var[:,:]
+                    pres_sum_aboves[np.ix_(lat_index,lon_index)] =\
+                        pres_sum_aboves[np.ix_(lat_index,lon_index)]+tmp_var
             
-            if self.show_progress:
-                if il2 == count*np.round(nl2/10.):
-                    print('%d%% finished' %(count*10))
-                    count = count + 1
+            if il2 == count*np.round(nl2/10.):
+                self.logger.info('%d%% finished' %(count*10))
+                count = count + 1
          
-        if self.show_progress:
-            print('Completed regridding!')
+        self.logger.info('Completed regridding!')
         C = {}
         np.seterr(divide='ignore', invalid='ignore')
         for ikey in range(len(oversampling_list)):
             C[oversampling_list[ikey]] = sum_aboves[:,:,ikey].squeeze()\
             /total_sample_weight
+            # Special case for cloud pressure (only considere pixels with
+            # cloud fraction > 0.0
+            if oversampling_list[ikey] == 'cloud_pressure':
+                C[oversampling_list[ikey]] = pres_sum_aboves[:,:]\
+                    /pres_total_sample_weight
+        
+        # Make cloud pressure = 0 where cloud fraction = 0
+        f1 = (C['cloud_fraction'] == 0.0)
+        C['cloud_pressure'][f1] = 0.0
+        
         self.C = C 
         self.total_sample_weight = total_sample_weight
         self.num_samples = num_samples
+        self.pres_num_samples = pres_num_samples
+        self.pres_total_sample_weight = pres_total_sample_weight
+        # Set quality flag based on the number of samples
+        # It has already being initialized to fill value
+        # of 2
+        f1 = num_samples >= 0.1
+        quality_flag[f1] = 0
+        f1 = (num_samples > 1.e-6) & (num_samples < 0.1)
+        quality_flag[f1] = 1
+        self.quality_flag = quality_flag
         if not do_standard_error:
             return
         
-        if self.show_progress:
-            print('OK, do standard error for weighted mean, looping through l2g_data, again...')
+        self.logger.info('OK, do standard error for weighted mean, looping through l2g_data, again...')
         
         #P_bar = self.total_sample_weight/nl2
         X_bar = self.C['column_amount']
@@ -1059,7 +1081,7 @@ class popy(object):
         count = 0
         for il2 in range(nl2):
             local_l2g_data = {k:v[il2,] for (k,v) in l2g_data.items()}
-            if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B","SCIAMACHY"}:
+            if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B","SCIAMACHY","TROPOMI"}:
                 latc = local_l2g_data['latc']
                 lonc = local_l2g_data['lonc']
                 latr = local_l2g_data['latr']
@@ -1153,10 +1175,9 @@ class popy(object):
             sum_above_SE[np.ix_(lat_index,lon_index)] =\
             sum_above_SE[np.ix_(lat_index,lon_index)]+tmp_var
             
-            if self.show_progress:
-                if il2 == count*np.round(nl2/10.):
-                    print('%d%% finished' %(count*10))
-                    count = count + 1
+            if il2 == count*np.round(nl2/10.):
+                self.logger.info('%d%% finished' %(count*10))
+                count = count + 1
         
         variance_of_weighted_mean\
         = sum_above_SE/(self.total_sample_weight**2)
@@ -1170,9 +1191,9 @@ class popy(object):
     
     def F_unload_l2g_data(self):
         if hasattr(self,'l2g_data'):
-            print('l2g_data is not there!')
+            self.logger.warning('l2g_data is not there!')
         else:
-            print('Unloading l2g_data from the popy object...')
+            self.logger.warning('Unloading l2g_data from the popy object...')
             del self.l2g_data
             if hasattr(self,'nl2'):
                 del self.nl2
