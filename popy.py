@@ -16,6 +16,7 @@ import cv2
 from shapely.geometry import Polygon
 import datetime
 import os
+import logging
 
 class popy(object):
     
@@ -24,7 +25,10 @@ class popy(object):
                  start_year=1995,start_month=1,start_day=1,\
                  start_hour=0,start_minute=0,start_second=0,\
                  end_year=2025,end_month=12,end_day=31,\
-                 end_hour=0,end_minute=0,end_second=0):
+                 end_hour=0,end_minute=0,end_second=0,\
+                 log_path='log.popy'):
+        self.logger = logging.getLogger(log_path)
+        self.logger.info('creating an instance of popy')
         
         self.instrum = instrum
         self.product = product
@@ -286,6 +290,8 @@ class popy(object):
         data_fields: a list of string containing absolution path of variables to extract
         data_fields_l2g: what do you want to call the variables in the output
         updated on 2019/04/22
+        additional packages:
+            netCDF4, conda install -c anaconda netcdf4
         """
         from netCDF4 import Dataset
         ncid = Dataset(fn,'r')
@@ -373,9 +379,12 @@ class popy(object):
         return outp_he5
     
     def F_update_popy_with_control_file(self,control_path):
-        """ function to update self with parameters found in control.txt
+        """ 
+        function to update self with parameters found in control.txt
         control_path: absolution path to control.txt
         updated on 2019/04/22
+        additional packages: 
+            yaml, conda install -c anaconda yaml
         """
         import yaml
         with open(control_path,'r') as stream:
@@ -592,6 +601,7 @@ class popy(object):
                '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds',\
                '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds',\
                '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/solar_zenith_angle',\
+               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/viewing_zenith_angle',\
                '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_albedo_nitrogendioxide_window',\
                '/PRODUCT/latitude',\
                '/PRODUCT/longitude',\
@@ -601,7 +611,7 @@ class popy(object):
                '/PRODUCT/nitrogendioxide_tropospheric_column_precision']    
         # standardized variable names in l2g file. should map one-on-one to data_fields
         data_fields_l2g = ['cloud_fraction','latitude_bounds','longitude_bounds','SolarZenithAngle',\
-                           'albedo','latc','lonc','qa_value','time_utc',\
+                           'vza','albedo','latc','lonc','qa_value','time_utc',\
                            'column_amount','column_uncertainty']
         l2g_data = {}
         for fn in l2_list:
@@ -791,10 +801,12 @@ class popy(object):
         for i in range(len(data_fields)):
             if data_fields[i] in l2g_data.keys():
                 l2g_data[data_fields_l2g[i]] = l2g_data.pop(data_fields[i])
-        # trying to reshape 1d arrays to (nl2, 1), but did not work
-#        for key in l2g_data.keys():
-#            if key not in {'latr','lonr'}:
-#                l2g_data[key] = np.reshape(l2g_data[key],(len(l2g_data[key]),1))
+        # reshape 1d arrays to (nl2, 1)
+        for key in l2g_data.keys():
+            if key not in {'latr','lonr'}:
+                l2g_data[key] = l2g_data[key].reshape(len(l2g_data[key]),1)
+            else:# otherwise, the order of 2d array is COMPLETELY screwed
+                l2g_data[key] = np.asfortranarray(l2g_data[key])
         scipy.io.savemat(file_path,{'output_subset':l2g_data})
         
         
