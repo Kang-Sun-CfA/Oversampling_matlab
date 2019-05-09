@@ -328,6 +328,9 @@ class popy(object):
                                       +tmp.microsecond/86400/1000000+366.)
             outp['UTC_matlab_datenum'] = np.tile(UTC_matlab_datenum,(1,outp['latc'].shape[1]))
         else: # hcho l2 does not have time_utc
+            # the delta_time field of hcho fills all across track position, but ch4 is one per scanline
+            if len(outp['delta_time'].shape) == 1:
+                outp['delta_time'] = np.tile(outp['delta_time'][...,None],(1,outp['latc'].shape[1]))
             outp['UTC_matlab_datenum'] = (outp['time']+outp['delta_time']/1000.)/86400.+734139.
         
         outp['across_track_position'] = np.tile(np.arange(1.,outp['latc'].shape[1]+1),\
@@ -741,6 +744,103 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
         
+    def F_subset_S5PCH4(self,path):
+        """ 
+        function to subset tropomi ch4 level 2 data, calling self.F_read_S5P_nc
+        path: directory containing S5PCH4 level files, OR path to control.txt
+        for methane, many of auxiliary data are not saved as I trust qa_value
+        updated on 2019/05/08
+        """      
+        # find out list of l2 files to subset
+        if os.path.isfile(path):
+            self.F_update_popy_with_control_file(path)
+            l2_list = self.l2_list
+            l2_dir = self.l2_dir
+        else:
+            import glob
+            l2_dir = path
+            l2_list = []
+            cwd = os.getcwd()
+            os.chdir(l2_dir)
+            start_date = self.start_python_datetime.date()
+            end_date = self.end_python_datetime.date()
+            days = (end_date-start_date).days+1
+            DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+            for DATE in DATES:
+                flist = glob.glob('S5P_RPRO_L2__CH4____'+DATE.strftime("%Y%m%d")+'T*.nc')
+                l2_list = l2_list+flist
+            os.chdir(cwd)
+            self.l2_dir = l2_dir
+            self.l2_list = l2_list
+        
+        #maxsza = self.maxsza 
+        #maxcf = self.maxcf
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        min_qa_value = self.min_qa_value
+        
+        # absolute path of useful variables in the nc file
+        data_fields = ['/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds',\
+               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds',\
+               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/solar_zenith_angle',\
+               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/viewing_zenith_angle',\
+               '/PRODUCT/latitude',\
+               '/PRODUCT/longitude',\
+               '/PRODUCT/qa_value',\
+               '/PRODUCT/time',\
+               '/PRODUCT/delta_time',\
+               '/PRODUCT/methane_mixing_ratio',\
+               '/PRODUCT/methane_mixing_ratio_bias_corrected',\
+               '/PRODUCT/methane_mixing_ratio_precision']    
+        # standardized variable names in l2g file. should map one-on-one to data_fields
+        data_fields_l2g = ['latitude_bounds','longitude_bounds','SolarZenithAngle',\
+                           'vza','latc','lonc','qa_value','time','delta_time',\
+                           'column_amount_no_bias_correction','column_amount','column_uncertainty']
+        self.logger.info('Read, subset, and store level 2 data to l2g_data')
+        self.logger.info('Level 2 data are located at '+l2_dir)
+        l2g_data = {}
+        for fn in l2_list:
+            fn_dir = l2_dir+fn
+            self.logger.info('Loading '+fn)
+            outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
+            #f1 = outp_nc['SolarZenithAngle'] <= maxsza
+            #f2 = outp_nc['cloud_fraction'] <= maxcf
+            # ridiculously, qa_value has a scale_factor of 0.01. so error-prone
+            f3 = outp_nc['qa_value'] >= min_qa_value              
+            f4 = outp_nc['latc'] >= south
+            f5 = outp_nc['latc'] <= north
+            tmplon = outp_nc['lonc']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp_nc['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp_nc['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            validmask = f3 & f4 & f5 & f6 & f7 & f8 & f9
+            self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            l2g_data0 = {}
+            # yep it's indeed messed up
+            Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][:,:,0])[validmask]
+            Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][:,:,3])[validmask]
+            Lat_lowerright = np.squeeze(outp_nc['latitude_bounds'][:,:,1])[validmask]
+            Lat_upperright = np.squeeze(outp_nc['latitude_bounds'][:,:,2])[validmask]
+            Lon_lowerleft = np.squeeze(outp_nc['longitude_bounds'][:,:,0])[validmask]
+            Lon_upperleft = np.squeeze(outp_nc['longitude_bounds'][:,:,3])[validmask]
+            Lon_lowerright = np.squeeze(outp_nc['longitude_bounds'][:,:,1])[validmask]
+            Lon_upperright = np.squeeze(outp_nc['longitude_bounds'][:,:,2])[validmask]
+            l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
+            l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+            for key in outp_nc.keys():
+                if key not in {'latitude_bounds','longitude_bounds','time_utc','time','delta_time'}:
+                    l2g_data0[key] = outp_nc[key][validmask]
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
+        
     def F_subset_OMH2O(self,l2_dir):
         import glob
         data_fields = ['AMFCloudFraction','AMFCloudPressure','AirMassFactor','Albedo',\
@@ -1100,9 +1200,10 @@ class popy(object):
             num_samples[np.ix_(lat_index,lon_index)] =\
             num_samples[np.ix_(lat_index,lon_index)]+SG
             
-            if local_l2g_data['cloud_fraction'] > 0.0:
-                pres_num_samples[np.ix_(lat_index,lon_index)] =\
-                    pres_num_samples[np.ix_(lat_index,lon_index)]+SG
+            if 'cloud_fraction' in local_l2g_data.keys():
+                if local_l2g_data['cloud_fraction'] > 0.0:
+                    pres_num_samples[np.ix_(lat_index,lon_index)] =\
+                        pres_num_samples[np.ix_(lat_index,lon_index)]+SG
                     
             if error_model == "square":
                 uncertainty_weight = local_l2g_data['column_uncertainty']**2
@@ -1115,10 +1216,11 @@ class popy(object):
             total_sample_weight[np.ix_(lat_index,lon_index)]+\
             SG/area_weight/uncertainty_weight
             
-            if local_l2g_data['cloud_fraction'] > 0.0:
-                pres_total_sample_weight[np.ix_(lat_index,lon_index)] =\
-                    pres_total_sample_weight[np.ix_(lat_index,lon_index)]+\
-                    SG/area_weight/uncertainty_weight
+            if 'cloud_fraction' in local_l2g_data.keys():
+                if local_l2g_data['cloud_fraction'] > 0.0:
+                    pres_total_sample_weight[np.ix_(lat_index,lon_index)] =\
+                        pres_total_sample_weight[np.ix_(lat_index,lon_index)]+\
+                        SG/area_weight/uncertainty_weight
             
             for ivar in range(nvar_oversampling):
                 local_var = local_l2g_data[oversampling_list[ivar]]
@@ -1130,12 +1232,13 @@ class popy(object):
                 sum_aboves[np.ix_(lat_index,lon_index,[ivar])] =\
                 sum_aboves[np.ix_(lat_index,lon_index,[ivar])]+tmp_var
                 
-                if local_l2g_data['cloud_fraction'] > 0.0 and\
-                        oversampling_list[ivar] == 'cloud_pressure':
-                    tmp_var = SG/area_weight/uncertainty_weight*local_var
-                    tmp_var = tmp_var[:,:]
-                    pres_sum_aboves[np.ix_(lat_index,lon_index)] =\
-                        pres_sum_aboves[np.ix_(lat_index,lon_index)]+tmp_var
+                if 'cloud_fraction' in local_l2g_data.keys():
+                    if local_l2g_data['cloud_fraction'] > 0.0 and\
+                            oversampling_list[ivar] == 'cloud_pressure':
+                        tmp_var = SG/area_weight/uncertainty_weight*local_var
+                        tmp_var = tmp_var[:,:]
+                        pres_sum_aboves[np.ix_(lat_index,lon_index)] =\
+                            pres_sum_aboves[np.ix_(lat_index,lon_index)]+tmp_var
             
             if il2 == count*np.round(nl2/10.):
                 self.logger.info('%d%% finished' %(count*10))
