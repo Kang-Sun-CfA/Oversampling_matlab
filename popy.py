@@ -769,6 +769,11 @@ class popy(object):
             for DATE in DATES:
                 flist = glob.glob('S5P_RPRO_L2__CH4____'+DATE.strftime("%Y%m%d")+'T*.nc')
                 l2_list = l2_list+flist
+            if not l2_list:
+                self.logger.warning('No reprocessed level 2 data found. Searching for offline data...')
+                for DATE in DATES:
+                    flist = glob.glob('S5P_OFFL_L2__CH4____'+DATE.strftime("%Y%m%d")+'T*.nc')
+                    l2_list = l2_list+flist
             os.chdir(cwd)
             self.l2_dir = l2_dir
             self.l2_list = l2_list
