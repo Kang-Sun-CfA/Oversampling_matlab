@@ -1,6 +1,7 @@
 function output_regrid = F_regrid_TROPOMI(inp,output_subset)
 % written by Lorena Castro from Iowa University to oversample TROPOMI data
 % updated by Kang Sun on 2019/05/08 for more flexibility
+% updated on 2019/05/11 for block-parallel
 
 output_regrid = [];
 Res = inp.Res;
@@ -63,7 +64,7 @@ end
 
 % xtrack to use
 if ~isfield(inp,'usextrack')
-    usextrack = unique(output_subset.ift);
+    usextrack = 1:1000;
 else
     usextrack = inp.usextrack;
 end
@@ -113,10 +114,10 @@ nrows = length(ygrid);
 ncols = length(xgrid);
 
 % define x y mesh
-[Lon_mesh, Lat_mesh] = meshgrid(single(xgrid),single(ygrid));
+[Lon_mesh, Lat_mesh] = meshgrid(double(xgrid),double(ygrid));
 
 % construct a rectangle envelopes the orginal pixel
-xmargin = 3; % how many times to extend zonally
+xmargin = 1.5; % how many times to extend zonally
 ymargin = 2; % how many times to extend meridonally
 
 f1 = output_subset.utc >= datenum([Startdate 0 0 0]) & output_subset.utc <= datenum([Enddate 23 59 59]);
@@ -166,10 +167,6 @@ if nL2 <= 0;return;end
 disp(['Regriding pixels from ',datestr([Startdate 0 0 0]),' to ', datestr([Enddate 0 0 0])])
 disp([num2str(nL2),' pixels to be regridded...'])
 
-Sum_Above = zeros(nrows,ncols,'single');
-Sum_Below = zeros(nrows,ncols,'single');
-D = zeros(nrows,ncols,'single');
-
 Lat_r = output_subset.latr(validmask,:);
 Lon_r = output_subset.lonr(validmask,:);
 Lat_c = output_subset.latc(validmask);
@@ -177,46 +174,150 @@ Lon_c = output_subset.lonc(validmask);
 Xtrack = output_subset.ift(validmask);
 VCD = output_subset.(vcdname)(validmask);
 VCDe = (output_subset.(vcderrorname)(validmask)).^errorpower;
+pixel_west = Lon_c-range(Lon_r,2)/2*xmargin;
+pixel_east = Lon_c+range(Lon_r,2)/2*xmargin;
+pixel_south = Lat_c-range(Lat_r,2)/2*ymargin;
+pixel_north = Lat_c+range(Lat_r,2)/2*ymargin;
+
 m = 4;n = 2;
 if if_parallel
-    parfor iL2 = 1:nL2
-        lat_r = Lat_r(iL2,:);
-        lon_r = Lon_r(iL2,:);
-        lat_c = Lat_c(iL2);
-        lon_c = Lon_c(iL2);
-        vcd = VCD(iL2);
-        vcd_unc = VCDe(iL2);
-        A = polyarea([lon_r(:);lon_r(1)],[lat_r(:);lat_r(1)]);
-        
-        lat_min = min(lat_r);
-        lon_min = min(lon_r);
-        local_left = lon_c-xmargin*(lon_c-lon_min);
-        local_right = lon_c+xmargin*(lon_c-lon_min);
-        
-        local_bottom = lat_c-ymargin*(lat_c-lat_min);
-        local_top = lat_c+ymargin*(lat_c-lat_min);
-        
-        lon_index = xgrid >= local_left & xgrid <= local_right;
-        lat_index = ygrid >= local_bottom & ygrid <= local_top;
-        
-        lon_mesh = Lon_mesh(lat_index,lon_index);
-        lat_mesh = Lat_mesh(lat_index,lon_index);
-        
-        SG = F_2D_SG_affine(lon_mesh,lat_mesh,lon_r,lat_r,lon_c,lat_c,...
-            m,n,1,1,0,0);
-        
-        sum_above_local = zeros(nrows,ncols,'single');
-        sum_below_local = zeros(nrows,ncols,'single');
-        D_local = zeros(nrows,ncols,'single');
-        
-        D_local(lat_index,lon_index) = SG;
-        sum_above_local(lat_index,lon_index) = SG/A/vcd_unc*vcd;
-        sum_below_local(lat_index,lon_index) = SG/A/vcd_unc;
-        Sum_Above = Sum_Above + sum_above_local;
-        Sum_Below = Sum_Below + sum_below_local;
-        D = D+D_local;
+    
+    if isfield(inp,'block_length')
+        block_length = inp.block_length;
+    else
+        block_length = 200;
     end
+    nblock_row = ceil(nrows/block_length);
+    nblock_col = ceil(ncols/block_length);
+    row_block_length = ones(1,nblock_row)*block_length;
+    row_block_length(end) = row_block_length(end)-(sum(row_block_length)-nrows);
+    if sum(row_block_length) ~= nrows
+        error('row block number is wrong')
+    end
+    col_block_length = ones(1,nblock_col)*block_length;
+    col_block_length(end) = col_block_length(end)-(sum(col_block_length)-ncols);
+    if sum(row_block_length) ~= nrows
+        error('row block number is wrong')
+    end
+    c_xmesh = mat2cell(Lon_mesh,row_block_length,col_block_length);
+    c_ymesh = mat2cell(Lat_mesh,row_block_length,col_block_length);
+    nblock = numel(c_xmesh);
+    if nblock ~= length(row_block_length)*length(col_block_length)
+        error('number of blocks are wrong')
+    end
+    c_xmesh = c_xmesh(:);
+    c_ymesh = c_ymesh(:);
+    c_A = c_xmesh;
+    c_B = c_xmesh;
+    c_D = c_xmesh;
+    c_xgrid = cell(nblock,1);
+    c_ygrid = cell(nblock,1);
+    c_Lat_r = cell(nblock,1);
+    c_Lon_r = cell(nblock,1);
+    c_Lat_c = cell(nblock,1);
+    c_Lon_c = cell(nblock,1);
+    c_VCD = cell(nblock,1);
+    c_VCDe = cell(nblock,1);
+    c_pixel_west = cell(nblock,1);
+    c_pixel_east = cell(nblock,1);
+    c_pixel_south = cell(nblock,1);
+    c_pixel_north = cell(nblock,1);
+    % il2 = 100;plot(Lon_c(il2),Lat_c(il2),'o',...
+    %     pixel_west(il2),pixel_south(il2),'s',...
+    %     pixel_west(il2),pixel_north(il2),'^',...
+    %     pixel_east(il2),pixel_south(il2),'*',...
+    %     pixel_east(il2),pixel_north(il2),'v',...
+    %     Lon_r(il2,[1:4 1]),Lat_r(il2,[1:4 1]))
+    nl2_block = zeros(nblock,1);
+    for iblock = 1:nblock
+        c_A{iblock} = single(c_A{iblock})*0;
+        c_B{iblock} = single(c_B{iblock})*0;
+        c_D{iblock} = c_D{iblock}*0;
+        c_xgrid{iblock} = c_xmesh{iblock}(1,:);
+        c_ygrid{iblock} = c_ymesh{iblock}(:,1);
+        in = pixel_east >= min(c_xgrid{iblock}) & ...
+            pixel_west <= max(c_xgrid{iblock}) & ...
+            pixel_north >= min(c_ygrid{iblock}) & ...
+            pixel_south <= max(c_ygrid{iblock});
+        c_Lat_r{iblock} = Lat_r(in,:);
+        c_Lon_r{iblock} = Lon_r(in,:);
+        c_Lat_c{iblock} = Lat_c(in);
+        c_Lon_c{iblock} = Lon_c(in);
+        c_VCD{iblock} = VCD(in);
+        c_VCDe{iblock} = VCDe(in);
+        c_pixel_west{iblock} = pixel_west(in);
+        c_pixel_east{iblock} = pixel_east(in);
+        c_pixel_south{iblock} = pixel_south(in);
+        c_pixel_north{iblock} = pixel_north(in);
+        nl2_block(iblock) = sum(in);
+        disp([num2str(nl2_block(iblock)),' pixels to be regridded in block ',num2str(iblock)])
+        %     clf
+        %     plot(c_xmesh{iblock}(:),c_ymesh{iblock}(:),'.k')
+        %     hold on
+        %     patch(c_Lon_r{iblock}',c_Lat_r{iblock}',c_VCD{iblock})
+    end
+    %
+    parfor iblock = 1:nblock
+        if nl2_block(iblock) == 0
+            disp(['block ',num2str(iblock),' has no data'])
+            continue
+        end
+        b_Lat_r = c_Lat_r{iblock};
+        b_Lon_r = c_Lon_r{iblock};
+        b_Lat_c = c_Lat_c{iblock};
+        b_Lon_c = c_Lon_c{iblock};
+        b_VCD = c_VCD{iblock};
+        b_VCDe = c_VCDe{iblock};
+        b_A = c_A{iblock};
+        b_B = c_B{iblock};
+        b_D = c_D{iblock};
+        b_nl2 = nl2_block(iblock);
+        b_xgrid = c_xgrid{iblock};
+        b_ygrid = c_ygrid{iblock};
+        b_xmesh = c_xmesh{iblock};
+        b_ymesh = c_ymesh{iblock};
+        b_pixel_west = c_pixel_west{iblock};
+        b_pixel_east = c_pixel_east{iblock};
+        b_pixel_south = c_pixel_south{iblock};
+        b_pixel_north = c_pixel_north{iblock};
+        for iL2 = 1:b_nl2
+            lat_r = b_Lat_r(iL2,:);
+            lon_r = b_Lon_r(iL2,:);
+            lat_c = b_Lat_c(iL2);
+            lon_c = b_Lon_c(iL2);
+            
+            vcd = b_VCD(iL2);
+            vcd_unc = b_VCDe(iL2);
+            A = polyarea([lon_r(:);lon_r(1)],[lat_r(:);lat_r(1)]);
+            
+            lon_index = b_xgrid >= b_pixel_west(iL2) & b_xgrid <= b_pixel_east(iL2);
+            lat_index = b_ygrid >= b_pixel_south(iL2) & b_ygrid <= b_pixel_north(iL2);
+            
+            lon_mesh = b_xmesh(lat_index,lon_index);
+            lat_mesh = b_ymesh(lat_index,lon_index);
+            
+            SG = F_2D_SG_affine(lon_mesh,lat_mesh,lon_r,lat_r,lon_c,lat_c,...
+                m,n,1,1,0,0);
+            
+            b_A(lat_index,lon_index) = b_A(lat_index,lon_index) + SG/A/vcd_unc*vcd;
+            b_B(lat_index,lon_index) = b_B(lat_index,lon_index) + SG/A/vcd_unc;
+            b_D(lat_index,lon_index) = b_D(lat_index,lon_index)+SG;
+            
+        end
+        disp(['block ',num2str(iblock),' has ',num2str(b_nl2),' pixels, finished on ',datestr(now)])
+        c_A{iblock} = b_A;
+        c_B{iblock} = b_B;
+        c_D{iblock} = b_D;
+    end
+    Sum_Above = cell2mat(reshape(c_A,[nblock_row,nblock_col]));
+    Sum_Below = cell2mat(reshape(c_B,[nblock_row,nblock_col]));
+    D = cell2mat(reshape(c_D,[nblock_row,nblock_col]));
+    output_regrid.nblock = nblock;
 else
+    Sum_Above = zeros(nrows,ncols,'single');
+    Sum_Below = zeros(nrows,ncols,'single');
+    D = zeros(nrows,ncols,'single');
+    
     count = 1;
     for iL2 = 1:nL2
         lat_r = Lat_r(iL2,:);
@@ -227,16 +328,8 @@ else
         vcd_unc = VCDe(iL2);
         A = polyarea([lon_r(:);lon_r(1)],[lat_r(:);lat_r(1)]);
         
-        lat_min = min(lat_r);
-        lon_min = min(lon_r);
-        local_left = lon_c-xmargin*(lon_c-lon_min);
-        local_right = lon_c+xmargin*(lon_c-lon_min);
-        
-        local_bottom = lat_c-ymargin*(lat_c-lat_min);
-        local_top = lat_c+ymargin*(lat_c-lat_min);
-        
-        lon_index = xgrid >= local_left & xgrid <= local_right;
-        lat_index = ygrid >= local_bottom & ygrid <= local_top;
+        lon_index = xgrid >= pixel_west(iL2) & xgrid <= pixel_east(iL2);
+        lat_index = ygrid >= pixel_south(iL2) & ygrid <= pixel_north(iL2);
         
         lon_mesh = Lon_mesh(lat_index,lon_index);
         lat_mesh = Lat_mesh(lat_index,lon_index);

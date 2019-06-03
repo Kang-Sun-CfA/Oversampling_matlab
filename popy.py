@@ -7,6 +7,7 @@ Created on Sat Jan 26 15:50:30 2019
 2019/03/09: match measures l3 format
 2019/03/25: use control.txt
 2019/04/22: include S5PNO2
+2019/05/26: sample met data
 """
 
 import numpy as np
@@ -17,6 +18,194 @@ from shapely.geometry import Polygon
 import datetime
 import os
 import logging
+
+def datedev_py(matlab_datenum):
+    """
+    convert matlab datenum double to python datetime object
+    """
+    python_datetime = datetime.datetime.fromordinal(int(matlab_datenum)) + datetime.timedelta(days=matlab_datenum%1) - datetime.timedelta(days = 366)
+    return python_datetime
+
+def F_interp_geos_mat(sounding_lon,sounding_lat,sounding_datenum,\
+                  geos_dir='/mnt/Data2/GEOS/s5p_interp/',\
+                  interp_fields=['TROPPT']):
+    """
+    sample a field from subset geos fp data in .mat format. 
+    see geos.py for geos downloading/subsetting
+    sounding_lon:
+        longitude for interpolation
+    sounding_lat:
+        latitude for interpolation
+    sounding_datenum:
+        time for interpolation in matlab datenum double format
+    geos_dir:
+        directory where subset geos data in .mat are saved
+    interp_fields:
+        variables to interpolate from geos fp, only 2d fields are supported
+    created on 2019/05/26
+    """
+    from scipy.io import loadmat
+    from scipy.interpolate import RegularGridInterpolator
+    
+    start_datenum = np.amin(sounding_datenum)
+    end_datenum = np.amax(sounding_datenum)
+    start_datetime = datedev_py(start_datenum)
+    start_year = start_datetime.year
+    start_month = start_datetime.month
+    start_day = start_datetime.day
+    start_hour = start_datetime.hour
+    
+    end_datetime = datedev_py(end_datenum)
+    end_year = end_datetime.year
+    end_month = end_datetime.month
+    end_day = end_datetime.day
+    end_hour = end_datetime.hour
+    end_minute = end_datetime.minute
+    end_second = end_datetime.second
+    
+    step_hour = 3 # geos fp data are 3-hourly
+    
+    geos_start_hour = start_hour-start_hour%step_hour
+    geos_start_datetime = datetime.datetime(year=start_year,month=start_month,day=start_day,hour=geos_start_hour)
+    if end_hour > 24-step_hour or (end_hour == 24-step_hour and (end_minute > 0 or end_second > 0)):
+        geos_end_hour = 0
+        geos_end_datetime = datetime.datetime(year=end_year,month=end_month,day=end_day,hour=geos_end_hour) +datetime.timedelta(days=1)
+    elif end_hour%step_hour == 0 and end_minute == 0 and end_second == 0:
+        geos_end_hour = end_hour
+        geos_end_datetime = datetime.datetime(year=end_year,month=end_month,day=end_day,hour=geos_end_hour)
+    else:
+        geos_end_hour = (step_hour-(end_hour+1)%step_hour)%step_hour+end_hour+1
+        geos_end_datetime = datetime.datetime(year=end_year,month=end_month,day=end_day,hour=geos_end_hour)
+    
+    nstep = (geos_end_datetime-geos_start_datetime).total_seconds()/3600/step_hour+1
+    nstep = int(nstep)
+    
+    geos_data = {}
+    # load narr data
+    for istep in range(nstep):
+        file_datetime = geos_start_datetime+datetime.timedelta(hours=step_hour*istep)
+        file_dir = os.path.join(geos_dir,file_datetime.strftime('Y%Y'),\
+                                   file_datetime.strftime('M%m'),\
+                                   file_datetime.strftime('D%d'))
+        file_path = os.path.join(file_dir,'subset_'+file_datetime.strftime('%Y%m%d_%H')+'.mat')
+        if not geos_data:
+            mat_data = loadmat(file_path,variable_names=np.concatenate((['lat','lon'],interp_fields)))
+            geos_data['lon'] = mat_data['lon'].flatten()
+            geos_data['lat'] = mat_data['lat'].flatten()
+            geos_data['datenum'] = np.zeros((nstep),dtype=np.float64)
+            for fn in interp_fields:
+                geos_data[fn] = np.zeros((len(geos_data['lon']),len(geos_data['lat']),nstep))
+                geos_data[fn][...,istep] = mat_data[fn]
+        else:
+            mat_data = loadmat(file_path,variable_names=interp_fields)
+            for fn in interp_fields:
+                geos_data[fn][...,istep] = mat_data[fn]
+        
+        geos_data['datenum'][istep] = (file_datetime.toordinal()\
+                                    +file_datetime.hour/24.\
+                                    +file_datetime.minute/1440.\
+                                    +file_datetime.second/86400.+366.)
+    # interpolate
+    sounding_interp = {}
+    for fn in interp_fields:
+        my_interpolating_function = \
+        RegularGridInterpolator((geos_data['lon'],geos_data['lat'],geos_data['datenum']),\
+                                geos_data[fn],bounds_error=False,fill_value=np.nan)
+        sounding_interp[fn] = my_interpolating_function((sounding_lon,sounding_lat,sounding_datenum))
+    return sounding_interp
+
+def F_interp_narr_mat(sounding_lon,sounding_lat,sounding_datenum,\
+                  narr_dir='/mnt/Data2/NARR/acmap_narr/',\
+                  file_collection_names=['flx'],\
+                  file_collection_fields=[['GPH_tropopause','P_tropopause']]):
+    """
+    sample a field from presaved narr data
+    sounding_lon:
+        longitude for interpolation
+    sounding_lat:
+        latitude for interpolation
+    sounding_datenum:
+        time for interpolation in matlab datenum double format
+    narr_dir:
+        directory where narr is saved
+    file_collection_names:
+        a list of narr files, chosen from ['3D','sfc','flx','clm','pbl']
+    file_collection_fields:
+        variables to interpolate from each file collection, only 2d fields are supported
+    created on 2019/05/25
+    """
+    from scipy.io import loadmat
+    from scipy.interpolate import griddata
+    
+    start_datenum = np.amin(sounding_datenum)
+    end_datenum = np.amax(sounding_datenum)
+    start_datetime = datedev_py(start_datenum)
+    start_year = start_datetime.year
+    start_month = start_datetime.month
+    start_day = start_datetime.day
+    start_hour = start_datetime.hour
+    end_datetime = datedev_py(end_datenum)
+    end_year = end_datetime.year
+    end_month = end_datetime.month
+    end_day = end_datetime.day
+    end_hour = end_datetime.hour
+    step_hour = 3 # narr data are 3-hourly
+    narr_start_hour = start_hour-start_hour%step_hour
+    narr_start_datetime = datetime.datetime(year=start_year,month=start_month,day=start_day,hour=narr_start_hour)
+    if end_hour >= 24-step_hour:
+        narr_end_hour = 0
+        narr_end_datetime = datetime.datetime(year=end_year,month=end_month,day=end_day,hour=narr_end_hour)\
+        +datetime.timedelta(days=1)
+    else:
+        narr_end_hour = (step_hour-(end_hour+1)%step_hour)%step_hour+end_hour+1
+        narr_end_datetime = datetime.datetime(year=end_year,month=end_month,day=end_day,hour=narr_end_hour)
+    nstep = (narr_end_datetime-narr_start_datetime).total_seconds()/3600/step_hour+1
+    nstep = int(nstep)
+    
+    narr_data = {}
+    # load narr data
+    for i in range(len(file_collection_names)):
+        file_collection_name = file_collection_names[i]
+        file_collection_field = file_collection_fields[i]
+        for istep in range(nstep):
+            file_datetime = narr_start_datetime+datetime.timedelta(hours=step_hour*istep)
+            file_name = 'subset_'+file_collection_name+file_datetime.strftime('_%d_%H.mat')
+            file_path = os.path.join(narr_dir,file_datetime.strftime('%Y'),\
+                                     file_datetime.strftime('%m'),file_name)
+            if not narr_data:
+                mat_data = loadmat(file_path,variable_names=np.concatenate((['lat','lon'],file_collection_field)))
+                narr_data['lon'] = mat_data['lon']
+                narr_data['lat'] = mat_data['lat']
+                for fn in file_collection_field:
+                    narr_data[fn] = np.zeros((narr_data['lon'].shape[0],narr_data['lon'].shape[1],nstep))
+                    narr_data[fn][...,istep] = mat_data[fn]
+            else:
+                mat_data = loadmat(file_path,variable_names=file_collection_field)
+                for fn in file_collection_field:
+                    narr_data[fn][...,istep] = mat_data[fn]
+    # construct time axis
+    narr_data['datenum'] = np.zeros((nstep),dtype=np.float64)
+    for istep in range(nstep):
+        file_datetime = narr_start_datetime+datetime.timedelta(hours=step_hour*istep)
+        narr_data['datenum'][istep] = (file_datetime.toordinal()\
+                                    +file_datetime.hour/24.\
+                                    +file_datetime.minute/1440.\
+                                    +file_datetime.second/86400.+366.)
+    # interpolate
+    lon_pts = np.repeat(narr_data['lon'][...,np.newaxis],nstep,axis=narr_data['lon'].ndim)
+    lat_pts = np.repeat(narr_data['lat'][...,np.newaxis],nstep,axis=narr_data['lat'].ndim)
+    datenum_pts = np.ones(lon_pts.shape)
+    for istep in range(nstep):
+        datenum_pts[...,istep] = datenum_pts[...,istep]*narr_data['datenum'][istep]
+    
+    sounding_interp = {}
+    # griddata is slow. may need to project sounding_lon/lat to narr x/y space and use interpn
+    for i in range(len(file_collection_names)):
+        file_collection_field = file_collection_fields[i]
+        for fn in file_collection_field:
+            sounding_interp[fn] = griddata((lon_pts.flatten(),lat_pts.flatten(),datenum_pts.flatten()),\
+                           narr_data[fn].flatten(),(sounding_lon,sounding_lat,sounding_datenum))
+    return sounding_interp
 
 class popy(object):
     
@@ -209,10 +398,6 @@ class popy(object):
     
     def F_mat_reader(self,mat_filename):
         import scipy.io
-        
-        def datedev_py(matlab_datenum):
-            python_datetime = datetime.datetime.fromordinal(int(matlab_datenum)) + datetime.timedelta(days=matlab_datenum%1) - datetime.timedelta(days = 366)
-            return python_datetime
         
         mat_data = scipy.io.loadmat(mat_filename)
         
@@ -571,7 +756,7 @@ class popy(object):
             days = (end_date-start_date).days+1
             DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
             for DATE in DATES:
-                flist = glob.glob('S5P_OFFL_L2__NO2____'+DATE.strftime("%Y%m%d")+'T*.nc')
+                flist = glob.glob('S5P_RPRO_L2__NO2____'+DATE.strftime("%Y%m%d")+'T*.nc')
                 l2_list = l2_list+flist
             os.chdir(cwd)
             self.l2_dir = l2_dir
@@ -744,13 +929,21 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
         
-    def F_subset_S5PCH4(self,path):
+    def F_subset_S5PCH4(self,path,if_trop_xch4=False,s5p_product='RPRO'):
         """ 
         function to subset tropomi ch4 level 2 data, calling self.F_read_S5P_nc
         path: directory containing S5PCH4 level files, OR path to control.txt
         for methane, many of auxiliary data are not saved as I trust qa_value
+        path:
+            l2 data directory, or path to control file
+        if_trop_xch4:
+            if calculate tropospheric xch4
+        s5p_product:
+            choose from RPRO and OFFL
         updated on 2019/05/08
+        updated from 2019/05/24 to add tropospheric xch4
         """      
+        from scipy.interpolate import interp1d
         # find out list of l2 files to subset
         if os.path.isfile(path):
             self.F_update_popy_with_control_file(path)
@@ -767,13 +960,9 @@ class popy(object):
             days = (end_date-start_date).days+1
             DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
             for DATE in DATES:
-                flist = glob.glob('S5P_RPRO_L2__CH4____'+DATE.strftime("%Y%m%d")+'T*.nc')
+                flist = glob.glob('S5P_'+s5p_product+'_L2__CH4____'+DATE.strftime("%Y%m%d")+'T*.nc')
                 l2_list = l2_list+flist
-            if not l2_list:
-                self.logger.warning('No reprocessed level 2 data found. Searching for offline data...')
-                for DATE in DATES:
-                    flist = glob.glob('S5P_OFFL_L2__CH4____'+DATE.strftime("%Y%m%d")+'T*.nc')
-                    l2_list = l2_list+flist
+            
             os.chdir(cwd)
             self.l2_dir = l2_dir
             self.l2_list = l2_list
@@ -803,6 +992,29 @@ class popy(object):
         data_fields_l2g = ['latitude_bounds','longitude_bounds','SolarZenithAngle',\
                            'vza','latc','lonc','qa_value','time','delta_time',\
                            'column_amount_no_bias_correction','column_amount','column_uncertainty']
+        if if_trop_xch4:
+             # absolute path of useful variables in the nc file
+             data_fields = ['/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds',\
+                            '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds',\
+                            '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/solar_zenith_angle',\
+                            '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/viewing_zenith_angle',\
+                            '/PRODUCT/SUPPORT_DATA/INPUT_DATA/dry_air_subcolumns',\
+                            '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_pressure',\
+                            '/PRODUCT/SUPPORT_DATA/INPUT_DATA/pressure_interval',\
+                            '/PRODUCT/SUPPORT_DATA/INPUT_DATA/methane_profile_apriori',\
+                            '/PRODUCT/latitude',\
+                            '/PRODUCT/longitude',\
+                            '/PRODUCT/qa_value',\
+                            '/PRODUCT/time',\
+                            '/PRODUCT/delta_time',\
+                            '/PRODUCT/methane_mixing_ratio',\
+                            '/PRODUCT/methane_mixing_ratio_bias_corrected',\
+                            '/PRODUCT/methane_mixing_ratio_precision']    
+             # standardized variable names in l2g file. should map one-on-one to data_fields
+             data_fields_l2g = ['latitude_bounds','longitude_bounds','SolarZenithAngle',\
+                                'vza','dry_air_subcolumns','surface_pressure','pressure_interval',
+                                'methane_profile_apriori','latc','lonc','qa_value','time','delta_time',\
+                                'column_amount_no_bias_correction','column_amount','column_uncertainty']
         self.logger.info('Read, subset, and store level 2 data to l2g_data')
         self.logger.info('Level 2 data are located at '+l2_dir)
         l2g_data = {}
@@ -810,6 +1022,11 @@ class popy(object):
             fn_dir = l2_dir+fn
             self.logger.info('Loading '+fn)
             outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
+            if if_trop_xch4:
+                sounding_interp = F_interp_geos_mat(outp_nc['lonc'],outp_nc['latc'],outp_nc['UTC_matlab_datenum'],\
+                                                geos_dir='/mnt/Data2/GEOS/s5p_interp/',\
+                                                interp_fields=['TROPPT'])
+                outp_nc['TROPPT'] = sounding_interp['TROPPT']
             #f1 = outp_nc['SolarZenithAngle'] <= maxsza
             #f2 = outp_nc['cloud_fraction'] <= maxcf
             # ridiculously, qa_value has a scale_factor of 0.01. so error-prone
@@ -825,6 +1042,8 @@ class popy(object):
             validmask = f3 & f4 & f5 & f6 & f7 & f8 & f9
             self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
             l2g_data0 = {}
+            if np.sum(validmask) == 0:
+                continue
             # yep it's indeed messed up
             Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][:,:,0])[validmask]
             Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][:,:,3])[validmask]
@@ -839,6 +1058,24 @@ class popy(object):
             for key in outp_nc.keys():
                 if key not in {'latitude_bounds','longitude_bounds','time_utc','time','delta_time'}:
                     l2g_data0[key] = outp_nc[key][validmask]
+            if if_trop_xch4:
+                # calculate trop xch4 using l2g_data0
+                l2g_data0['air_column_strat'] = np.zeros(l2g_data0['latc'].shape)
+                l2g_data0['air_column_total'] = np.zeros(l2g_data0['latc'].shape)
+                l2g_data0['methane_ap_column_strat'] = np.zeros(l2g_data0['latc'].shape)
+                for il2 in range(len(l2g_data0['latc'])):
+                    cum_air = np.concatenate(([0.],np.cumsum(l2g_data0['dry_air_subcolumns'][il2,].squeeze())))
+                    cum_methane = np.concatenate(([0.],np.cumsum(l2g_data0['methane_profile_apriori'][il2,].squeeze())))
+                    # model top is 10 Pa, 12 layers, 13 levels
+                    plevel = 10.+np.arange(0,13)*l2g_data0['pressure_interval'][il2]
+                    tropp = l2g_data0['TROPPT'][il2]
+                    l2g_data0['air_column_total'][il2] = np.sum(l2g_data0['dry_air_subcolumns'][il2,])
+                    f = interp1d(plevel,cum_air)
+                    l2g_data0['air_column_strat'][il2] = f(tropp)
+                    f = interp1d(plevel,cum_methane)
+                    l2g_data0['methane_ap_column_strat'][il2] = f(tropp)
+                del l2g_data0['dry_air_subcolumns']
+                del l2g_data0['methane_profile_apriori']                
             l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
         self.l2g_data = l2g_data
         if not l2g_data:
@@ -981,11 +1218,17 @@ class popy(object):
     def F_save_l2g_to_mat(self,file_path,data_fields=[],data_fields_l2g=[]):
         """ 
         save l2g dictionary to .mat file
-        file_path: absolute path to the .mat file to save
-        data_fields and data_fields_l2g: two one-on-one lists of variable names;
-        field in data_fields will be saved as field in data_fields_l2g
-        updated on 2019/04/22
+        file_path: 
+            absolute path to the .mat file to save
+        data_fields and data_fields_l2g: 
+            two one-on-one lists of variable names;
+            field in data_fields will be saved as field in data_fields_l2g
+        updated on 2019/05/26
         """
+        if not self.l2g_data:
+            self.logger.warning('l2g_data is empty. Nothing to save.')
+            return
+        
         import scipy.io
         l2g_data = self.l2g_data.copy()
         for i in range(len(data_fields)):
