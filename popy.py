@@ -932,7 +932,7 @@ class popy(object):
     def F_subset_S5PCH4(self,path,if_trop_xch4=False,s5p_product='RPRO'):
         """ 
         function to subset tropomi ch4 level 2 data, calling self.F_read_S5P_nc
-        path: directory containing S5PCH4 level files, OR path to control.txt
+        path: directory containing S5PCH4 level 2 files, OR path to control.txt
         for methane, many of auxiliary data are not saved as I trust qa_value
         path:
             l2 data directory, or path to control file
@@ -1019,9 +1019,9 @@ class popy(object):
         self.logger.info('Level 2 data are located at '+l2_dir)
         l2g_data = {}
         for fn in l2_list:
-            fn_dir = l2_dir+fn
+            fn_path = os.path.join(l2_dir,fn)
             self.logger.info('Loading '+fn)
-            outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
+            outp_nc = self.F_read_S5P_nc(fn_path,data_fields,data_fields_l2g)
             if if_trop_xch4:
                 sounding_interp = F_interp_geos_mat(outp_nc['lonc'],outp_nc['latc'],outp_nc['UTC_matlab_datenum'],\
                                                 geos_dir='/mnt/Data2/GEOS/s5p_interp/',\
@@ -1083,10 +1083,50 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
         
-    def F_subset_OMH2O(self,l2_dir):
-        import glob
+    def F_subset_OMH2O(self,path,l2_path_structure=None):
+        """ 
+        function to subset omi h2o level 2 data, calling self.F_read_he5
+        path:
+            l2 data root directory, or path to control file
+        l2_path_structure:
+            None by default, indicating individual files are directly under path
+            '%Y/' if files are like l2_dir/2019/*.he5
+            '%Y/%m/%d/' if files are like l2_dir/2019/05/01/*.he5
+        updated on 2019/06/10
+        """      
+        # find out list of l2 files to subset
+        if os.path.isfile(path):
+            self.F_update_popy_with_control_file(path)
+            l2_list = self.l2_list
+            l2_dir = self.l2_dir
+        else:
+            import glob
+            l2_dir = path
+            l2_list = []
+            cwd = os.getcwd()
+            os.chdir(l2_dir)
+            start_date = self.start_python_datetime.date()
+            end_date = self.end_python_datetime.date()
+            days = (end_date-start_date).days+1
+            DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+            for DATE in DATES:
+                if l2_path_structure == None:
+                    flist = glob.glob('OMI-Aura_L2-OMH2O_'+DATE.strftime("%Ym%m%d")+'*.he5')
+                else:
+                    flist = glob.glob(DATE.strftime(l2_path_structure)+\
+                                      'OMI-Aura_L2-OMH2O_'+DATE.strftime("%Ym%m%d")+'*.he5')
+                l2_list = l2_list+flist
+            
+            os.chdir(cwd)
+            self.l2_dir = l2_dir
+            self.l2_list = l2_list
+        
         data_fields = ['AMFCloudFraction','AMFCloudPressure','AirMassFactor','Albedo',\
                        'ColumnAmountDestriped','ColumnUncertainty','MainDataQualityFlag',\
+                       'PixelCornerLatitudes','PixelCornerLongitudes','FittingRMS']
+        # omh2o on aura avdc have no ColumnAmountDestriped field?!
+        data_fields = ['AMFCloudFraction','AMFCloudPressure','AirMassFactor','Albedo',\
+                       'ColumnAmount','ColumnUncertainty','MainDataQualityFlag',\
                        'PixelCornerLatitudes','PixelCornerLongitudes','FittingRMS']
         data_fields_l2g = ['cloud_fraction','cloud_pressure','amf','albedo',\
                            'column_amount','column_uncertainty','MainDataQualityFlag',\
@@ -1105,45 +1145,43 @@ class popy(object):
         days = (end_date-start_date).days+1
         DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
         l2g_data = {}
-        for DATE in DATES:
-            date_dir = l2_dir+DATE.strftime("%Y/")
-            flist = glob.glob(date_dir+'OMI-Aura_L2_OMH2O_'+DATE.strftime("%Ym%m%d")+'*.he5')
-            for fn in flist:
-                if self.show_progress:
-                    print('Loading '+fn)
-                outp_he5 = self.F_read_he5(fn,swathname,data_fields,geo_fields,data_fields_l2g,geo_fields_l2g)
-                f1 = outp_he5['SolarZenithAngle'] <= maxsza
-                f2 = outp_he5['cloud_fraction'] <= maxcf
-                f3 = outp_he5['MainDataQualityFlag'] == 0              
-                f4 = outp_he5['latc'] >= south
-                f5 = outp_he5['latc'] <= north
-                tmplon = outp_he5['lonc']-west
-                tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
-                f6 = tmplon >= 0
-                f7 = tmplon <= east-west
-                f8 = outp_he5['UTC_matlab_datenum'] >= self.start_matlab_datenum
-                f9 = outp_he5['UTC_matlab_datenum'] <= self.end_matlab_datenum
-                f10 = outp_he5['FittingRMS'] < 0.005
-                f11 = outp_he5['cloud_pressure'] > 750.
-                validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9 & f10 & f11
-                if self.show_progress:
-                    print('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
-                l2g_data0 = {}
-                # python vs. matlab orders are messed up.
-                Lat_lowerleft = outp_he5['PixelCornerLatitudes'][0:-1,0:-1][validmask]
-                Lat_upperleft = outp_he5['PixelCornerLatitudes'][1:,0:-1][validmask]
-                Lat_lowerright = outp_he5['PixelCornerLatitudes'][0:-1,1:][validmask]
-                Lat_upperright = outp_he5['PixelCornerLatitudes'][1:,1:][validmask]               
-                Lon_lowerleft = outp_he5['PixelCornerLongitudes'][0:-1,0:-1][validmask]
-                Lon_upperleft = outp_he5['PixelCornerLongitudes'][1:,0:-1][validmask]
-                Lon_lowerright = outp_he5['PixelCornerLongitudes'][0:-1,1:][validmask]
-                Lon_upperright = outp_he5['PixelCornerLongitudes'][1:,1:][validmask]
-                l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
-                l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
-                for key in outp_he5.keys():
-                    if key not in {'MainDataQualityFlag','PixelCornerLatitudes','PixelCornerLongitudes','TimeUTC'}:
-                        l2g_data0[key] = outp_he5[key][validmask]
-                l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        for fn in l2_list:
+            file_path = os.path.join(l2_dir,fn)
+            self.logger.info('loading '+fn)
+            outp_he5 = self.F_read_he5(file_path,swathname,data_fields,geo_fields,data_fields_l2g,geo_fields_l2g)
+            f1 = outp_he5['SolarZenithAngle'] <= maxsza
+            f2 = outp_he5['cloud_fraction'] <= maxcf
+            f3 = outp_he5['MainDataQualityFlag'] == 0              
+            f4 = outp_he5['latc'] >= south
+            f5 = outp_he5['latc'] <= north
+            tmplon = outp_he5['lonc']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp_he5['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp_he5['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            f10 = outp_he5['FittingRMS'] < 0.005
+            f11 = outp_he5['cloud_pressure'] > 750.
+            validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9 & f10 & f11
+            self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            l2g_data0 = {}
+            if np.sum(validmask) == 0:
+                continue
+            # python vs. matlab orders are messed up.
+            Lat_lowerleft = outp_he5['PixelCornerLatitudes'][0:-1,0:-1][validmask]
+            Lat_upperleft = outp_he5['PixelCornerLatitudes'][1:,0:-1][validmask]
+            Lat_lowerright = outp_he5['PixelCornerLatitudes'][0:-1,1:][validmask]
+            Lat_upperright = outp_he5['PixelCornerLatitudes'][1:,1:][validmask]               
+            Lon_lowerleft = outp_he5['PixelCornerLongitudes'][0:-1,0:-1][validmask]
+            Lon_upperleft = outp_he5['PixelCornerLongitudes'][1:,0:-1][validmask]
+            Lon_lowerright = outp_he5['PixelCornerLongitudes'][0:-1,1:][validmask]
+            Lon_upperright = outp_he5['PixelCornerLongitudes'][1:,1:][validmask]
+            l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
+            l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+            for key in outp_he5.keys():
+                if key not in {'MainDataQualityFlag','PixelCornerLatitudes','PixelCornerLongitudes','TimeUTC'}:
+                    l2g_data0[key] = outp_he5[key][validmask]
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
         self.l2g_data = l2g_data
         if not l2g_data:
             self.nl2 = 0
@@ -1373,9 +1411,14 @@ class popy(object):
             local_l2g_data = {k:v[il2,] for (k,v) in l2g_data.items()}
             if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B","SCIAMACHY","TROPOMI"}:
                 latc = local_l2g_data['latc']
-                lonc = local_l2g_data['lonc']
                 latr = local_l2g_data['latr']
-                lonr = local_l2g_data['lonr']
+                lonc = local_l2g_data['lonc']-west
+                lonr = local_l2g_data['lonr']-west
+                if lonc < 0:
+                    lonc = lonc+360
+                lonr[lonr < 0] = lonr[lonr < 0]+360
+                lonc = lonc+west
+                lonr = lonr+west
                 
                 lonc_index = np.argmin(np.abs(xgrid-lonc))
                 latc_index = np.argmin(np.abs(ygrid-latc))
@@ -1411,7 +1454,10 @@ class popy(object):
                                             patch_lonc,latc)
             elif self.instrum in {"IASI","CrIS"}:
                 latc = local_l2g_data['latc']
-                lonc = local_l2g_data['lonc']
+                lonc = local_l2g_data['lonc']-west
+                if lonc < 0:
+                    lonc = lonc+360
+                lonc = lonc+west
                 u = local_l2g_data['u']
                 v = local_l2g_data['v']
                 t = local_l2g_data['t']
@@ -1535,9 +1581,14 @@ class popy(object):
             local_l2g_data = {k:v[il2,] for (k,v) in l2g_data.items()}
             if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B","SCIAMACHY","TROPOMI"}:
                 latc = local_l2g_data['latc']
-                lonc = local_l2g_data['lonc']
                 latr = local_l2g_data['latr']
-                lonr = local_l2g_data['lonr']
+                lonc = local_l2g_data['lonc']-west
+                lonr = local_l2g_data['lonr']-west
+                if lonc < 0:
+                    lonc = lonc+360
+                lonr[lonr < 0] = lonr[lonr < 0]+360
+                lonc = lonc+west
+                lonr = lonr+west
                 
                 lonc_index = np.argmin(np.abs(xgrid-lonc))
                 latc_index = np.argmin(np.abs(ygrid-latc))
@@ -1573,7 +1624,10 @@ class popy(object):
                                             patch_lonc,latc)
             elif self.instrum in {"IASI","CrIS"}:
                 latc = local_l2g_data['latc']
-                lonc = local_l2g_data['lonc']
+                lonc = local_l2g_data['lonc']-west
+                if lonc < 0:
+                    lonc = lonc+360
+                lonc = lonc+west
                 u = local_l2g_data['u']
                 v = local_l2g_data['v']
                 t = local_l2g_data['t']
