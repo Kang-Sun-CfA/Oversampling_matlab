@@ -28,7 +28,8 @@ def datedev_py(matlab_datenum):
 
 def F_interp_geos_mat(sounding_lon,sounding_lat,sounding_datenum,\
                   geos_dir='/mnt/Data2/GEOS/s5p_interp/',\
-                  interp_fields=['TROPPT']):
+                  interp_fields=['TROPPT'],\
+                  time_collection='inst3'):
     """
     sample a field from subset geos fp data in .mat format. 
     see geos.py for geos downloading/subsetting
@@ -42,10 +43,23 @@ def F_interp_geos_mat(sounding_lon,sounding_lat,sounding_datenum,\
         directory where subset geos data in .mat are saved
     interp_fields:
         variables to interpolate from geos fp, only 2d fields are supported
+    time_collection:
+            choose from inst3, tavg1, tavg3
     created on 2019/05/26
+    updated on 2019/07/01 to be compatible with different file collections and non continues time steps
     """
     from scipy.io import loadmat
     from scipy.interpolate import RegularGridInterpolator
+    
+    if time_collection == 'inst3' or time_collection == '':
+        step_hour = 3
+        daily_start_time = datetime.time(hour=0,minute=0)
+    elif time_collection == 'tavg1':
+        step_hour = 1
+        daily_start_time = datetime.time(hour=0,minute=30)
+    elif time_collection == 'tavg3':
+        step_hour = 3
+        daily_start_time = datetime.time(hour=1,minute=30)
     
     start_datenum = np.amin(sounding_datenum)
     end_datenum = np.amax(sounding_datenum)
@@ -53,29 +67,24 @@ def F_interp_geos_mat(sounding_lon,sounding_lat,sounding_datenum,\
     start_year = start_datetime.year
     start_month = start_datetime.month
     start_day = start_datetime.day
-    start_hour = start_datetime.hour
     
     end_datetime = datedev_py(end_datenum)
     end_year = end_datetime.year
     end_month = end_datetime.month
     end_day = end_datetime.day
-    end_hour = end_datetime.hour
-    end_minute = end_datetime.minute
-    end_second = end_datetime.second
     
-    step_hour = 3 # geos fp data are 3-hourly
+    # extend the start/end datetime to the closest step_hour intervals
+    t_array0 = datetime.datetime.combine(datetime.date(start_year,start_month,start_day),\
+    daily_start_time)-datetime.timedelta(hours=step_hour)
+    t_array = np.array([t_array0+datetime.timedelta(hours=int(step_hour)*i) for i in range(int(24/step_hour+2))])
+    tn_array = np.array([(start_datetime-dt).total_seconds() for dt in t_array])
+    geos_start_datetime = t_array[tn_array >= 0.][-1]
     
-    geos_start_hour = start_hour-start_hour%step_hour
-    geos_start_datetime = datetime.datetime(year=start_year,month=start_month,day=start_day,hour=geos_start_hour)
-    if end_hour > 24-step_hour or (end_hour == 24-step_hour and (end_minute > 0 or end_second > 0)):
-        geos_end_hour = 0
-        geos_end_datetime = datetime.datetime(year=end_year,month=end_month,day=end_day,hour=geos_end_hour) +datetime.timedelta(days=1)
-    elif end_hour%step_hour == 0 and end_minute == 0 and end_second == 0:
-        geos_end_hour = end_hour
-        geos_end_datetime = datetime.datetime(year=end_year,month=end_month,day=end_day,hour=geos_end_hour)
-    else:
-        geos_end_hour = (step_hour-(end_hour+1)%step_hour)%step_hour+end_hour+1
-        geos_end_datetime = datetime.datetime(year=end_year,month=end_month,day=end_day,hour=geos_end_hour)
+    t_array0 = datetime.datetime.combine(datetime.date(end_year,end_month,end_day),\
+    daily_start_time)-datetime.timedelta(hours=step_hour)
+    t_array = np.array([t_array0+datetime.timedelta(hours=int(step_hour)*i) for i in range(int(24/step_hour+2))])
+    tn_array = np.array([(end_datetime-dt).total_seconds() for dt in t_array])
+    geos_end_datetime = t_array[tn_array <= 0.][0]
     
     nstep = (geos_end_datetime-geos_start_datetime).total_seconds()/3600/step_hour+1
     nstep = int(nstep)
@@ -87,7 +96,9 @@ def F_interp_geos_mat(sounding_lon,sounding_lat,sounding_datenum,\
         file_dir = os.path.join(geos_dir,file_datetime.strftime('Y%Y'),\
                                    file_datetime.strftime('M%m'),\
                                    file_datetime.strftime('D%d'))
-        file_path = os.path.join(file_dir,'subset_'+file_datetime.strftime('%Y%m%d_%H')+'.mat')
+        file_path = os.path.join(file_dir,'subset_'+file_datetime.strftime('%Y%m%d_%H%M')+'.mat')
+        if not os.path.exists(file_path):
+            continue
         if not geos_data:
             mat_data = loadmat(file_path,variable_names=np.concatenate((['lat','lon'],interp_fields)))
             geos_data['lon'] = mat_data['lon'].flatten()
@@ -105,8 +116,22 @@ def F_interp_geos_mat(sounding_lon,sounding_lat,sounding_datenum,\
                                     +file_datetime.hour/24.\
                                     +file_datetime.minute/1440.\
                                     +file_datetime.second/86400.+366.)
-    # interpolate
     sounding_interp = {}
+    if not geos_data:
+        for fn in interp_fields:
+            sounding_interp[fn] = sounding_lon*np.nan
+        return sounding_interp
+    f1 = geos_data['datenum'] != 0
+    if np.sum(f1) == 0:
+        for fn in interp_fields:
+            sounding_interp[fn] = sounding_lon*np.nan
+        return sounding_interp
+    
+    geos_data['datenum'] = geos_data['datenum'][f1]
+    for fn in interp_fields:
+        geos_data[fn] = geos_data[fn][...,f1]
+    # interpolate
+    
     for fn in interp_fields:
         my_interpolating_function = \
         RegularGridInterpolator((geos_data['lon'],geos_data['lat'],geos_data['datenum']),\
@@ -734,11 +759,22 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
-    def F_subset_S5PNO2(self,path):
+    def F_subset_S5PNO2(self,path,s5p_product='RPRO',geos_interp_variables=[],
+                        geos_time_collection=''):
         """ 
         function to subset tropomi no2 level 2 data, calling self.F_read_S5P_nc
-        path: directory containing S5PNO2 level files, OR path to control.txt
+        path:
+            l2 data directory, or path to control file
+        s5p_product:
+            choose from RPRO and OFFL
+        geos_interp_variables:
+            a list of variables (only 2d fields are supported now) to be 
+            resampled from geos fp (has to be subsetted/resaved into .mat). see
+            the geos class for geos fp data handling
+        geos_time_collection:
+            choose from inst3, tavg1, tavg3
         updated on 2019/04/24
+        updated on 2019/06/20 to add s5p_product/geos_interp_variables option
         """      
         # find out list of l2 files to subset
         if os.path.isfile(path):
@@ -756,7 +792,7 @@ class popy(object):
             days = (end_date-start_date).days+1
             DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
             for DATE in DATES:
-                flist = glob.glob('S5P_RPRO_L2__NO2____'+DATE.strftime("%Y%m%d")+'T*.nc')
+                flist = glob.glob('S5P_'+s5p_product+'_L2__NO2____'+DATE.strftime("%Y%m%d")+'T*.nc')
                 l2_list = l2_list+flist
             os.chdir(cwd)
             self.l2_dir = l2_dir
@@ -794,6 +830,13 @@ class popy(object):
             fn_dir = l2_dir+fn
             self.logger.info('Loading '+fn)
             outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
+            if geos_interp_variables != []:
+                sounding_interp = F_interp_geos_mat(outp_nc['lonc'],outp_nc['latc'],outp_nc['UTC_matlab_datenum'],\
+                                                geos_dir='/mnt/Data2/GEOS/s5p_interp/',\
+                                                interp_fields=geos_interp_variables,\
+                                                time_collection=geos_time_collection)
+                for var in geos_interp_variables:
+                    outp_nc[var] = sounding_interp[var]
             f1 = outp_nc['SolarZenithAngle'] <= maxsza
             f2 = outp_nc['cloud_fraction'] <= maxcf
             # ridiculously, qa_value has a scale_factor of 0.01. so error-prone
@@ -830,11 +873,22 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
             
-    def F_subset_S5PHCHO(self,path):
+    def F_subset_S5PHCHO(self,path,s5p_product='RPRO',geos_interp_variables=[],
+                         geos_time_collection=''):
         """ 
         function to subset tropomi hcho level 2 data, calling self.F_read_S5P_nc
-        path: directory containing S5PHCHO level files, OR path to control.txt
+        path:
+            l2 data directory, or path to control file
+        s5p_product:
+            choose from RPRO and OFFL
+        geos_interp_variables:
+            a list of variables (only 2d fields are supported now) to be 
+            resampled from geos fp (has to be subsetted/resaved into .mat). see
+            the geos class for geos fp data handling
+        geos_time_collection:
+            choose from inst3, tavg1, tavg3
         updated on 2019/04/30
+        updated on 2019/06/20 to add s5p_product/geos_interp_variables option
         """      
         # find out list of l2 files to subset
         if os.path.isfile(path):
@@ -852,7 +906,7 @@ class popy(object):
             days = (end_date-start_date).days+1
             DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
             for DATE in DATES:
-                flist = glob.glob('S5P_OFFL_L2__HCHO___'+DATE.strftime("%Y%m%d")+'T*.nc')
+                flist = glob.glob('S5P_'+s5p_product+'_L2__HCHO___'+DATE.strftime("%Y%m%d")+'T*.nc')
                 l2_list = l2_list+flist
             os.chdir(cwd)
             self.l2_dir = l2_dir
@@ -893,6 +947,13 @@ class popy(object):
             fn_dir = l2_dir+fn
             self.logger.info('Loading '+fn)
             outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
+            if geos_interp_variables != []:
+                sounding_interp = F_interp_geos_mat(outp_nc['lonc'],outp_nc['latc'],outp_nc['UTC_matlab_datenum'],\
+                                                geos_dir='/mnt/Data2/GEOS/s5p_interp/',\
+                                                interp_fields=geos_interp_variables,
+                                                time_collection=geos_time_collection)
+                for var in geos_interp_variables:
+                    outp_nc[var] = sounding_interp[var]
             f1 = outp_nc['SolarZenithAngle'] <= maxsza
             f2 = outp_nc['cloud_fraction'] <= maxcf
             # ridiculously, qa_value has a scale_factor of 0.01. so error-prone
@@ -929,7 +990,8 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
         
-    def F_subset_S5PCH4(self,path,if_trop_xch4=False,s5p_product='RPRO'):
+    def F_subset_S5PCH4(self,path,if_trop_xch4=False,s5p_product='RPRO',
+                        geos_interp_variables=[],geos_time_collection=''):
         """ 
         function to subset tropomi ch4 level 2 data, calling self.F_read_S5P_nc
         path: directory containing S5PCH4 level 2 files, OR path to control.txt
@@ -940,8 +1002,15 @@ class popy(object):
             if calculate tropospheric xch4
         s5p_product:
             choose from RPRO and OFFL
+        geos_interp_variables:
+            a list of variables (only 2d fields are supported now) to be 
+            resampled from geos fp (has to be subsetted/resaved into .mat). see
+            the geos class for geos fp data handling
+        geos_time_collection:
+            choose from inst3, tavg1, tavg3
         updated on 2019/05/08
         updated from 2019/05/24 to add tropospheric xch4
+        updated on 2019/06/20 to include more interpolation options from geos fp
         """      
         from scipy.interpolate import interp1d
         # find out list of l2 files to subset
@@ -1022,11 +1091,20 @@ class popy(object):
             fn_path = os.path.join(l2_dir,fn)
             self.logger.info('Loading '+fn)
             outp_nc = self.F_read_S5P_nc(fn_path,data_fields,data_fields_l2g)
+            
             if if_trop_xch4:
+                
+                if 'TROPPT' not in geos_interp_variables:
+                    self.logger.warning('tropopause has to be resampled from geos fp to calculate tropospheric xch4!')
+                    geos_interp_variables = np.concatenate((geos_interp_variables,['TROPPT']),0)
+            
+            if geos_interp_variables != []:
                 sounding_interp = F_interp_geos_mat(outp_nc['lonc'],outp_nc['latc'],outp_nc['UTC_matlab_datenum'],\
                                                 geos_dir='/mnt/Data2/GEOS/s5p_interp/',\
-                                                interp_fields=['TROPPT'])
-                outp_nc['TROPPT'] = sounding_interp['TROPPT']
+                                                interp_fields=geos_interp_variables,\
+                                                time_collection=geos_time_collection)
+                for var in geos_interp_variables:
+                    outp_nc[var] = sounding_interp[var]
             #f1 = outp_nc['SolarZenithAngle'] <= maxsza
             #f2 = outp_nc['cloud_fraction'] <= maxcf
             # ridiculously, qa_value has a scale_factor of 0.01. so error-prone
@@ -1274,6 +1352,8 @@ class popy(object):
                 l2g_data[data_fields_l2g[i]] = l2g_data.pop(data_fields[i])
         # reshape 1d arrays to (nl2, 1)
         for key in l2g_data.keys():
+            if key not in {'UTC_matlab_datenum','utc','ift','across_track_position'}:
+                l2g_data[key] = np.float32(l2g_data[key])
             if key not in {'latr','lonr'}:
                 l2g_data[key] = l2g_data[key].reshape(len(l2g_data[key]),1)
             else:# otherwise, the order of 2d array is COMPLETELY screwed

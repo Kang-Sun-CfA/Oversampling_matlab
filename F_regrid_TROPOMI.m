@@ -2,6 +2,7 @@ function output_regrid = F_regrid_TROPOMI(inp,output_subset)
 % written by Lorena Castro from Iowa University to oversample TROPOMI data
 % updated by Kang Sun on 2019/05/08 for more flexibility
 % updated on 2019/05/11 for block-parallel
+% updated on 2019/06/30 for multi-variable oversampling
 
 output_regrid = [];
 Res = inp.Res;
@@ -70,6 +71,13 @@ else
 end
 
 vcdname = inp.vcdname;
+if ~iscell(vcdname)
+    if_old_vcd = true;
+    vcdname = {vcdname};
+else
+    if_old_vcd = false;
+end
+nv = length(vcdname);
 vcderrorname = inp.vcderrorname;
 
 % % parameters to define pixel SRF
@@ -143,13 +151,13 @@ if isfield(output_subset,'sza')
 else
     f3 = true(size(output_subset.utc));
 end
-f11 = output_subset.(vcdname) >= MinCol;
-f12 = output_subset.(vcdname) <= MaxCol;
+
+f11 = output_subset.(vcdname{1}) >= MinCol;
+f12 = output_subset.(vcdname{1}) <= MaxCol;
 
 f5 = ismember(output_subset.ift,usextrack);
 
-% add on 2018/03/28 for OMCHOCHO
-f7 = output_subset.(vcdname) > -1e26;
+f7 = output_subset.(vcdname{1}) > -1e26;
 
 % add on 2018/09/10 to make sure uncertainties are all positive
 f8 = output_subset.(vcderrorname) > 0;
@@ -172,7 +180,11 @@ Lon_r = output_subset.lonr(validmask,:);
 Lat_c = output_subset.latc(validmask);
 Lon_c = output_subset.lonc(validmask);
 Xtrack = output_subset.ift(validmask);
-VCD = output_subset.(vcdname)(validmask);
+% VCD is a structure if do_multi_var is true, a vector if otherwise
+VCD = nan(length(Lat_c),nv);
+for iv = 1:nv
+    VCD(:,iv) = output_subset.(vcdname{iv})(validmask);
+end
 VCDe = (output_subset.(vcderrorname)(validmask)).^errorpower;
 pixel_west = Lon_c-range(Lon_r,2)/2*xmargin;
 pixel_east = Lon_c+range(Lon_r,2)/2*xmargin;
@@ -207,7 +219,7 @@ if if_parallel
     end
     c_xmesh = c_xmesh(:);
     c_ymesh = c_ymesh(:);
-    c_A = c_xmesh;
+    c_A = cell(nblock,1);
     c_B = c_xmesh;
     c_D = c_xmesh;
     c_xgrid = cell(nblock,1);
@@ -216,7 +228,7 @@ if if_parallel
     c_Lon_r = cell(nblock,1);
     c_Lat_c = cell(nblock,1);
     c_Lon_c = cell(nblock,1);
-    c_VCD = cell(nblock,1);
+    c_VCD = cell(nblock,nv);
     c_VCDe = cell(nblock,1);
     c_pixel_west = cell(nblock,1);
     c_pixel_east = cell(nblock,1);
@@ -230,7 +242,6 @@ if if_parallel
     %     Lon_r(il2,[1:4 1]),Lat_r(il2,[1:4 1]))
     nl2_block = zeros(nblock,1);
     for iblock = 1:nblock
-        c_A{iblock} = single(c_A{iblock})*0;
         c_B{iblock} = single(c_B{iblock})*0;
         c_D{iblock} = c_D{iblock}*0;
         c_xgrid{iblock} = c_xmesh{iblock}(1,:);
@@ -243,7 +254,9 @@ if if_parallel
         c_Lon_r{iblock} = Lon_r(in,:);
         c_Lat_c{iblock} = Lat_c(in);
         c_Lon_c{iblock} = Lon_c(in);
-        c_VCD{iblock} = VCD(in);
+        for iv = 1:nv
+            c_VCD{iblock,iv} = VCD(in,iv);
+        end
         c_VCDe{iblock} = VCDe(in);
         c_pixel_west{iblock} = pixel_west(in);
         c_pixel_east{iblock} = pixel_east(in);
@@ -260,16 +273,18 @@ if if_parallel
     parfor iblock = 1:nblock
         if nl2_block(iblock) == 0
             disp(['block ',num2str(iblock),' has no data'])
+            c_A{iblock} = zeros(size(c_B{iblock},1),size(c_B{iblock},2),nv);
             continue
         end
         b_Lat_r = c_Lat_r{iblock};
         b_Lon_r = c_Lon_r{iblock};
         b_Lat_c = c_Lat_c{iblock};
         b_Lon_c = c_Lon_c{iblock};
-        b_VCD = c_VCD{iblock};
+        %         b_VCD = c_VCD(iblock,:);
         b_VCDe = c_VCDe{iblock};
-        b_A = c_A{iblock};
+        %         b_A = c_A(iblock,:);
         b_B = c_B{iblock};
+        b_A = zeros(size(b_B,1),size(b_B,2),nv);
         b_D = c_D{iblock};
         b_nl2 = nl2_block(iblock);
         b_xgrid = c_xgrid{iblock};
@@ -285,8 +300,6 @@ if if_parallel
             lon_r = b_Lon_r(iL2,:);
             lat_c = b_Lat_c(iL2);
             lon_c = b_Lon_c(iL2);
-            
-            vcd = b_VCD(iL2);
             vcd_unc = b_VCDe(iL2);
             A = polyarea([lon_r(:);lon_r(1)],[lat_r(:);lat_r(1)]);
             
@@ -298,10 +311,14 @@ if if_parallel
             
             SG = F_2D_SG_affine(lon_mesh,lat_mesh,lon_r,lat_r,lon_c,lat_c,...
                 m,n,1,1,0,0);
-            
-            b_A(lat_index,lon_index) = b_A(lat_index,lon_index) + SG/A/vcd_unc*vcd;
             b_B(lat_index,lon_index) = b_B(lat_index,lon_index) + SG/A/vcd_unc;
             b_D(lat_index,lon_index) = b_D(lat_index,lon_index)+SG;
+            for iv = 1:nv
+                b_VCD = c_VCD{iblock,iv};
+                vcd = b_VCD(iL2);
+                
+                b_A(lat_index,lon_index,iv) = b_A(lat_index,lon_index,iv) + SG/A/vcd_unc*vcd;
+            end
             
         end
         disp(['block ',num2str(iblock),' has ',num2str(b_nl2),' pixels, finished on ',datestr(now)])
@@ -309,12 +326,25 @@ if if_parallel
         c_B{iblock} = b_B;
         c_D{iblock} = b_D;
     end
-    Sum_Above = cell2mat(reshape(c_A,[nblock_row,nblock_col]));
+    c_a = cell(nblock,nv);
+    for iv = 1:nv
+        for iblock = 1:nblock
+            c_a{iblock,iv} = squeeze(c_A{iblock}(:,:,iv));
+        end
+    end
+    if if_old_vcd
+        Sum_Above = single(cell2mat(reshape(c_A,[nblock_row,nblock_col])));
+    else
+        for iv = 1:nv
+            Sum_Above.(vcdname{iv}) = single(cell2mat(reshape(c_a(:,iv),[nblock_row,nblock_col])));
+        end
+    end
     Sum_Below = cell2mat(reshape(c_B,[nblock_row,nblock_col]));
     D = cell2mat(reshape(c_D,[nblock_row,nblock_col]));
     output_regrid.nblock = nblock;
 else
-    Sum_Above = zeros(nrows,ncols,'single');
+    %error('serial is not supported yet!')
+    Sum_Above = zeros(nrows,ncols,nv,'single');
     Sum_Below = zeros(nrows,ncols,'single');
     D = zeros(nrows,ncols,'single');
     
@@ -324,7 +354,7 @@ else
         lon_r = Lon_r(iL2,:);
         lat_c = Lat_c(iL2);
         lon_c = Lon_c(iL2);
-        vcd = VCD(iL2);
+        
         vcd_unc = VCDe(iL2);
         A = polyarea([lon_r(:);lon_r(1)],[lat_r(:);lat_r(1)]);
         
@@ -336,8 +366,10 @@ else
         
         SG = F_2D_SG_affine(lon_mesh,lat_mesh,lon_r,lat_r,lon_c,lat_c,...
             m,n,1,1,0,0);
-        
-        Sum_Above(lat_index,lon_index) = Sum_Above(lat_index,lon_index) + SG/A/vcd_unc*vcd;
+        for iv = 1:nv
+            vcd = VCD(iL2,iv);
+            Sum_Above(lat_index,lon_index,iv) = Sum_Above(lat_index,lon_index,iv) + SG/A/vcd_unc*vcd;
+        end
         Sum_Below(lat_index,lon_index) = Sum_Below(lat_index,lon_index) + SG/A/vcd_unc;
         D(lat_index,lon_index) = D(lat_index,lon_index)+SG;
         
@@ -346,12 +378,22 @@ else
             count = count+1;
         end
     end
+    if if_old_vcd
+        Sum_Above = squeeze(Sum_Above);
+    else
+        tmp = Sum_Above;
+        Sum_Above = [];
+        for iv = 1:nv
+            Sum_Above.(vcdname{iv}) = squeeze(tmp(:,:,iv));
+        end
+    end
 end
-
 output_regrid.A = Sum_Above;
 output_regrid.B = Sum_Below;
-output_regrid.C = Sum_Above./Sum_Below;
-output_regrid.D = D;
+if if_old_vcd
+    output_regrid.C = Sum_Above./Sum_Below;
+end
+output_regrid.D = single(D);
 
 output_regrid.xgrid = xgrid;
 output_regrid.ygrid = ygrid;
