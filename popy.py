@@ -1078,12 +1078,12 @@ class popy(object):
                             '/PRODUCT/delta_time',\
                             '/PRODUCT/methane_mixing_ratio',\
                             '/PRODUCT/methane_mixing_ratio_bias_corrected',\
-                            '/PRODUCT/methane_mixing_ratio_precision']    
+                            '/PRODUCT/methane_mixing_ratio_precision','/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/surface_albedo_SWIR']    
              # standardized variable names in l2g file. should map one-on-one to data_fields
              data_fields_l2g = ['latitude_bounds','longitude_bounds','SolarZenithAngle',\
                                 'vza','dry_air_subcolumns','surface_pressure','pressure_interval',
                                 'methane_profile_apriori','latc','lonc','qa_value','time','delta_time',\
-                                'column_amount_no_bias_correction','column_amount','column_uncertainty']
+                                'column_amount_no_bias_correction','column_amount','column_uncertainty','albedo']
         self.logger.info('Read, subset, and store level 2 data to l2g_data')
         self.logger.info('Level 2 data are located at '+l2_dir)
         l2g_data = {}
