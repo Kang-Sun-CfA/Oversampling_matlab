@@ -8,6 +8,8 @@ Created on Sat Jan 26 15:50:30 2019
 2019/03/25: use control.txt
 2019/04/22: include S5PNO2
 2019/05/26: sample met data
+2019/07/13: implement optimized regridding from chris
+2019/07/19: fix fwhm -> w bug (pixel size corrected, by 2)
 """
 
 import numpy as np
@@ -106,6 +108,8 @@ def F_interp_geos_mat(sounding_lon,sounding_lat,sounding_datenum,\
             geos_data['datenum'] = np.zeros((nstep),dtype=np.float64)
             for fn in interp_fields:
                 geos_data[fn] = np.zeros((len(geos_data['lon']),len(geos_data['lat']),nstep))
+                # geos fp uses 9.9999999E14 as missing value
+                mat_data[fn][mat_data[fn]>9e14] = np.nan
                 geos_data[fn][...,istep] = mat_data[fn]
         else:
             mat_data = loadmat(file_path,variable_names=interp_fields)
@@ -252,7 +256,7 @@ class popy(object):
             k3 = 1
             error_model = "linear"
             oversampling_list = ['column_amount','albedo',\
-                                 'amf','cloud_fraction','cloud_pressure','terrain_height']
+                                 'cloud_fraction','cloud_pressure','terrain_height']
             xmargin = 1.5
             ymargin = 2
             maxsza = 60
@@ -366,6 +370,8 @@ class popy(object):
         self.k1 = k1
         self.k2 = k2
         self.k3 = k3
+        self.sg_kfacx = 2*(np.log(2)**(1/k1/k3))
+        self.sg_kfacy = 2*(np.log(2)**(1/k2/k3))
         self.error_model = error_model
         self.oversampling_list = oversampling_list
         self.grid_size = grid_size
@@ -566,17 +572,24 @@ class popy(object):
                 data = f[DATAFIELD_NAME]
                 data = data[:]
                 outp_he5[geo_fields_l2g[i]] = data
-            TimeUTC = outp_he5['TimeUTC'].astype(np.int)
-            # python datetime does not allow vectorization
-            UTC_matlab_datenum = np.zeros((TimeUTC.shape[0],1),dtype=np.float64)
-            for i in range(TimeUTC.shape[0]):
-                tmp = datetime.datetime(year=TimeUTC[i,0],month=TimeUTC[i,1],day=TimeUTC[i,2],\
-                                        hour=TimeUTC[i,3],minute=TimeUTC[i,4],second=TimeUTC[i,5])
-                UTC_matlab_datenum[i] = (tmp.toordinal()\
-                                  +tmp.hour/24.\
-                                  +tmp.minute/1440.\
-                                  +tmp.second/86400.+366.)
-            outp_he5['UTC_matlab_datenum'] = np.tile(UTC_matlab_datenum,(1,outp_he5['latc'].shape[1]))
+            
+            
+            if 'TimeUTC' in outp_he5.keys():
+                TimeUTC = outp_he5['TimeUTC'].astype(np.int)
+                # python datetime does not allow vectorization
+                UTC_matlab_datenum = np.zeros((TimeUTC.shape[0],1),dtype=np.float64)
+                for i in range(TimeUTC.shape[0]):
+                    tmp = datetime.datetime(year=TimeUTC[i,0],month=TimeUTC[i,1],day=TimeUTC[i,2],\
+                                            hour=TimeUTC[i,3],minute=TimeUTC[i,4],second=TimeUTC[i,5])
+                    UTC_matlab_datenum[i] = (tmp.toordinal()\
+                                      +tmp.hour/24.\
+                                      +tmp.minute/1440.\
+                                      +tmp.second/86400.+366.)
+                    outp_he5['UTC_matlab_datenum'] = np.tile(UTC_matlab_datenum,(1,outp_he5['latc'].shape[1]))
+            else: # omno2 only have "Time", seconds after tai93, per scanline
+                outp_he5['Time'] = np.tile(outp_he5['Time'][...,None],(1,outp_he5['latc'].shape[1]))
+                outp_he5['UTC_matlab_datenum'] = outp_he5['Time']/86400.+727930.
+            
             outp_he5['across_track_position'] = np.tile(np.arange\
                     (1.,outp_he5['latc'].shape[1]+1),\
                     (outp_he5['latc'].shape[0],1)).astype(np.int16)
@@ -1078,12 +1091,15 @@ class popy(object):
                             '/PRODUCT/delta_time',\
                             '/PRODUCT/methane_mixing_ratio',\
                             '/PRODUCT/methane_mixing_ratio_bias_corrected',\
-                            '/PRODUCT/methane_mixing_ratio_precision','/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/surface_albedo_SWIR']    
+                            '/PRODUCT/methane_mixing_ratio_precision',\
+                            '/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/surface_albedo_SWIR',\
+                            '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_altitude']    
              # standardized variable names in l2g file. should map one-on-one to data_fields
              data_fields_l2g = ['latitude_bounds','longitude_bounds','SolarZenithAngle',\
                                 'vza','dry_air_subcolumns','surface_pressure','pressure_interval',
                                 'methane_profile_apriori','latc','lonc','qa_value','time','delta_time',\
-                                'column_amount_no_bias_correction','column_amount','column_uncertainty','albedo']
+                                'column_amount_no_bias_correction','column_amount','column_uncertainty',\
+                                'albedo','surface_altitude']
         self.logger.info('Read, subset, and store level 2 data to l2g_data')
         self.logger.info('Level 2 data are located at '+l2_dir)
         l2g_data = {}
@@ -1160,7 +1176,112 @@ class popy(object):
             self.nl2 = 0
         else:
             self.nl2 = len(l2g_data['latc'])
+    
+    def F_subset_OMNO2(self,path,l2_path_structure=None):
+        """ 
+        function to subset omno2, nasa sp level 2 data, calling self.F_read_he5
+        path:
+            l2 data root directory, or path to control file
+        l2_path_structure:
+            None by default, indicating individual files are directly under path
+            '%Y/' if files are like l2_dir/2019/*.he5
+            '%Y/%m/%d/' if files are like l2_dir/2019/05/01/*.he5
+        updated on 2019/07/17
+        """      
+        # find out list of l2 files to subset
+        if os.path.isfile(path):
+            self.F_update_popy_with_control_file(path)
+            l2_list = self.l2_list
+            l2_dir = self.l2_dir
+        else:
+            import glob
+            l2_dir = path
+            l2_list = []
+            cwd = os.getcwd()
+            os.chdir(l2_dir)
+            start_date = self.start_python_datetime.date()
+            end_date = self.end_python_datetime.date()
+            days = (end_date-start_date).days+1
+            DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+            for DATE in DATES:
+                if l2_path_structure == None:
+                    flist = glob.glob('OMI-Aura_L2-OMNO2_'+DATE.strftime("%Ym%m%d")+'*.he5')
+                else:
+                    flist = glob.glob(DATE.strftime(l2_path_structure)+\
+                                      'OMI-Aura_L2-OMNO2_'+DATE.strftime("%Ym%m%d")+'*.he5')
+                l2_list = l2_list+flist
+            
+            os.chdir(cwd)
+            self.l2_dir = l2_dir
+            self.l2_list = l2_list
         
+        data_fields = ['CloudFraction','CloudPressure','TerrainReflectivity',\
+                       'ColumnAmountNO2Trop','ColumnAmountNO2TropStd','VcdQualityFlags',\
+                       'XTrackQualityFlags']
+        data_fields_l2g = ['cloud_fraction','cloud_pressure','albedo',\
+                           'column_amount','column_uncertainty','VcdQualityFlags',\
+                       'XTrackQualityFlags']
+        geo_fields = ['Latitude','Longitude','Time','SolarZenithAngle','FoV75CornerLatitude','FoV75CornerLongitude']
+        geo_fields_l2g = ['latc','lonc','Time','SolarZenithAngle','FoV75CornerLatitude','FoV75CornerLongitude']
+        swathname = 'ColumnAmountNO2'
+        maxsza = self.maxsza
+        maxcf = self.maxcf
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        start_date = self.start_python_datetime.date()
+        end_date = self.end_python_datetime.date()
+        days = (end_date-start_date).days+1
+        DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+        l2g_data = {}
+        for fn in l2_list:
+            file_path = os.path.join(l2_dir,fn)
+            self.logger.info('loading '+fn)
+            try:
+                outp_he5 = self.F_read_he5(file_path,swathname,data_fields,geo_fields,data_fields_l2g,geo_fields_l2g)
+            except:
+                self.logger.warning(fn+' cannot be read!')
+                continue
+            f1 = outp_he5['SolarZenithAngle'] <= maxsza
+            f2 = outp_he5['cloud_fraction'] <= maxcf
+            f3 = (outp_he5['VcdQualityFlags'] == 0) & \
+            ((outp_he5['XTrackQualityFlags'] == 0) | (outp_he5['XTrackQualityFlags'] == 255))
+            f4 = outp_he5['latc'] >= south
+            f5 = outp_he5['latc'] <= north
+            tmplon = outp_he5['lonc']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp_he5['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp_he5['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+            self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            l2g_data0 = {}
+            if np.sum(validmask) == 0:
+                continue
+            # some omno2 fov is not consistently defined
+            pixcor_dim = outp_he5['FoV75CornerLatitude'].shape.index(4)
+            Lat_lowerleft = np.take(outp_he5['FoV75CornerLatitude'],0,axis=pixcor_dim)[validmask]
+            Lat_upperleft = np.take(outp_he5['FoV75CornerLatitude'],3,axis=pixcor_dim)[validmask]
+            Lat_lowerright = np.take(outp_he5['FoV75CornerLatitude'],1,axis=pixcor_dim)[validmask]
+            Lat_upperright = np.take(outp_he5['FoV75CornerLatitude'],2,axis=pixcor_dim)[validmask]
+            Lon_lowerleft = np.take(outp_he5['FoV75CornerLongitude'],0,axis=pixcor_dim)[validmask]
+            Lon_upperleft = np.take(outp_he5['FoV75CornerLongitude'],3,axis=pixcor_dim)[validmask]
+            Lon_lowerright = np.take(outp_he5['FoV75CornerLongitude'],1,axis=pixcor_dim)[validmask]
+            Lon_upperright = np.take(outp_he5['FoV75CornerLongitude'],2,axis=pixcor_dim)[validmask]
+            l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
+            l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+            for key in outp_he5.keys():
+                if key not in {'VcdQualityFlags','XTrackQualityFlags','FoV75CornerLatitude','FoV75CornerLongitude','TimeUTC'}:
+                    l2g_data0[key] = outp_he5[key][validmask]
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
+    
     def F_subset_OMH2O(self,path,l2_path_structure=None):
         """ 
         function to subset omi h2o level 2 data, calling self.F_read_he5
@@ -1365,8 +1486,8 @@ class popy(object):
         k1 = self.k1
         k2 = self.k2
         k3 = self.k3
-        wx = fwhmx/(np.log(2)**(1/k1/k3))
-        wy = fwhmy/(np.log(2)**(1/k2/k3))
+        wx = fwhmx/2/(np.log(2)**(1/k1/k3))
+        wy = fwhmy/2/(np.log(2)**(1/k2/k3))
         sg = np.exp(-(np.abs(x/wx)**k1+np.abs(y/wy)**k2)**k3)
         return sg
     
@@ -1409,6 +1530,252 @@ class popy(object):
         minlon_e = X[0,].min()
         minlat_e = X[1,].min()
         return X, minlon_e, minlat_e
+    
+    def F_regrid_ccm(self):
+        """
+        written from F_regrid on 2019/07/13 to honor chris chan miller
+        who optimitized the code
+        oversampled fields are copied from dictionary l2g_data as np array
+        operations are vectorized when possible
+        """
+        west = self.west ; east = self.east ; south = self.south ; north = self.north
+        nrows = self.nrows; ncols = self.ncols
+        xgrid = self.xgrid ; ygrid = self.ygrid ; xmesh = self.xmesh ; ymesh = self.ymesh
+        grid_size = self.grid_size ; xmargin = self.xmargin ; ymargin = self.ymargin
+        start_matlab_datenum = self.start_matlab_datenum
+        end_matlab_datenum = self.end_matlab_datenum
+        oversampling_list = self.oversampling_list.copy()
+        l2g_data = self.l2g_data
+        for key in self.oversampling_list:
+            if key not in l2g_data.keys():
+                oversampling_list.remove(key)
+                self.logger.warning('You asked to oversample '+key+', but I cannot find it in your data!')
+        self.oversampling_list_final = oversampling_list
+        nvar_oversampling = len(oversampling_list)
+        error_model = self.error_model
+        
+        max_ncol = np.array(np.round(360/grid_size),dtype=int)
+        tmplon = l2g_data['lonc']-west
+        tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+        # filter data within the lat/lon box and time interval
+        validmask = (tmplon >= 0) & (tmplon <= east-west) &\
+        (l2g_data['latc'] >= south) & (l2g_data['latc'] <= north) &\
+        (l2g_data['UTC_matlab_datenum'] >= start_matlab_datenum) &\
+        (l2g_data['UTC_matlab_datenum'] <= end_matlab_datenum) &\
+        (l2g_data['column_amount'] > -1e25)
+        nl20 = len(l2g_data['latc'])
+        l2g_data = {k:v[validmask,] for (k,v) in l2g_data.items()}
+        nl2 = len(l2g_data['latc'])
+        self.nl2 = nl2
+        self.l2g_data = l2g_data
+        self.logger.info('%d pixels in the L2g data' %nl20)
+        if nl2 > 0:
+            self.logger.info('%d pixels to be regridded...' %nl2)
+        else:
+            self.logger.info('No pixel to be regridded, returning...')
+            return
+        
+        # Allocate memory for regrid fields
+        total_sample_weight = np.zeros((nrows,ncols))
+        num_samples = np.zeros((nrows,ncols))
+        sum_aboves = []
+        for n in range(nvar_oversampling):
+            sum_aboves.append(np.zeros((nrows,ncols)))
+        # To only average cloud pressure using pixels where cloud fraction > 0.0
+        pres_total_sample_weight = np.zeros((nrows,ncols))
+        pres_num_samples = np.zeros((nrows,ncols))
+        pres_sum_aboves = np.zeros((nrows,ncols))
+        
+        # Utilities for x/y indice list comprehensions
+        def bound_arr(i1,i2,mx,ncols):
+            arr = np.arange(i1,i2,dtype=int)
+            arr[arr<0] += mx
+            arr[arr>=mx] -= mx
+            return arr[arr<ncols]
+        def bound_lat(i1,i2,mx):
+            arr = np.arange(i1,i2,dtype=int)
+            return arr[ np.logical_and( arr>=0, arr < mx ) ]
+        def F_lon_distance(lon1,lon2):
+            distance = lon2 - lon1
+            distance[lon2<lon1] += 360.0
+            return distance
+        
+        # Move as much as possible outside loop
+        if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B","SCIAMACHY","TROPOMI"}:
+            # Set 
+            latc = l2g_data['latc']
+            lonc = l2g_data['lonc']
+            latr = l2g_data['latr']
+            lonr = l2g_data['lonr']
+            # Get lonc/latc center indices
+            lonc_index = [np.argmin(np.abs(xgrid-lonc[i])) for i in range(nl2)]
+            latc_index = [np.argmin(np.abs(ygrid-latc[i])) for i in range(nl2)]
+            # Get East/West indices
+            tmp = np.array([F_lon_distance(lonr[:,0].squeeze(),lonc),F_lon_distance(lonr[:,1].squeeze(),lonc)]).T
+            west_extent = np.round( np.max(tmp,axis=1)/grid_size*xmargin )
+            self.west_dist_extent = tmp.copy()
+            tmp = np.array([F_lon_distance(lonc,lonr[:,2].squeeze()),F_lon_distance(lonc,lonr[:,3].squeeze())]).T
+            self.east_dist_extent = tmp.copy()
+            east_extent = np.round( np.max(tmp,axis=1)/grid_size*xmargin )
+            # Get lists of indices
+            lon_index = [bound_arr(lonc_index[i]-west_extent[i],lonc_index[i]+east_extent[i]+1,max_ncol,ncols)  for i in range(nl2)]
+            self.lon_index = lon_index
+            self.lonc_index = lonc_index
+            # The western most longitude
+            patch_west = [xgrid[lon_index[i][0]] for i in range(nl2)]
+            # Get north/south indices
+            north_extent = np.ceil( (latr.max(axis=1)-latr.min(axis=1))/2/grid_size*ymargin)
+            south_extent = north_extent
+            # List of latitude indices
+            lat_index = [bound_lat(latc_index[i]-south_extent[i],latc_index[i]+north_extent[i]+1,nrows) for i in range(nl2)]
+            # This might be faster
+            patch_lonr = np.array([lonr[i,:] - patch_west[i] for i in range(nl2)]) ; patch_lonr[patch_lonr<0.0] += 360.0
+            patch_lonc = lonc - patch_west ; patch_lonc[patch_lonc<0.0] += 360.0
+            area_weight = [Polygon(np.column_stack([patch_lonr[i,:],latr[i,:].squeeze()])).area for i in range(nl2)]
+            # Compute transforms for SG outside loop
+            vlist = np.zeros((nl2,4,2),dtype=np.float32)
+            for n in range(4):
+                vlist[:,n,0] = patch_lonr[:,n] - patch_lonc[:]
+                vlist[:,n,1] = latr[:,n] - latc[:]
+            xvector  = np.mean(vlist[:,2:4,:],axis=1) - np.mean(vlist[:,0:2,:],axis=1)
+            yvector = np.mean(vlist[:,1:3,:],axis=1) - np.mean(vlist[:,[0,3],:],axis=1)
+            fwhmx = np.linalg.norm(xvector,axis=1)
+            fwhmy = np.linalg.norm(yvector,axis=1)
+            fixedPoints = np.array([[-fwhmx,-fwhmy],[-fwhmx,fwhmy],[fwhmx,fwhmy],[fwhmx,-fwhmy]],dtype=np.float32).transpose((2,0,1))/2.0
+            tform = [cv2.getPerspectiveTransform(vlist[i,:,:].squeeze(),fixedPoints[i,:,:].squeeze()) for i in range(nl2)]
+        
+        elif self.instrum in {"IASI","CrIS"}:
+            # Set 
+            latc = l2g_data['latc']
+            lonc = l2g_data['lonc']
+            u = l2g_data['u']
+            v = l2g_data['v']
+            t = l2g_data['t']
+            lonc_index = [np.argmin(np.abs(xgrid-lonc[i])) for i in range(nl2)]
+            latc_index = [np.argmin(np.abs(ygrid-latc[i])) for i in range(nl2)]
+            # Get East/West indices
+            minlon_e = np.zeros((nl2))
+            minlat_e = np.zeros((nl2))
+            for i in range(nl2):
+                X, minlon_e[i], minlat_e[i] = self.F_construct_ellipse(v[i],u[i],t[i],10)
+            west_extent = np.round(np.abs(minlon_e)/grid_size*xmargin)
+            east_extent = west_extent
+            # Get lists of indices
+            lon_index = [bound_arr(lonc_index[i]-west_extent[i],lonc_index[i]+east_extent[i]+1,max_ncol,ncols)  for i in range(nl2)]
+            self.lon_index = lon_index
+            self.lonc_index = lonc_index
+            # The western most longitude
+            patch_west = [xgrid[lon_index[i][0]] for i in range(nl2)]
+            # Get north/south indices
+            north_extent = np.ceil(np.abs(minlat_e)/grid_size*xmargin)
+            south_extent = north_extent
+            # List of latitude indices
+            lat_index = [bound_lat(latc_index[i]-south_extent[i],latc_index[i]+north_extent[i]+1,nrows) for i in range(nl2)]
+            # This might be faster
+            patch_lonc = lonc - patch_west ; patch_lonc[patch_lonc<0.0] += 360.0
+            area_weight = u*v
+            fwhmx = 2*v
+            fwhmy = 2*u
+        
+        else:
+            self.logger.error(self.instrum+' is not supported for regridding yet!')
+            return
+        # Compute uncertainty weights
+        if error_model == "square":
+            uncertainty_weight = l2g_data['column_uncertainty']**2
+        elif error_model == "log":
+            uncertainty_weight = np.log10(l2g_data['column_uncertainty'])
+        else:
+            uncertainty_weight = l2g_data['column_uncertainty']
+        # Cloud Fraction
+        if 'cloud_fraction' in oversampling_list:
+            cloud_fraction = l2g_data['cloud_fraction']
+        # Pull out grid variables from dictionary as it is slow to access
+        grid_flds = np.zeros((nl2,nvar_oversampling)) ; pcld_idx = -1
+        for n in range(nvar_oversampling):
+            grid_flds[:,n] = l2g_data[oversampling_list[n]]
+            if oversampling_list[n] == 'cloud_pressure':
+                pcld_idx = n
+            # Apply log to variable if error model is log
+            if(error_model == 'log') and (oversampling_list[n] == 'column_amount'):
+                grid_flds[:,n] = np.log10(grid_flds[:,n])
+        #t1 = time.time()
+        sg_wx = fwhmx/self.sg_kfacx
+        sg_wy = fwhmy/self.sg_kfacy
+        # Init point counter for logger
+        count = 0
+        for il2 in range(nl2):
+            ijmsh = np.ix_(lat_index[il2],lon_index[il2])
+            patch_xmesh = xmesh[ijmsh] - patch_west[il2]
+            patch_xmesh[patch_xmesh<0.0] += 360.0
+            patch_ymesh = ymesh[ijmsh] - latc[il2]
+            if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B","SCIAMACHY","TROPOMI"}:
+                xym1 = np.column_stack((patch_xmesh.flatten()-patch_lonc[il2],patch_ymesh.flatten()))
+                xym2 = np.hstack((xym1,np.ones((patch_xmesh.size,1)))).dot(tform[il2].T)[:,0:2]
+            elif self.instrum in {"IASI","CrIS"}:
+                rotation_matrix = np.array([[np.cos(-t[il2]), -np.sin(-t[il2])],[np.sin(-t[il2]),  np.cos(-t[il2])]])
+                xym1 = np.array([patch_xmesh.flatten()-patch_lonc[il2],patch_ymesh.flatten()])#np.column_stack((patch_xmesh.flatten()-patch_lonc[il2],patch_ymesh.flatten())).T
+                xym2 = rotation_matrix.dot(xym1).T
+                
+            SG = np.exp(-(np.power( np.power(np.abs(xym2[:,0]/sg_wx[il2]),self.k1)           \
+                                   +np.power(np.abs(xym2[:,1]/sg_wy[il2]),self.k2),self.k3)) )
+            SG = SG.reshape(patch_xmesh.shape)
+            # Update Number of samples
+            num_samples[ijmsh] += SG
+            # Only bother doing this if regridding cloud pressure
+            if 'cloud_fraction' in oversampling_list:
+                if(pcld_idx > 0 and cloud_fraction[il2] > 0.0):
+                    pres_num_samples[ijmsh] += SG
+            # The weights
+            tmp_wt = SG/area_weight[il2]/uncertainty_weight[il2]
+            # Update total weights
+            total_sample_weight[ijmsh] += tmp_wt
+            # This only needs to be done if we are gridding pressure
+            if 'cloud_fraction' in oversampling_list:
+                if(pcld_idx > 0 and cloud_fraction[il2] > 0.0):
+                    pres_total_sample_weight[ijmsh] += tmp_wt
+            # Update the desired grid variables
+            for ivar in range(nvar_oversampling):
+                sum_aboves[ivar][ijmsh] += tmp_wt[:,:]*grid_flds[il2,ivar]
+            if 'cloud_fraction' in oversampling_list:
+                if(pcld_idx > 0 and cloud_fraction[il2] > 0.0):
+                    pres_sum_aboves[ijmsh] += tmp_wt[:,:]*grid_flds[il2,pcld_idx]
+            if il2 == count*np.round(nl2/10.):
+                self.logger.info('%d%% finished' %(count*10))
+                count = count + 1
+        
+        self.logger.info('Completed regridding!')
+        self.C = {}
+        np.seterr(divide='ignore', invalid='ignore')
+        for ikey in range(len(oversampling_list)):
+            self.C[oversampling_list[ikey]] = sum_aboves[ikey][:,:].squeeze()\
+            /total_sample_weight
+            # Special case for cloud pressure (only considere pixels with
+            # cloud fraction > 0.0
+            if oversampling_list[ikey] == 'cloud_pressure':
+                self.C[oversampling_list[ikey]] = pres_sum_aboves[:,:]\
+                    /pres_total_sample_weight
+        # Make cloud pressure = 0 where cloud fraction = 0
+        if 'cloud_fraction' in oversampling_list and 'cloud_pressure' in oversampling_list:
+            f1 = (self.C['cloud_fraction'] == 0.0)
+            self.C['cloud_pressure'][f1] = 0.0
+
+        # Set 
+        self.total_sample_weight = total_sample_weight
+        self.num_samples = num_samples
+        self.pres_num_samples = pres_num_samples
+        self.pres_total_sample_weight = pres_total_sample_weight
+        
+        # Set quality flag based on the number of samples
+        # It has already being initialized to fill value
+        # of 2
+        self.quality_flag = np.full((nrows,ncols),2,dtype=np.int8)
+        self.quality_flag[num_samples >= 0.1] = 0
+        self.quality_flag[(num_samples > 1.e-6) & (num_samples < 0.1)] = 1
+
+        
+
+        
     
     def F_regrid(self,do_standard_error=False):
         
@@ -1532,6 +1899,7 @@ class popy(object):
                 
                 SG = self.F_2D_SG_transform(patch_xmesh,patch_ymesh,patch_lonr,latr,
                                             patch_lonc,latc)
+                #if il2==100:self.sg = SG;return
             elif self.instrum in {"IASI","CrIS"}:
                 latc = local_l2g_data['latc']
                 lonc = local_l2g_data['lonc']-west
@@ -1573,7 +1941,6 @@ class popy(object):
             
             num_samples[np.ix_(lat_index,lon_index)] =\
             num_samples[np.ix_(lat_index,lon_index)]+SG
-            
             if 'cloud_fraction' in local_l2g_data.keys():
                 if local_l2g_data['cloud_fraction'] > 0.0:
                     pres_num_samples[np.ix_(lat_index,lon_index)] =\
@@ -1617,7 +1984,7 @@ class popy(object):
             if il2 == count*np.round(nl2/10.):
                 self.logger.info('%d%% finished' %(count*10))
                 count = count + 1
-         
+        
         self.logger.info('Completed regridding!')
         C = {}
         np.seterr(divide='ignore', invalid='ignore')
