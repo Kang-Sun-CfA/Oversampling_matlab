@@ -3,6 +3,7 @@ function output_regrid = F_regrid_TROPOMI(inp,output_subset)
 % updated by Kang Sun on 2019/05/08 for more flexibility
 % updated on 2019/05/11 for block-parallel
 % updated on 2019/06/30 for multi-variable oversampling
+% updated on 2019/07/19 to covert A from structure to nd array
 
 output_regrid = [];
 Res = inp.Res;
@@ -193,7 +194,9 @@ pixel_north = Lat_c+range(Lat_r,2)/2*ymargin;
 
 m = 4;n = 2;
 if if_parallel
-    
+    if ~if_old_vcd
+        Sum_Above = zeros(nrows,ncols,nv,'single');
+    end
     if isfield(inp,'block_length')
         block_length = inp.block_length;
     else
@@ -336,7 +339,8 @@ if if_parallel
         Sum_Above = single(cell2mat(reshape(c_A,[nblock_row,nblock_col])));
     else
         for iv = 1:nv
-            Sum_Above.(vcdname{iv}) = single(cell2mat(reshape(c_a(:,iv),[nblock_row,nblock_col])));
+            Sum_Above(:,:,iv) = single(cell2mat(reshape(c_a(:,iv),[nblock_row,nblock_col])));
+%             Sum_Above.(vcdname{iv}) = single(cell2mat(reshape(c_a(:,iv),[nblock_row,nblock_col])));
         end
     end
     Sum_Below = cell2mat(reshape(c_B,[nblock_row,nblock_col]));
@@ -378,15 +382,9 @@ else
             count = count+1;
         end
     end
-    if if_old_vcd
-        Sum_Above = squeeze(Sum_Above);
-    else
-        tmp = Sum_Above;
-        Sum_Above = [];
-        for iv = 1:nv
-            Sum_Above.(vcdname{iv}) = squeeze(tmp(:,:,iv));
-        end
-    end
+    
+    Sum_Above = squeeze(Sum_Above);
+    
 end
 output_regrid.A = Sum_Above;
 output_regrid.B = Sum_Below;
@@ -394,7 +392,8 @@ if if_old_vcd
     output_regrid.C = Sum_Above./Sum_Below;
 end
 output_regrid.D = single(D);
-
+output_regrid.vcdname = vcdname;
+output_regrid.nv = nv;
 output_regrid.xgrid = xgrid;
 output_regrid.ygrid = ygrid;
 

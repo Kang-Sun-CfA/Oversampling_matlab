@@ -14,9 +14,6 @@ Created on Sat Jan 26 15:50:30 2019
 
 import numpy as np
 # conda install -c conda-forge opencv 
-import cv2
-# conda install -c scitools/label/archive shapely
-from shapely.geometry import Polygon
 import datetime
 import os
 import logging
@@ -236,6 +233,19 @@ def F_interp_narr_mat(sounding_lon,sounding_lat,sounding_datenum,\
                            narr_data[fn].flatten(),(sounding_lon,sounding_lat,sounding_datenum))
     return sounding_interp
 
+def F_ncread_selective(fn,varnames):
+    """
+    very basic netcdf reader, similar to F_ncread_selective.m
+    created on 2019/08/13
+    """
+    from netCDF4 import Dataset
+    ncid = Dataset(fn,'r')
+    outp = {}
+    for varname in varnames:
+        outp[varname] = ncid.variables[varname][:]
+    ncid.close()
+    return outp
+
 class popy(object):
     
     def __init__(self,instrum,product,\
@@ -352,6 +362,18 @@ class popy(object):
             ymargin = 2
             maxsza = 60
             maxcf = 0.25
+            self.mindofs = 0.1
+        elif(instrum == "TES"):
+            k1 = 4
+            k2 = 4
+            k3 = 1
+            error_model = "log"
+            oversampling_list = ['column_amount']
+            xmargin = 2
+            ymargin = 2
+            maxsza = 60
+            maxcf = 0.25
+            self.mindofs = 0.1
         else:
             k1 = 2
             k2 = 2
@@ -1177,6 +1199,121 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
+    def F_subset_S5PCO(self,path,s5p_product='RPRO',geos_interp_variables=[],
+                        geos_time_collection=''):
+        """ 
+        function to subset tropomi co level 2 data, calling self.F_read_S5P_nc
+        path:
+            l2 data directory, or path to control file
+        s5p_product:
+            choose from RPRO and OFFL
+        geos_interp_variables:
+            a list of variables (only 2d fields are supported now) to be 
+            resampled from geos fp (has to be subsetted/resaved into .mat). see
+            the geos class for geos fp data handling
+        geos_time_collection:
+            choose from inst3, tavg1, tavg3
+        created on 2019/08/12 based on F_subset_S5PNO2
+        """      
+        # find out list of l2 files to subset
+        if os.path.isfile(path):
+            self.F_update_popy_with_control_file(path)
+            l2_list = self.l2_list
+            l2_dir = self.l2_dir
+        else:
+            import glob
+            l2_dir = path
+            l2_list = []
+            cwd = os.getcwd()
+            os.chdir(l2_dir)
+            start_date = self.start_python_datetime.date()
+            end_date = self.end_python_datetime.date()
+            days = (end_date-start_date).days+1
+            DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+            for DATE in DATES:
+                flist = glob.glob('S5P_'+s5p_product+'_L2__CO_____'+DATE.strftime("%Y%m%d")+'T*.nc')
+                l2_list = l2_list+flist
+            os.chdir(cwd)
+            self.l2_dir = l2_dir
+            self.l2_list = l2_list
+        
+        maxsza = self.maxsza
+        #maxcf = self.maxcf
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        min_qa_value = self.min_qa_value
+        
+        # absolute path of useful variables in the nc file
+        data_fields = ['/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/scattering_optical_thickness_SWIR',\
+                       '/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/water_total_column',\
+                       '/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/height_scattering_layer',\
+               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds',\
+               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds',\
+               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/solar_zenith_angle',\
+               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/viewing_zenith_angle',\
+               '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_pressure',\
+               '/PRODUCT/latitude',\
+               '/PRODUCT/longitude',\
+               '/PRODUCT/qa_value',\
+               '/PRODUCT/time_utc',\
+               '/PRODUCT/carbonmonoxide_total_column',\
+               '/PRODUCT/carbonmonoxide_total_column_precision']    
+        # standardized variable names in l2g file. should map one-on-one to data_fields
+        data_fields_l2g = ['scattering_OD','colh2o','scattering_height','latitude_bounds','longitude_bounds','SolarZenithAngle',\
+                           'vza','surface_pressure','latc','lonc','qa_value','time_utc',\
+                           'column_amount','column_uncertainty']
+        self.logger.info('Read, subset, and store level 2 data to l2g_data')
+        self.logger.info('Level 2 data are located at '+l2_dir)
+        l2g_data = {}
+        for fn in l2_list:
+            fn_dir = l2_dir+fn
+            self.logger.info('Loading '+fn)
+            outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
+            if geos_interp_variables != []:
+                sounding_interp = F_interp_geos_mat(outp_nc['lonc'],outp_nc['latc'],outp_nc['UTC_matlab_datenum'],\
+                                                geos_dir='/mnt/Data2/GEOS/s5p_interp/',\
+                                                interp_fields=geos_interp_variables,\
+                                                time_collection=geos_time_collection)
+                for var in geos_interp_variables:
+                    outp_nc[var] = sounding_interp[var]
+            f1 = outp_nc['SolarZenithAngle'] <= maxsza
+            #f2 = outp_nc['cloud_fraction'] <= maxcf
+            # ridiculously, qa_value has a scale_factor of 0.01. so error-prone
+            f3 = outp_nc['qa_value'] >= min_qa_value              
+            f4 = outp_nc['latc'] >= south
+            f5 = outp_nc['latc'] <= north
+            tmplon = outp_nc['lonc']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp_nc['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp_nc['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            validmask = f1 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+            self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            l2g_data0 = {}
+            # yep it's indeed messed up
+            Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][:,:,0])[validmask]
+            Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][:,:,3])[validmask]
+            Lat_lowerright = np.squeeze(outp_nc['latitude_bounds'][:,:,1])[validmask]
+            Lat_upperright = np.squeeze(outp_nc['latitude_bounds'][:,:,2])[validmask]
+            Lon_lowerleft = np.squeeze(outp_nc['longitude_bounds'][:,:,0])[validmask]
+            Lon_upperleft = np.squeeze(outp_nc['longitude_bounds'][:,:,3])[validmask]
+            Lon_lowerright = np.squeeze(outp_nc['longitude_bounds'][:,:,1])[validmask]
+            Lon_upperright = np.squeeze(outp_nc['longitude_bounds'][:,:,2])[validmask]
+            l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
+            l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+            for key in outp_nc.keys():
+                if key not in {'latitude_bounds','longitude_bounds','time_utc','time','delta_time'}:
+                    l2g_data0[key] = outp_nc[key][validmask]
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
+    
     def F_subset_OMNO2(self,path,l2_path_structure=None):
         """ 
         function to subset omno2, nasa sp level 2 data, calling self.F_read_he5
@@ -1292,7 +1429,7 @@ class popy(object):
             '%Y/' if files are like l2_dir/2019/*.he5
             '%Y/%m/%d/' if files are like l2_dir/2019/05/01/*.he5
         updated on 2019/06/10
-        """      
+        """
         # find out list of l2 files to subset
         if os.path.isfile(path):
             self.F_update_popy_with_control_file(path)
@@ -1452,6 +1589,127 @@ class popy(object):
        else:
            self.nl2 = len(l2g_data['latc'])
     
+    def F_subset_TESNH3(self,path):
+        """ 
+        function to subset TES NH3 lite files, foreshadowing future work on CrIS
+        latr/lonr are not support as they are not available from lite file
+        path:
+            l2 data root directory, only flat l2 file structure is supported
+        created on 2019/08/13
+        """      
+        # find out list of l2 files to subset
+        import glob
+        l2_dir = path
+        l2_list = []
+        cwd = os.getcwd()
+        os.chdir(l2_dir)
+        start_date = self.start_python_datetime.date()
+        end_date = self.end_python_datetime.date()
+        start_year = start_date.year
+        start_month = start_date.month
+        end_year = end_date.year
+        end_month = end_date.month
+        for iyear in range(start_year,end_year+1):
+            for imonth in range(13):
+                if iyear == start_year and imonth < start_month:
+                    continue
+                if iyear == end_year and imonth > end_month:
+                    continue
+                flist = glob.glob('TES-Aura_L2-NH3-Nadir_%04d'%iyear+'-%02d'%imonth+'*.nc')
+                l2_list = l2_list+flist
+            
+        os.chdir(cwd)
+        self.l2_dir = l2_dir
+        self.l2_list = l2_list
+        
+        varnames = ['AveragingKernel','DOFs','DayNightFlag','LandFlag','Latitude',\
+                    'Longitude','ObservationErrorCovariance','Pressure','Quality',\
+                    'Species','Time']
+        
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        l2g_data = {}
+        for fn in l2_list:
+            file_path = os.path.join(l2_dir,fn)
+            self.logger.info('loading '+fn)
+            try:
+                outp = F_ncread_selective(file_path,varnames)
+            except:
+                self.logger.warning(fn+' cannot be read!')
+                continue
+            outp['UTC_matlab_datenum'] = outp['Time']/86400.+727930.
+            f2 = outp['DOFs'] >= 0.1#self.mindofs
+            f3 = (outp['Quality'] == 1) & \
+            (outp['LandFlag'] == 1) & (outp['DayNightFlag'] == 1)
+            f4 = outp['Latitude'] >= south
+            f5 = outp['Latitude'] <= north
+            tmplon = outp['Longitude']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            validmask = f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+            self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            l2g_data0 = {}
+            if np.sum(validmask) == 0:
+                continue
+            
+            nobs = np.sum(validmask)
+            pressure0 = outp['Pressure'][validmask,]
+            xretv0 = outp['Species'][validmask,]
+            noise_error0 = outp['ObservationErrorCovariance'][validmask,]
+            ak0 = outp['AveragingKernel'][validmask,]
+            ak_colm = 0*xretv0;
+            tot_col_test = np.zeros((nobs))
+            sfcvmr = np.zeros((nobs))
+            ps = np.zeros((nobs))
+            noise_error_colm = np.zeros((nobs))
+            latc = outp['Latitude'][validmask]
+            lonc = outp['Longitude'][validmask]
+            
+            # loop over observations
+            for io in range(nobs):
+                index = (pressure0[io,] > 0)
+                pressure = pressure0[io,index]
+                nlev = len(pressure)
+                dp = np.zeros((nlev))
+                dp[0] = (pressure[0]-pressure[1])/2
+                for ip in range(1,nlev-1):
+                    dp[ip] = (pressure[ip-1]-pressure[ip])/2+(pressure[ip]-pressure[ip+1])/2
+                dp[nlev-1] = pressure[nlev-2]-pressure[nlev-1]
+                trans = 2.12e22*dp
+                # calculate column AK
+                xretv = xretv0[io,index]
+                ak = ak0[io,][np.ix_(index,index)]
+                noise_error = noise_error0[io,][np.ix_(index,index)]
+                ak_colm[io,index] = (trans*xretv).transpose().dot(ak)
+                # calculate errors
+                xarr = np.diag(xretv)
+                sx = (xarr.dot(noise_error)).dot(xarr)
+                noise_error_colm[io] = np.sqrt((trans.transpose().dot(sx)).dot(trans))
+                tot_col_test[io] = np.sum(trans*xretv)
+                sfcvmr[io] = xretv[0]
+                ps[io] = pressure[0]
+            # some omno2 fov is not consistently defined
+            l2g_data0['latc'] = latc
+            l2g_data0['lonc'] = lonc
+            l2g_data0['colnh3'] = tot_col_test
+            l2g_data0['colnh3error'] = noise_error_colm
+            l2g_data0['surface_pressure'] = ps
+            l2g_data0['sfcvmr'] = sfcvmr
+            l2g_data0['utc'] = outp['UTC_matlab_datenum'][validmask]
+            l2g_data0['dofs'] = outp['DOFs'][validmask]
+            
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
+    
     def F_save_l2g_to_mat(self,file_path,data_fields=[],data_fields_l2g=[]):
         """ 
         save l2g dictionary to .mat file
@@ -1501,6 +1759,7 @@ class popy(object):
         return sg
     
     def F_2D_SG_transform(self,xmesh,ymesh,x_r,y_r,x_c,y_c):
+        import cv2
         vList = np.column_stack((x_r-x_c,y_r-y_c))
         leftpoint = np.mean(vList[0:2,:],axis=0)
         rightpoint = np.mean(vList[2:4,:],axis=0)
@@ -1538,6 +1797,9 @@ class popy(object):
         oversampled fields are copied from dictionary l2g_data as np array
         operations are vectorized when possible
         """
+        import cv2
+        # conda install -c scitools/label/archive shapely
+        from shapely.geometry import Polygon
         west = self.west ; east = self.east ; south = self.south ; north = self.north
         nrows = self.nrows; ncols = self.ncols
         xgrid = self.xgrid ; ygrid = self.ygrid ; xmesh = self.xmesh ; ymesh = self.ymesh
@@ -1778,7 +2040,8 @@ class popy(object):
         
     
     def F_regrid(self,do_standard_error=False):
-        
+        # conda install -c scitools/label/archive shapely
+        from shapely.geometry import Polygon
         def F_reference2west(west,data):
             if data.size > 1:
                 data = data-west
