@@ -586,7 +586,13 @@ class popy(object):
             for i in range(len(data_fields)):
                 DATAFIELD_NAME = '/HDFEOS/SWATHS/'+swathname+'/Data Fields/'+data_fields[i]
                 data = f[DATAFIELD_NAME]
-                data = data[:]
+                try:
+                    ScaleFactor = data.attrs['ScaleFactor']
+                    Offset = data.attrs['Offset']
+                except:
+                    ScaleFactor = 1.
+                    Offset = 0.
+                data = data[:]*ScaleFactor+Offset
                 outp_he5[data_fields_l2g[i]] = data
                     
             for i in range(len(geo_fields)):
@@ -1381,7 +1387,7 @@ class popy(object):
                 self.logger.warning(fn+' cannot be read!')
                 continue
             f1 = outp_he5['SolarZenithAngle'] <= maxsza
-            f2 = outp_he5['cloud_fraction']/1000 <= maxcf
+            f2 = outp_he5['cloud_fraction'] <= maxcf
             f3 = (outp_he5['VcdQualityFlags'] == 0) & \
             ((outp_he5['XTrackQualityFlags'] == 0) | (outp_he5['XTrackQualityFlags'] == 255))
             f4 = outp_he5['latc'] >= south
