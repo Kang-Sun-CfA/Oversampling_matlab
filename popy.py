@@ -1381,7 +1381,7 @@ class popy(object):
                 self.logger.warning(fn+' cannot be read!')
                 continue
             f1 = outp_he5['SolarZenithAngle'] <= maxsza
-            f2 = outp_he5['cloud_fraction'] <= maxcf
+            f2 = outp_he5['cloud_fraction']/1000 <= maxcf
             f3 = (outp_he5['VcdQualityFlags'] == 0) & \
             ((outp_he5['XTrackQualityFlags'] == 0) | (outp_he5['XTrackQualityFlags'] == 255))
             f4 = outp_he5['latc'] >= south
