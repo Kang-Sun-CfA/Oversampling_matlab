@@ -25,6 +25,78 @@ def datedev_py(matlab_datenum):
     python_datetime = datetime.datetime.fromordinal(int(matlab_datenum)) + datetime.timedelta(days=matlab_datenum%1) - datetime.timedelta(days = 366)
     return python_datetime
 
+def F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,\
+                  era5_dir='/mnt/Data2/ERA5/',\
+                  interp_fields=['blh','u10','v10','u100','v100','sp'],\
+                  fn_header='CONUS'):
+    """
+    sample a field from era5 data in .nc format. 
+    see era5.py for era5 downloading/subsetting
+    sounding_lon:
+        longitude for interpolation
+    sounding_lat:
+        latitude for interpolation
+    sounding_datenum:
+        time for interpolation in matlab datenum double format
+    era5_dir:
+        directory where subset era5 data in .mat are saved
+    interp_fields:
+        variables to interpolate from era5, only 2d fields are supported
+    fn_header:
+        in general should denote domain location of era5 data
+    created on 2019/09/18
+    """
+    from scipy.interpolate import RegularGridInterpolator
+    start_datenum = np.amin(sounding_datenum)
+    end_datenum = np.amax(sounding_datenum)
+    start_date = datedev_py(start_datenum).date()
+    
+    end_date = datedev_py(end_datenum).date()
+    days = (end_date-start_date).days+1
+    DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+    era5_data = {}
+    iday = 0
+    for DATE in DATES:
+        fn = os.path.join(era5_dir,DATE.strftime('Y%Y'),\
+                                   DATE.strftime('M%m'),\
+                                   DATE.strftime('D%d'),\
+                                   fn_header+'_2D'+DATE.strftime('%Y%m%d')+'.nc')
+        if not era5_data:
+            nc_out = F_ncread_selective(fn,np.concatenate(
+                    (interp_fields,['latitude','longitude','time'])))
+            era5_data['lon'] = nc_out['longitude']
+            era5_data['lat'] = nc_out['latitude']
+            # how many hours are there in each daily file? have to be the same 
+            nhour = len(nc_out['time'])
+            era5_data['datenum'] = np.zeros((nhour*len(days)),dtype=np.float64)
+            # era5 time is defined as 'hours since 1900-01-01 00:00:00.0'
+            era5_data['datenum'][iday*nhour:((iday+1)*nhour)] = nc_out['time']/24.+693962.
+            for field in interp_fields:
+                era5_data[field] = np.zeros((len(era5_data['lon']),len(era5_data['lat']),nhour*len(days)))
+                # was read in as 3-d array in time, lat, lon; transpose to lon, lat, time
+                era5_data[field][...,iday*nhour:((iday+1)*nhour)] = nc_out[field].transpose((2,1,0))
+        else:
+            nc_out = F_ncread_selective(fn,np.concatenate(
+                    (interp_fields,['time'])))
+            # era5 time is defined as 'hours since 1900-01-01 00:00:00.0'
+            era5_data['datenum'][iday*nhour:((iday+1)*nhour)] = nc_out['time']/24.+693962.
+            for field in interp_fields:
+                # was read in as 3-d array in time, lat, lon; transpose to lon, lat, time
+                era5_data[field][...,iday*nhour:((iday+1)*nhour)] = nc_out[field].transpose((2,1,0))
+    
+    sounding_interp = {}
+    if not era5_data:
+        for fn in interp_fields:
+            sounding_interp[fn] = sounding_lon*np.nan
+        return sounding_interp
+    # interpolate
+    for fn in interp_fields:
+        my_interpolating_function = \
+        RegularGridInterpolator((era5_data['lon'],era5_data['lat'],era5_data['datenum']),\
+                                era5_data[fn],bounds_error=False,fill_value=np.nan)
+        sounding_interp[fn] = my_interpolating_function((sounding_lon,sounding_lat,sounding_datenum))
+    return sounding_interp
+    
 def F_interp_geos_mat(sounding_lon,sounding_lat,sounding_datenum,\
                   geos_dir='/mnt/Data2/GEOS/s5p_interp/',\
                   interp_fields=['TROPPT'],\
