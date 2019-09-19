@@ -216,8 +216,9 @@ def F_interp_geos_mat(sounding_lon,sounding_lat,sounding_datenum,\
 
 def F_interp_narr_mat(sounding_lon,sounding_lat,sounding_datenum,\
                   narr_dir='/mnt/Data2/NARR/acmap_narr/',\
-                  file_collection_names=['flx'],\
-                  file_collection_fields=[['GPH_tropopause','P_tropopause']]):
+                  interp_fields=['GPH_tropopause','P_tropopause',
+                                 'PBLH','P_surf','T_surf',\
+                                 'U_10m','V_10m','U_30m','V_30m']):
     """
     sample a field from presaved narr data
     sounding_lon:
@@ -228,15 +229,18 @@ def F_interp_narr_mat(sounding_lon,sounding_lat,sounding_datenum,\
         time for interpolation in matlab datenum double format
     narr_dir:
         directory where narr is saved
-    file_collection_names:
-        a list of narr files, chosen from ['3D','sfc','flx','clm','pbl']
-    file_collection_fields:
-        variables to interpolate from each file collection, only 2d fields are supported
+    interp_fields:
+        variables to interpolate, only 2d fields are supported
     created on 2019/05/25
+    updated on 2019/09/19 to enable linear interpolation in a projection
     """
     from scipy.io import loadmat
-    from scipy.interpolate import griddata
-    
+    from scipy.interpolate import RegularGridInterpolator
+    from pyproj import Proj
+    #p1 = Proj(proj='latlong',datum='WGS84')
+    # really don't know why y_0=-6245.456824468616 has to be here
+    p2 = Proj(proj='lcc',R=6367.470, lat_1=50, lat_2=50,lon_0=360-107,y_0=-6245.456824468616)#, ellps='clrk66')#the ellps option doesn't matter
+    sounding_x,sounding_y = p2(sounding_lon,sounding_lat)
     start_datenum = np.amin(sounding_datenum)
     end_datenum = np.amax(sounding_datenum)
     start_datetime = datedev_py(start_datenum)
@@ -264,25 +268,23 @@ def F_interp_narr_mat(sounding_lon,sounding_lat,sounding_datenum,\
     
     narr_data = {}
     # load narr data
-    for i in range(len(file_collection_names)):
-        file_collection_name = file_collection_names[i]
-        file_collection_field = file_collection_fields[i]
-        for istep in range(nstep):
-            file_datetime = narr_start_datetime+datetime.timedelta(hours=step_hour*istep)
-            file_name = 'subset_'+file_collection_name+file_datetime.strftime('_%d_%H.mat')
-            file_path = os.path.join(narr_dir,file_datetime.strftime('%Y'),\
-                                     file_datetime.strftime('%m'),file_name)
-            if not narr_data:
-                mat_data = loadmat(file_path,variable_names=np.concatenate((['lat','lon'],file_collection_field)))
-                narr_data['lon'] = mat_data['lon']
-                narr_data['lat'] = mat_data['lat']
-                for fn in file_collection_field:
-                    narr_data[fn] = np.zeros((narr_data['lon'].shape[0],narr_data['lon'].shape[1],nstep))
-                    narr_data[fn][...,istep] = mat_data[fn]
-            else:
-                mat_data = loadmat(file_path,variable_names=file_collection_field)
-                for fn in file_collection_field:
-                    narr_data[fn][...,istep] = mat_data[fn]
+    for istep in range(nstep):
+        file_datetime = narr_start_datetime+datetime.timedelta(hours=step_hour*istep)
+        file_name = 'subset_'+file_datetime.strftime('%Y%m%d_%H%M')+'.mat'
+        file_path = os.path.join(narr_dir,file_datetime.strftime('Y%Y'),\
+                                 file_datetime.strftime('M%m'),\
+                                 file_datetime.strftime('D%d'),file_name)
+        if not narr_data:
+            mat_data = loadmat(file_path,variable_names=np.concatenate((['x','y'],interp_fields)))
+            narr_data['x'] = mat_data['x'].squeeze()
+            narr_data['y'] = mat_data['y'].squeeze()
+            for fn in interp_fields:
+                narr_data[fn] = np.zeros((len(narr_data['x']),len(narr_data['y']),nstep))
+                narr_data[fn][...,istep] = mat_data[fn].T
+        else:
+            mat_data = loadmat(file_path,variable_names=interp_fields)
+            for fn in interp_fields:
+                narr_data[fn][...,istep] = mat_data[fn].T
     # construct time axis
     narr_data['datenum'] = np.zeros((nstep),dtype=np.float64)
     for istep in range(nstep):
@@ -292,19 +294,12 @@ def F_interp_narr_mat(sounding_lon,sounding_lat,sounding_datenum,\
                                     +file_datetime.minute/1440.\
                                     +file_datetime.second/86400.+366.)
     # interpolate
-    lon_pts = np.repeat(narr_data['lon'][...,np.newaxis],nstep,axis=narr_data['lon'].ndim)
-    lat_pts = np.repeat(narr_data['lat'][...,np.newaxis],nstep,axis=narr_data['lat'].ndim)
-    datenum_pts = np.ones(lon_pts.shape)
-    for istep in range(nstep):
-        datenum_pts[...,istep] = datenum_pts[...,istep]*narr_data['datenum'][istep]
-    
     sounding_interp = {}
-    # griddata is slow. may need to project sounding_lon/lat to narr x/y space and use interpn
-    for i in range(len(file_collection_names)):
-        file_collection_field = file_collection_fields[i]
-        for fn in file_collection_field:
-            sounding_interp[fn] = griddata((lon_pts.flatten(),lat_pts.flatten(),datenum_pts.flatten()),\
-                           narr_data[fn].flatten(),(sounding_lon,sounding_lat,sounding_datenum))
+    for fn in interp_fields:
+        my_interpolating_function = \
+        RegularGridInterpolator((narr_data['x'],narr_data['y'],narr_data['datenum']),\
+                                narr_data[fn],bounds_error=False,fill_value=np.nan)
+        sounding_interp[fn] = my_interpolating_function((sounding_x,sounding_y,sounding_datenum))
     return sounding_interp
 
 def F_ncread_selective(fn,varnames):
