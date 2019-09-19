@@ -239,7 +239,7 @@ def F_interp_narr_mat(sounding_lon,sounding_lat,sounding_datenum,\
     from pyproj import Proj
     #p1 = Proj(proj='latlong',datum='WGS84')
     # really don't know why y_0=-6245.456824468616 has to be here
-    p2 = Proj(proj='lcc',R=6367.470, lat_1=50, lat_2=50,lon_0=360-107,y_0=-6245.456824468616)#, ellps='clrk66')#the ellps option doesn't matter
+    p2 = Proj(proj='lcc',R=6367.470, lat_1=50, lat_2=50,lon_0=360-107,lat_0=50)#, ellps='clrk66')#the ellps option doesn't matter
     sounding_x,sounding_y = p2(sounding_lon,sounding_lat)
     start_datenum = np.amin(sounding_datenum)
     end_datenum = np.amax(sounding_datenum)
