@@ -83,7 +83,9 @@ def F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,\
             for field in interp_fields:
                 # was read in as 3-d array in time, lat, lon; transpose to lon, lat, time
                 era5_data[field][...,iday*nhour:((iday+1)*nhour)] = nc_out[field].transpose((2,1,0))[:,::-1,:]
-    	iday = iday+1
+        # forgot to increment iday
+        iday = iday+1
+    
     sounding_interp = {}
     if not era5_data:
         for fn in interp_fields:
