@@ -60,7 +60,7 @@ def F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,\
         fn = os.path.join(era5_dir,DATE.strftime('Y%Y'),\
                                    DATE.strftime('M%m'),\
                                    DATE.strftime('D%d'),\
-                                   fn_header+'_2D'+DATE.strftime('%Y%m%d')+'.nc')
+                                   fn_header+'_2D_'+DATE.strftime('%Y%m%d')+'.nc')
         if not era5_data:
             nc_out = F_ncread_selective(fn,np.concatenate(
                     (interp_fields,['latitude','longitude','time'])))
