@@ -65,16 +65,16 @@ def F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,\
             nc_out = F_ncread_selective(fn,np.concatenate(
                     (interp_fields,['latitude','longitude','time'])))
             era5_data['lon'] = nc_out['longitude']
-            era5_data['lat'] = nc_out['latitude']
+            era5_data['lat'] = nc_out['latitude'][::-1]
             # how many hours are there in each daily file? have to be the same 
             nhour = len(nc_out['time'])
-            era5_data['datenum'] = np.zeros((nhour*len(days)),dtype=np.float64)
+            era5_data['datenum'] = np.zeros((nhour*(days)),dtype=np.float64)
             # era5 time is defined as 'hours since 1900-01-01 00:00:00.0'
             era5_data['datenum'][iday*nhour:((iday+1)*nhour)] = nc_out['time']/24.+693962.
             for field in interp_fields:
-                era5_data[field] = np.zeros((len(era5_data['lon']),len(era5_data['lat']),nhour*len(days)))
+                era5_data[field] = np.zeros((len(era5_data['lon']),len(era5_data['lat']),nhour*(days)))
                 # was read in as 3-d array in time, lat, lon; transpose to lon, lat, time
-                era5_data[field][...,iday*nhour:((iday+1)*nhour)] = nc_out[field].transpose((2,1,0))
+                era5_data[field][...,iday*nhour:((iday+1)*nhour)] = nc_out[field].transpose((2,1,0))[:,::-1,:]
         else:
             nc_out = F_ncread_selective(fn,np.concatenate(
                     (interp_fields,['time'])))
@@ -82,8 +82,8 @@ def F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,\
             era5_data['datenum'][iday*nhour:((iday+1)*nhour)] = nc_out['time']/24.+693962.
             for field in interp_fields:
                 # was read in as 3-d array in time, lat, lon; transpose to lon, lat, time
-                era5_data[field][...,iday*nhour:((iday+1)*nhour)] = nc_out[field].transpose((2,1,0))
-    
+                era5_data[field][...,iday*nhour:((iday+1)*nhour)] = nc_out[field].transpose((2,1,0))[:,::-1,:]
+    	iday = iday+1
     sounding_interp = {}
     if not era5_data:
         for fn in interp_fields:
