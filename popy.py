@@ -8,8 +8,9 @@ Created on Sat Jan 26 15:50:30 2019
 2019/03/25: use control.txt
 2019/04/22: include S5PNO2
 2019/05/26: sample met data
-2019/07/13: implement optimized regridding from chris
+2019/07/13: implement optimized regridding from chris chan miller
 2019/07/19: fix fwhm -> w bug (pixel size corrected, by 2)
+2019/10/23: add CrISNH3 subsetting function
 """
 
 import numpy as np
@@ -431,7 +432,8 @@ class popy(object):
             ymargin = 2
             maxsza = 60
             maxcf = 0.25
-            self.mindofs = 0.1
+            self.mindofs = 0.0
+            self.min_Quality_Flag = 3
         elif(instrum == "TES"):
             k1 = 4
             k2 = 4
@@ -1785,6 +1787,148 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
+    def F_subset_CrISNH3(self,path,l2_path_structure='%Y/%m/%d/',ellipse_lut_path='CrIS_footprint.mat'):
+        """ 
+        function to subset CrIS NH3 level2 files
+        path:
+            l2 data root directory, only flat l2 file structure is supported
+        l2_path_structure:
+            None indicates that individual files are directly under path;
+            '%Y/' if files are like l2_dir/2017/*.nc;
+            '%Y/%m/%d/' if files are like l2_dir/2017/05/01/*.nc
+        ellipse_lut_path:
+            path to a look up table storing u, v, and t data to reconstruct CrIS pixel ellipsis
+        created on 2019/10/22
+        """      
+        # find out list of l2 files to subset
+        import glob
+        from scipy.io import loadmat
+        from scipy.interpolate import RegularGridInterpolator
+        l2_dir = path
+        l2_list = []
+        cwd = os.getcwd()
+        os.chdir(l2_dir)
+        start_date = self.start_python_datetime.date()
+        end_date = self.end_python_datetime.date()
+        days = (end_date-start_date).days+1
+        DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+        for DATE in DATES:
+            if l2_path_structure == None:
+                flist = glob.glob('Combined_NH3_*'+DATE.strftime("%Y%m%d")+'.nc')
+            else:
+                flist = glob.glob(DATE.strftime(l2_path_structure)+\
+                                  'Combined_NH3_*'+DATE.strftime("%Y%m%d")+'.nc')
+            l2_list = l2_list+flist
+        
+        os.chdir(cwd)
+        self.l2_dir = l2_dir
+        self.l2_list = l2_list
+        
+        varnames = ['DOF','Day_Night_Flag','LandFraction','Latitude','Longitude',
+                    'Quality_Flag','Run_ID','mdate','rvmr','rvmr_error','tot_col','xretv',
+                    'total_covariance_error','noise_error_covariance','pressure',
+                    'xa','avg_kernel']#,'xa_Type']
+        
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        l2g_data = {}
+        pixel_lut = loadmat(ellipse_lut_path)
+        f_uuu = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,271)),pixel_lut['uuu4']) 
+        f_vvv = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,271)),pixel_lut['vvv4']) 
+        f_ttt = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,271)),pixel_lut['ttt4']) 
+        for fn in l2_list:
+            file_path = os.path.join(l2_dir,fn)
+            self.logger.info('loading '+fn)
+            try:
+                outp = F_ncread_selective(file_path,varnames)
+            except:
+                self.logger.warning(fn+' cannot be read!')
+                continue
+            outp['UTC_matlab_datenum'] = outp['mdate']+366.
+            f2 = outp['DOF'] >= self.mindofs
+            f3 = (outp['Quality_Flag'] >= self.min_Quality_Flag) & \
+            (outp['Day_Night_Flag'] == 1)
+            f4 = outp['Latitude'] >= south
+            f5 = outp['Latitude'] <= north
+            tmplon = outp['Longitude']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            validmask = f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+            self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            l2g_data0 = {}
+            if np.sum(validmask) == 0:
+                continue
+            
+            nobs = np.sum(validmask)
+            # work out footprint number
+            tmprunID = outp['Run_ID'][validmask]
+            tmpfov = np.asarray([np.float(tmprunID[i][-3:]) for i in range(nobs)])
+            tmpfor = np.asarray([np.float(tmprunID[i][-8:-4]) for i in range(nobs)])
+            pressure0 = outp['pressure'][validmask,]
+            xretv0 = outp['xretv'][validmask,]
+            noise_error0 = outp['total_covariance_error'][validmask,]
+            ak0 = outp['avg_kernel'][validmask,]
+            ak_colm = 0*xretv0;
+            tot_col_test = np.zeros((nobs))
+            sfcvmr = np.zeros((nobs))
+            ps = np.zeros((nobs))
+            noise_error_colm = np.zeros((nobs))
+            latc = outp['Latitude'][validmask]
+            lonc = outp['Longitude'][validmask]
+            
+            # loop over observations
+            for io in range(nobs):
+                index = (pressure0[io,] > 0)
+                pressure = pressure0[io,index]
+                nlev = len(pressure)
+                dp = np.zeros((nlev))
+                dp[0] = (pressure[0]-pressure[1])/2
+                for ip in range(1,nlev-1):
+                    dp[ip] = (pressure[ip-1]-pressure[ip])/2+(pressure[ip]-pressure[ip+1])/2
+                dp[nlev-1] = pressure[nlev-2]-pressure[nlev-1]
+                trans = 2.12e16*dp
+                # calculate column AK
+                xretv = xretv0[io,index]
+                ak = ak0[io,][np.ix_(index,index)]
+                noise_error = noise_error0[io,][np.ix_(index,index)]
+                ak_colm[io,index] = (trans*xretv).transpose().dot(ak)
+                # calculate errors
+                xarr = np.diag(xretv)
+                sx = (xarr.dot(noise_error)).dot(xarr)
+                noise_error_colm[io] = np.sqrt((trans.transpose().dot(sx)).dot(trans))
+                tot_col_test[io] = np.sum(trans*xretv)
+                sfcvmr[io] = xretv[0]
+                ps[io] = pressure[0]
+            
+            l2g_data0['ifov'] = (tmpfor-1)*9+tmpfov
+            l2g_data0['latc'] = latc
+            l2g_data0['lonc'] = lonc
+            # find out elliptical parameters using lookup table            
+            l2g_data0['u'] = f_uuu((latc,l2g_data0['ifov']))
+            l2g_data0['v'] = f_vvv((latc,l2g_data0['ifov']))
+            l2g_data0['t'] = f_ttt((latc,l2g_data0['ifov']))
+            l2g_data0['colnh3_simple'] = tot_col_test
+            l2g_data0['column_amount'] = outp['tot_col'][validmask]
+            l2g_data0['column_uncertainty'] = noise_error_colm
+            l2g_data0['surface_pressure'] = ps
+            l2g_data0['sfcvmr'] = sfcvmr
+            l2g_data0['utc'] = outp['UTC_matlab_datenum'][validmask]
+            l2g_data0['dofs'] = outp['DOF'][validmask]
+            # a priori type in string format might slow down the whole thing
+            #l2g_data0['xa_type'] = outp['xa_Type'][validmask]
+            
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
+    
     def F_save_l2g_to_mat(self,file_path,data_fields=[],data_fields_l2g=[]):
         """ 
         save l2g dictionary to .mat file
@@ -1806,7 +1950,7 @@ class popy(object):
                 l2g_data[data_fields_l2g[i]] = l2g_data.pop(data_fields[i])
         # reshape 1d arrays to (nl2, 1)
         for key in l2g_data.keys():
-            if key not in {'UTC_matlab_datenum','utc','ift','across_track_position'}:
+            if key not in {'UTC_matlab_datenum','utc','ift','across_track_position','xa_type'}:
                 l2g_data[key] = np.float32(l2g_data[key])
             if key not in {'latr','lonr'}:
                 l2g_data[key] = l2g_data[key].reshape(len(l2g_data[key]),1)
@@ -1883,6 +2027,8 @@ class popy(object):
         end_matlab_datenum = self.end_matlab_datenum
         oversampling_list = self.oversampling_list.copy()
         l2g_data = self.l2g_data
+        if 'UTC_matlab_datenum' not in l2g_data.keys():
+            l2g_data['UTC_matlab_datenum'] = l2g_data.pop('utc')
         for key in self.oversampling_list:
             if key not in l2g_data.keys():
                 oversampling_list.remove(key)
@@ -2146,6 +2292,8 @@ class popy(object):
         grid_size = self.grid_size
         oversampling_list = self.oversampling_list[:]
         l2g_data = self.l2g_data
+        if 'UTC_matlab_datenum' not in l2g_data.keys():
+            l2g_data['UTC_matlab_datenum'] = l2g_data.pop('utc')
         for key in self.oversampling_list:
             if key not in l2g_data.keys():
                 oversampling_list.remove(key)
@@ -2522,62 +2670,5 @@ class popy(object):
         if save_fig_path:
             fig1.savefig(save_fig_path,dpi=dpi)
         plt.close()
-            
+        
 
-
-#### testing real data
-#omi_popy = popy(sensor_name="OMI",grid_size=0.1,\
-#                west=-115,east=-100,south=30,north=45,\
-#                start_year=2003,start_month=7,start_day=1,\
-#                end_year=2015,end_month=7,end_day=10)
-#l2g_data = omi_popy.F_mat_reader("C:\data_ks\OMNO2\L2g\sample_data_OMNO2.mat")
-#
-#omi_popy.F_regrid(l2g_data)
-#
-#import matplotlib.pyplot as plt
-#plt.contour(omi_popy.xgrid,omi_popy.ygrid,omi_popy.C['vcd'])
-
-### testing IASI-like pixles
-#iasi_popy = popy(sensor_name="IASI",grid_size=1,west=-180,east=180,south=-30,north=30)
-#iasi_popy.k1 = 2
-#iasi_popy.k2 = 2
-#iasi_popy.k3 = 1
-#l2g_data = {'lonc':np.float32([-175,105]),'latc':np.float32([0,10]),
-#            'u':np.float32([5,10]),'v':np.float32([0.9,1.8]),'t':np.float32([1.36,1.1]),
-#            'vcd':np.float32([0.5,1]),'vcde':np.float32([0.25,.5]),
-#            'albedo':np.float32([0.5,0.2]),'cloud_fraction':np.float32([0.,0.]),
-#            'UTC_matlab_datenum':np.float32([737456,737457])}
-#
-#iasi_popy.F_regrid(l2g_data)
-#
-#
-#plt.contour(iasi_popy.xgrid,iasi_popy.ygrid,iasi_popy.num_samples)
-#
-#
-#### testing longitude -180/180 discontinuity, omi-like pixels
-#omi_popy = popy(sensor_name="OMI",grid_size=1,west=-180,east=180,south=-30,north=30)
-#l2g_data = {'lonc':np.float32([-175,105]),'latc':np.float32([0,10]),
-#            'lonr':np.float32([[175, 170, -165, -160],[90, 95, 120, 115]]),
-#            'latr':np.float32([[-5, 5, 5, -5],[5, 15, 15, 5]]),
-#            'vcd':np.float32([0.5,1]),'vcde':np.float32([0.25,.5]),
-#            'albedo':np.float32([0.5,0.2]),'cloud_fraction':np.float32([0.,0.]),
-#            'UTC_matlab_datenum':np.float32([737456,737457])}
-#
-#omi_popy.F_regrid(l2g_data)
-#plt.contour(omi_popy.xgrid,omi_popy.ygrid,omi_popy.num_samples)
-#import matplotlib.pyplot as plt
-#plt.contour(omi_popy.xgrid,omi_popy.ygrid,num_samples)
-#plt.colorbar
-
-### testing super gaussian functions
-#omi_popy = popy(sensor_name="OMI",grid_size=1,west=-180,east=180,south=-30,north=30)
-#sg = omi_popy.F_generalized_SG(omi_popy.xmesh,omi_popy.ymesh,5,5)
-#sg1 = omi_popy.F_2D_SG_rotate(omi_popy.xmesh,omi_popy.ymesh,-2,3,5,5,np.pi/4)
-#x_r = np.float32([-2,-2,2,2])
-#y_r = np.float32([-2,0,1,-1])
-#x_c = 0;y_c = 0;
-#sg2 = omi_popy.F_2D_SG_transform(omi_popy.xmesh,omi_popy.ymesh,x_r,y_r,x_c,y_c)
-#import matplotlib.pyplot as plt
-#plt.contour(omi_popy.xmesh,omi_popy.ymesh,sg2)
-#plt.plot(x_c,y_c,'o')
-#plt.plot(x_r,y_r,'*')
