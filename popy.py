@@ -871,14 +871,14 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
-    def F_subset_S5PNO2(self,path,s5p_product='RPRO',geos_interp_variables=[],
+    def F_subset_S5PNO2(self,path,s5p_product='*',geos_interp_variables=[],
                         geos_time_collection=''):
         """ 
         function to subset tropomi no2 level 2 data, calling self.F_read_S5P_nc
         path:
             l2 data directory, or path to control file
         s5p_product:
-            choose from RPRO and OFFL
+            choose from RPRO and OFFL, default '*' means all
         geos_interp_variables:
             a list of variables (only 2d fields are supported now) to be 
             resampled from geos fp (has to be subsetted/resaved into .mat). see
@@ -985,14 +985,14 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
             
-    def F_subset_S5PHCHO(self,path,s5p_product='RPRO',geos_interp_variables=[],
+    def F_subset_S5PHCHO(self,path,s5p_product='*',geos_interp_variables=[],
                          geos_time_collection=''):
         """ 
         function to subset tropomi hcho level 2 data, calling self.F_read_S5P_nc
         path:
             l2 data directory, or path to control file
         s5p_product:
-            choose from RPRO and OFFL
+            choose from RPRO and OFFL, default '*' means all
         geos_interp_variables:
             a list of variables (only 2d fields are supported now) to be 
             resampled from geos fp (has to be subsetted/resaved into .mat). see
@@ -1102,7 +1102,7 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
         
-    def F_subset_S5PCH4(self,path,if_trop_xch4=False,s5p_product='RPRO',
+    def F_subset_S5PCH4(self,path,if_trop_xch4=False,s5p_product='*',
                         geos_interp_variables=[],geos_time_collection=''):
         """ 
         function to subset tropomi ch4 level 2 data, calling self.F_read_S5P_nc
@@ -1113,7 +1113,7 @@ class popy(object):
         if_trop_xch4:
             if calculate tropospheric xch4
         s5p_product:
-            choose from RPRO and OFFL
+            choose from RPRO and OFFL, '*' means all
         geos_interp_variables:
             a list of variables (only 2d fields are supported now) to be 
             resampled from geos fp (has to be subsetted/resaved into .mat). see
@@ -1276,14 +1276,14 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
-    def F_subset_S5PCO(self,path,s5p_product='RPRO',geos_interp_variables=[],
+    def F_subset_S5PCO(self,path,s5p_product='*',geos_interp_variables=[],
                         geos_time_collection=''):
         """ 
         function to subset tropomi co level 2 data, calling self.F_read_S5P_nc
         path:
             l2 data directory, or path to control file
         s5p_product:
-            choose from RPRO and OFFL
+            choose from RPRO and OFFL, default is combining all (RPRO, OFFL, Near real time)
         geos_interp_variables:
             a list of variables (only 2d fields are supported now) to be 
             resampled from geos fp (has to be subsetted/resaved into .mat). see
