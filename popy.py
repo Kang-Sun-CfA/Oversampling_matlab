@@ -629,12 +629,15 @@ class popy(object):
         if 'time_utc' in outp.keys():
             UTC_matlab_datenum = np.zeros((len(outp['time_utc']),1),dtype=np.float64)
             for i in range(len(outp['time_utc'])):
-                tmp = datetime.datetime.strptime(outp['time_utc'][i],'%Y-%m-%dT%H:%M:%S.%fZ')
-                UTC_matlab_datenum[i] = (tmp.toordinal()\
+                if outp['time_utc'][i]:
+                    tmp = datetime.datetime.strptime(outp['time_utc'][i],'%Y-%m-%dT%H:%M:%S.%fZ')
+                    UTC_matlab_datenum[i] = (tmp.toordinal()\
                                       +tmp.hour/24.\
                                       +tmp.minute/1440.\
                                       +tmp.second/86400.\
                                       +tmp.microsecond/86400/1000000+366.)
+                else:
+                    UTC_matlab_datenum[i] = 0;self.logger.warning('empty time stamp!')
             outp['UTC_matlab_datenum'] = np.tile(UTC_matlab_datenum,(1,outp['latc'].shape[1]))
         else: # hcho l2 does not have time_utc
             # the delta_time field of hcho fills all across track position, but ch4 is one per scanline
@@ -940,8 +943,13 @@ class popy(object):
         l2g_data = {}
         for fn in l2_list:
             fn_dir = l2_dir+fn
+            if os.stat(fn_dir).st_size < 5000:
+                self.logger.info(fn+' is smaller than 5000 bytes, skipping');continue
             self.logger.info('Loading '+fn)
-            outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
+            try:
+                outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
+            except:
+                self.logger.warning(fn+' gives error!');continue
             if geos_interp_variables != []:
                 sounding_interp = F_interp_geos_mat(outp_nc['lonc'],outp_nc['latc'],outp_nc['UTC_matlab_datenum'],\
                                                 geos_dir='/mnt/Data2/GEOS/s5p_interp/',\
