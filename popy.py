@@ -601,6 +601,7 @@ class popy(object):
         data_fields: a list of string containing absolution path of variables to extract
         data_fields_l2g: what do you want to call the variables in the output
         updated on 2019/04/22
+        updated on 2019/11/20 to handle SUB.nc
         additional packages:
             netCDF4, conda install -c anaconda netcdf4
         """
@@ -617,15 +618,7 @@ class popy(object):
             if tmpdtype is "str":
                 outp[varname] = tmp[:]
             else:
-                outp[varname] = np.squeeze(tmp[:])
-                ## scale factor already applied?! so confusing
-#                try:
-#                    outp[varname] = outp[varname]*tmp.scale_factor
-#                    if tmp.scale_factor != 1:
-#                        print(varname+' has a scale_factor of '+'%s'%tmp.scale_factor)
-#                except Exception:
-#                    #print(e)
-#                    print(varname+' has no scale_factor!')
+                outp[varname] = np.squeeze(tmp[:],axis=0)
         if 'time_utc' in outp.keys():
             UTC_matlab_datenum = np.zeros((len(outp['time_utc']),1),dtype=np.float64)
             for i in range(len(outp['time_utc'])):
@@ -943,13 +936,14 @@ class popy(object):
         l2g_data = {}
         for fn in l2_list:
             fn_dir = l2_dir+fn
-            if os.stat(fn_dir).st_size < 5000:
-                self.logger.info(fn+' is smaller than 5000 bytes, skipping');continue
             self.logger.info('Loading '+fn)
             try:
                 outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
-            except:
-                self.logger.warning(fn+' gives error!');continue
+            except Exception as e:
+                self.logger.warning(fn+' gives error:');
+                print(e)
+                input("Press Enter to continue...")
+                continue
             if geos_interp_variables != []:
                 sounding_interp = F_interp_geos_mat(outp_nc['lonc'],outp_nc['latc'],outp_nc['UTC_matlab_datenum'],\
                                                 geos_dir='/mnt/Data2/GEOS/s5p_interp/',\
@@ -1066,7 +1060,13 @@ class popy(object):
         for fn in l2_list:
             fn_dir = l2_dir+fn
             self.logger.info('Loading '+fn)
-            outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
+            try:
+                outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
+            except Exception as e:
+                self.logger.warning(fn+' gives error:');
+                print(e)
+                input("Press Enter to continue...")
+                continue
             if geos_interp_variables != []:
                 sounding_interp = F_interp_geos_mat(outp_nc['lonc'],outp_nc['latc'],outp_nc['UTC_matlab_datenum'],\
                                                 geos_dir='/mnt/Data2/GEOS/s5p_interp/',\
@@ -1213,7 +1213,13 @@ class popy(object):
         for fn in l2_list:
             fn_path = os.path.join(l2_dir,fn)
             self.logger.info('Loading '+fn)
-            outp_nc = self.F_read_S5P_nc(fn_path,data_fields,data_fields_l2g)
+            try:
+                outp_nc = self.F_read_S5P_nc(fn_path,data_fields,data_fields_l2g)
+            except Exception as e:
+                self.logger.warning(fn+' gives error:');
+                print(e)
+                input("Press Enter to continue...")
+                continue
             
             if if_trop_xch4:
                 
@@ -1355,7 +1361,13 @@ class popy(object):
         for fn in l2_list:
             fn_dir = l2_dir+fn
             self.logger.info('Loading '+fn)
-            outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
+            try:
+                outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
+            except Exception as e:
+                self.logger.warning(fn+' gives error:');
+                print(e)
+                input("Press Enter to continue...")
+                continue
             if geos_interp_variables != []:
                 sounding_interp = F_interp_geos_mat(outp_nc['lonc'],outp_nc['latc'],outp_nc['UTC_matlab_datenum'],\
                                                 geos_dir='/mnt/Data2/GEOS/s5p_interp/',\
