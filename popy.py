@@ -780,6 +780,7 @@ class popy(object):
         function to subset omi hcho level 2 data, calling self.F_read_he5
         path: directory containing omhcho level 2 files, OR path to control.txt
         updated on 2019/04/23
+        updated on 2019/12/17 to handle sub.he5 (but pixel corners are not subset by ges disc)
         """
         # find out list of l2 files to subset
         if os.path.isfile(path):
@@ -819,9 +820,11 @@ class popy(object):
                            'column_amount','column_uncertainty','MainDataQualityFlag',\
                            'PixelCornerLatitudes','PixelCornerLongitudes','FittingRMS']
         geo_fields = ['Latitude','Longitude','TimeUTC','SolarZenithAngle',\
-                      'TerrainHeight','XtrackQualityFlagsExpanded']
+                      'TerrainHeight','XtrackQualityFlagsExpanded',\
+                      'nTimes_idx','nXtrack_idx']
         geo_fields_l2g = ['latc','lonc','TimeUTC','SolarZenithAngle',\
-                          'terrain_height','XtrackQualityFlagsExpanded']
+                          'terrain_height','XtrackQualityFlagsExpanded',\
+                      'nTimes_idx','nXtrack_idx']
         swathname = 'OMI Total Column Amount HCHO'
                 
         l2g_data = {}
@@ -829,6 +832,10 @@ class popy(object):
             fn_dir = l2_dir+fn
             self.logger.info('Loading'+fn_dir)
             outp_he5 = self.F_read_he5(fn_dir,swathname,data_fields,geo_fields,data_fields_l2g,geo_fields_l2g)
+            along_track_idx = np.concatenate((outp_he5['nTimes_idx'],np.array([outp_he5['nTimes_idx'][-1]+1])))
+            across_track_idx = np.concatenate((outp_he5['nXtrack_idx'],np.array([outp_he5['nXtrack_idx'][-1]+1])))
+            outp_he5['PixelCornerLatitudes'] = outp_he5['PixelCornerLatitudes'][np.ix_(along_track_idx,across_track_idx)]
+            outp_he5['PixelCornerLongitudes'] = outp_he5['PixelCornerLongitudes'][np.ix_(along_track_idx,across_track_idx)]
             f1 = outp_he5['SolarZenithAngle'] <= maxsza
             f2 = outp_he5['cloud_fraction'] <= maxcf
             f3 = outp_he5['MainDataQualityFlag'] <= maxMDQF              
@@ -858,7 +865,8 @@ class popy(object):
             l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
             for key in outp_he5.keys():
                 if key not in {'MainDataQualityFlag','PixelCornerLatitudes',\
-                               'PixelCornerLongitudes','TimeUTC','XtrackQualityFlagsExpanded'}:
+                               'PixelCornerLongitudes','TimeUTC','XtrackQualityFlagsExpanded',\
+                               'nTimes_idx','nXtrack_idx'}:
                     l2g_data0[key] = outp_he5[key][validmask]
             l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
         self.l2g_data = l2g_data
@@ -1564,8 +1572,10 @@ class popy(object):
         data_fields_l2g = ['cloud_fraction','cloud_pressure','amf','albedo',\
                            'column_amount','column_uncertainty','MainDataQualityFlag',\
                            'PixelCornerLatitudes','PixelCornerLongitudes','FittingRMS']
-        geo_fields = ['Latitude','Longitude','TimeUTC','SolarZenithAngle','TerrainHeight']
-        geo_fields_l2g = ['latc','lonc','TimeUTC','SolarZenithAngle','terrain_height']
+        geo_fields = ['Latitude','Longitude','TimeUTC','SolarZenithAngle','TerrainHeight',\
+                      'nTimes_idx','nXtrack_idx']
+        geo_fields_l2g = ['latc','lonc','TimeUTC','SolarZenithAngle','terrain_height',\
+                      'nTimes_idx','nXtrack_idx']
         swathname = 'OMI Total Column Amount H2O'
         maxsza = self.maxsza
         maxcf = self.maxcf
