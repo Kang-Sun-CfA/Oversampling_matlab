@@ -400,6 +400,18 @@ class popy(object):
             ymargin = 1.5
             maxsza = 60
             maxcf = 0.3
+        elif(instrum == "OMPS-N20"):
+            k1 = 4
+            k2 = 2
+            k3 = 1
+            error_model = "linear"
+            oversampling_list = ['column_amount','albedo',\
+                                 'amf','cloud_fraction','cloud_pressure','terrain_height']
+            xmargin = 1.5
+            ymargin = 1.5
+            maxsza = 60
+            maxcf = 0.3
+            self.max_qa_value = 0
         elif(instrum == "TROPOMI"):
             k1 = 4
             k2 = 2
@@ -641,7 +653,53 @@ class popy(object):
         outp['across_track_position'] = np.tile(np.arange(1.,outp['latc'].shape[1]+1),\
             (outp['latc'].shape[0],1)).astype(np.int16)
         return outp
+    
+    def F_read_MEaSUREs_nc(self,fn,data_fields,data_fields_l2g=[]):
+        """ 
+        function to read MEaSURE's level 2 netcdf file to a dictionary
+        fn: file name
+        data_fields: a list of string containing absolution path of variables to extract
+        data_fields_l2g: what do you want to call the variables in the output
+        created on 2020/03/03 based on F_read_S5P_nc
+        additional packages:
+            netCDF4, conda install -c anaconda netcdf4
+        """
+        from netCDF4 import Dataset
+        ncid = Dataset(fn,'r')
+        outp = {}
+        for i in range(len(data_fields)):
+            tmp = ncid[data_fields[i]]
+            tmpdtype = tmp.dtype
+            if not data_fields_l2g:
+                varname = tmp.name
+            else:
+                varname = data_fields_l2g[i]
+            outp[varname] = tmp[:]
         
+        if 'time' in outp.keys():
+            UTC_matlab_datenum = np.zeros((len(outp['time']),1),dtype=np.float64)
+            ref_dt = datetime.datetime.strptime('1993-01-01T00:00:00Z','%Y-%m-%dT%H:%M:%SZ')
+            for i in range(len(outp['time'])):
+                if outp['time'][i]:
+                    tmp = ref_dt+datetime.timedelta(seconds=outp['time'][i])
+                    UTC_matlab_datenum[i] = (tmp.toordinal()\
+                                      +tmp.hour/24.\
+                                      +tmp.minute/1440.\
+                                      +tmp.second/86400.\
+                                      +tmp.microsecond/86400/1000000+366.)
+                else:
+                    UTC_matlab_datenum[i] = 0;self.logger.warning('empty time stamp!')
+            outp['UTC_matlab_datenum'] = np.tile(UTC_matlab_datenum,(1,outp['latc'].shape[1]))
+        else: 
+            # just report error
+            if len(outp['delta_time'].shape) == 1:
+                outp['delta_time'] = np.tile(outp['delta_time'][...,None],(1,outp['latc'].shape[1]))
+            outp['UTC_matlab_datenum'] = (outp['time']+outp['delta_time']/1000.)/86400.+734139.
+        
+        outp['across_track_position'] = np.tile(np.arange(1.,outp['latc'].shape[1]+1),\
+            (outp['latc'].shape[0],1)).astype(np.int16)
+        return outp
+    
     def F_read_he5(self,fn,swathname,data_fields,geo_fields,data_fields_l2g=[],geo_fields_l2g=[]):
         import h5py
         outp_he5 = {}
@@ -875,6 +933,111 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
+    def F_subset_OMPSN20HCHO(self,path):
+        """ 
+        function to subset OMPS-N20 hcho level 2 data, calling self.F_read_S5P_nc
+        path:
+            l2 data directory, or path to control file
+        created on 2020/03/03
+        """      
+        # find out list of l2 files to subset
+        if os.path.isfile(path):
+            self.F_update_popy_with_control_file(path)
+            l2_list = self.l2_list
+            l2_dir = self.l2_dir
+        else:
+            import glob
+            l2_dir = path
+            l2_list = []
+            cwd = os.getcwd()
+            os.chdir(l2_dir)
+            start_date = self.start_python_datetime.date()
+            end_date = self.end_python_datetime.date()
+            days = (end_date-start_date).days+1
+            DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+            for DATE in DATES:
+                flist = glob.glob('OMPS-N20_NMHCHO-L2_v1.0_'+DATE.strftime("%Ym%m%d")+'t*.nc')
+                l2_list = l2_list+flist
+            os.chdir(cwd)
+            self.l2_dir = l2_dir
+            self.l2_list = l2_list
+        
+        maxsza = self.maxsza
+        maxcf = self.maxcf
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        max_qa_value = self.max_qa_value
+        
+        # absolute path of useful variables in the nc file
+        # not sure about cloud fraction
+        # the time_utc string is empty?! why are you doing this to the user!
+        data_fields = ['/support_data/cloud_fraction',\
+                       '/support_data/cloud_pressure',\
+               '/geolocation/latitude_bounds',\
+               '/geolocation/longitude_bounds',\
+               '/geolocation/solar_zenith_angle',\
+               '/geolocation/viewing_zenith_angle',\
+               '/support_data/albedo',\
+               '/geolocation/latitude',\
+               '/geolocation/longitude',\
+               '/key_science_data/main_data_quality_flag',\
+               '/geolocation/time',\
+               '/key_science_data/column_amount',\
+               '/key_science_data/column_uncertainty']    
+        # standardized variable names in l2g file. should map one-on-one to data_fields
+        data_fields_l2g = ['cloud_fraction','cloud_pressure','latitude_bounds','longitude_bounds','SolarZenithAngle',\
+                           'vza','albedo','latc','lonc','qa_value','time',\
+                           'column_amount','column_uncertainty']
+        self.logger.info('Read, subset, and store level 2 data to l2g_data')
+        self.logger.info('Level 2 data are located at '+l2_dir)
+        l2g_data = {}
+        for fn in l2_list:
+            fn_dir = l2_dir+fn
+            self.logger.info('Loading '+fn)
+            try:
+                outp_nc = self.F_read_MEaSUREs_nc(fn_dir,data_fields,data_fields_l2g)
+            except Exception as e:
+                self.logger.warning(fn+' gives error:');
+                print(e)
+                input("Press Enter to continue...")
+                continue
+            f1 = outp_nc['SolarZenithAngle'] <= maxsza
+            f2 = outp_nc['cloud_fraction'] <= maxcf
+            f3 = outp_nc['qa_value'] <= max_qa_value              
+            f4 = outp_nc['latc'] >= south
+            f5 = outp_nc['latc'] <= north
+            tmplon = outp_nc['lonc']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp_nc['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp_nc['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+            self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            l2g_data0 = {}
+            # yep it's indeed messed up
+            Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][:,:,0])[validmask]
+            Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][:,:,3])[validmask]
+            Lat_lowerright = np.squeeze(outp_nc['latitude_bounds'][:,:,1])[validmask]
+            Lat_upperright = np.squeeze(outp_nc['latitude_bounds'][:,:,2])[validmask]
+            Lon_lowerleft = np.squeeze(outp_nc['longitude_bounds'][:,:,0])[validmask]
+            Lon_upperleft = np.squeeze(outp_nc['longitude_bounds'][:,:,3])[validmask]
+            Lon_lowerright = np.squeeze(outp_nc['longitude_bounds'][:,:,1])[validmask]
+            Lon_upperright = np.squeeze(outp_nc['longitude_bounds'][:,:,2])[validmask]
+            l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
+            l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+            for key in outp_nc.keys():
+                if key not in {'latitude_bounds','longitude_bounds','time_utc','time','delta_time'}:
+                    l2g_data0[key] = outp_nc[key][validmask]
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
+        
     def F_subset_S5PNO2(self,path,s5p_product='*',geos_interp_variables=[],
                         geos_time_collection=''):
         """ 
@@ -2114,7 +2277,8 @@ class popy(object):
             return distance
         
         # Move as much as possible outside loop
-        if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B","SCIAMACHY","TROPOMI"}:
+        if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B",\
+                            "SCIAMACHY","TROPOMI","OMPS-N20"}:
             # Set 
             latc = l2g_data['latc']
             lonc = l2g_data['lonc']
@@ -2222,7 +2386,8 @@ class popy(object):
             patch_xmesh = xmesh[ijmsh] - patch_west[il2]
             patch_xmesh[patch_xmesh<0.0] += 360.0
             patch_ymesh = ymesh[ijmsh] - latc[il2]
-            if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B","SCIAMACHY","TROPOMI"}:
+            if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B",\
+                                "SCIAMACHY","TROPOMI","OMPS-N20"}:
                 xym1 = np.column_stack((patch_xmesh.flatten()-patch_lonc[il2],patch_ymesh.flatten()))
                 xym2 = np.hstack((xym1,np.ones((patch_xmesh.size,1)))).dot(tform[il2].T)[:,0:2]
             elif self.instrum in {"IASI","CrIS"}:
@@ -2285,10 +2450,6 @@ class popy(object):
         self.quality_flag = np.full((nrows,ncols),2,dtype=np.int8)
         self.quality_flag[num_samples >= 0.1] = 0
         self.quality_flag[(num_samples > 1.e-6) & (num_samples < 0.1)] = 1
-
-        
-
-        
     
     def F_regrid(self,do_standard_error=False):
         # conda install -c scitools/label/archive shapely
@@ -2372,7 +2533,8 @@ class popy(object):
         count = 0
         for il2 in range(nl2):
             local_l2g_data = {k:v[il2,] for (k,v) in l2g_data.items()}
-            if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B","SCIAMACHY","TROPOMI"}:
+            if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B",\
+                                "SCIAMACHY","TROPOMI","OMPS-N20"}:
                 latc = local_l2g_data['latc']
                 latr = local_l2g_data['latr']
                 lonc = local_l2g_data['lonc']-west
