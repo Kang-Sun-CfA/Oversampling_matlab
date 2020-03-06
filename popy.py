@@ -74,6 +74,10 @@ def F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,\
             era5_data['datenum'][iday*nhour:((iday+1)*nhour)] = nc_out['time']/24.+693962.
             for field in interp_fields:
                 era5_data[field] = np.zeros((len(era5_data['lon']),len(era5_data['lat']),nhour*(days)))
+                if len(nc_out[field].shape) != 3:
+                    print('Warning!!! Anomaly in the dimension of ERA5 fields.')
+                    print('Tentatively taking only the first element of the second dimension')
+                    nc_out[field] = nc_out[field][:,0,...].squeeze()
                 # was read in as 3-d array in time, lat, lon; transpose to lon, lat, time
                 era5_data[field][...,iday*nhour:((iday+1)*nhour)] = nc_out[field].transpose((2,1,0))[:,::-1,:]
         else:
@@ -103,7 +107,8 @@ def F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,\
 def F_interp_geos_mat(sounding_lon,sounding_lat,sounding_datenum,\
                   geos_dir='/mnt/Data2/GEOS/s5p_interp/',\
                   interp_fields=['TROPPT'],\
-                  time_collection='inst3'):
+                  time_collection='inst3',\
+                  fn_header='subset'):
     """
     sample a field from subset geos fp data in .mat format. 
     see geos.py for geos downloading/subsetting
@@ -170,7 +175,7 @@ def F_interp_geos_mat(sounding_lon,sounding_lat,sounding_datenum,\
         file_dir = os.path.join(geos_dir,file_datetime.strftime('Y%Y'),\
                                    file_datetime.strftime('M%m'),\
                                    file_datetime.strftime('D%d'))
-        file_path = os.path.join(file_dir,'subset_'+file_datetime.strftime('%Y%m%d_%H%M')+'.mat')
+        file_path = os.path.join(file_dir,fn_header+'_'+file_datetime.strftime('%Y%m%d_%H%M')+'.mat')
         if not os.path.exists(file_path):
             continue
         if not geos_data:
@@ -218,8 +223,9 @@ def F_interp_geos_mat(sounding_lon,sounding_lat,sounding_datenum,\
 def F_interp_narr_mat(sounding_lon,sounding_lat,sounding_datenum,\
                   narr_dir='/mnt/Data2/NARR/acmap_narr/',\
                   interp_fields=['GPH_tropopause','P_tropopause',
-                                 'PBLH','P_surf','T_surf',\
-                                 'U_10m','V_10m','U_30m','V_30m']):
+                                 'PBLH','P_surf','T_surf',
+                                 'U_10m','V_10m','U_30m','V_30m'],\
+                  fn_header='subset'):
     """
     sample a field from presaved narr data
     sounding_lon:
@@ -271,7 +277,7 @@ def F_interp_narr_mat(sounding_lon,sounding_lat,sounding_datenum,\
     # load narr data
     for istep in range(nstep):
         file_datetime = narr_start_datetime+datetime.timedelta(hours=step_hour*istep)
-        file_name = 'subset_'+file_datetime.strftime('%Y%m%d_%H%M')+'.mat'
+        file_name = fn_header+'_'+file_datetime.strftime('%Y%m%d_%H%M')+'.mat'
         file_path = os.path.join(narr_dir,file_datetime.strftime('Y%Y'),\
                                  file_datetime.strftime('M%m'),\
                                  file_datetime.strftime('D%d'),file_name)
@@ -2819,6 +2825,78 @@ class popy(object):
             = variance_of_weighted_mean*nl2/(nl2-1)
         
         self.standard_error_of_weighted_mean = np.sqrt(variance_of_weighted_mean)
+    
+    def F_interp_met(self,which_met,met_dir,interp_fields,fn_header='',
+                     time_collection='inst3'):
+        """
+        finally made the decision to integrate all meteorological interopolation
+        to the same framework.
+        which_met:
+            a string, choosen from 'ERA5','NARR','GEOS-FP', (MERRA-2 on wishing list)
+        met_dir:
+            directory containing those met data, data structure should be consistently
+            Y%Y/M%M/D%D
+        interp_fields:
+            variables to interpolate from met data, only 2d fields are supported
+        fn_header:
+            in general should denote domain location of met data
+        time_collection:
+            only useful for geos fp. see F_interp_geos_mat
+        created on 2020/03/04
+        """
+        sounding_lon = self.l2g_data['lonc']
+        sounding_lat = self.l2g_data['latc']
+        sounding_datenum = self.l2g_data['UTC_matlab_datenum']
+        if which_met in {'era','ERA','ERA5'}:
+            if not fn_header:
+                fn_header_local = 'CONUS'
+            else:
+                fn_header_local = fn_header
+            sounding_interp = F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,
+                                            met_dir,interp_fields,fn_header_local)
+            for key in sounding_interp.keys():
+                self.logger.info(key+' from ERA5 is sampled to L2g coordinate/time')
+                self.l2g_data['era5_'+key] = np.float32(sounding_interp[key])
+                self.sounding_interp = sounding_interp
+        elif which_met in {'geos','GEOS','GEOS-FP','geos-fp'}:
+            if not fn_header:
+                fn_header_local = 'subset'
+            else:
+                fn_header_local = fn_header
+            sounding_interp = F_interp_geos_mat(sounding_lon,sounding_lat,sounding_datenum,
+                                            met_dir,interp_fields,time_collection,fn_header_local)
+            for key in sounding_interp.keys():
+                self.logger.info(key+' from GEOS-FP is sampled to L2g coordinate/time')
+                self.l2g_data['geosfp_'+key] = np.float32(sounding_interp[key])
+        elif which_met in {'narr','NARR'}:
+            if not fn_header:
+                fn_header_local = 'subset'
+            else:
+                fn_header_local = fn_header
+            sounding_interp = F_interp_narr_mat(sounding_lon,sounding_lat,sounding_datenum,
+                                            met_dir,interp_fields,fn_header_local)
+            for key in sounding_interp.keys():
+                self.logger.info(key+' from NARR is sampled to L2g coordinate/time')
+                self.l2g_data['narr_'+key] = np.float32(sounding_interp.pop(key))
+    
+    def F_remove_l2g_fields(self,fields_to_remove):
+        """
+        sometimes we don't want some fields in the l2g data anymore, e.g., the 
+        interpolated fields. This function cleans the fields listed as input
+        fields_to_remove:
+            a list of field names to be removed from the l2g_data dictionary, 
+            for example fields_to_remove=['U2M','V2M','U10M','V10M','U850','V850','U50M','V50M']
+        created on 2020/03/04
+        """
+        if not hasattr(self,'l2g_data'):
+            self.logger.warning('l2g_data is not there!')
+            return
+        for key in fields_to_remove:
+            try:
+                del self.l2g_data[key]
+                self.logger.info(key+' has been removed from l2g_data...')
+            except KeyError:
+                self.logger.warning(key+' is not there!')
     
     def F_unload_l2g_data(self):
         if hasattr(self,'l2g_data'):
