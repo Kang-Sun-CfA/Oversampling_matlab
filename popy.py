@@ -26,6 +26,185 @@ def datedev_py(matlab_datenum):
     python_datetime = datetime.datetime.fromordinal(int(matlab_datenum)) + datetime.timedelta(days=matlab_datenum%1) - datetime.timedelta(days = 366)
     return python_datetime
 
+def F_interp_gcrs(sounding_lon,sounding_lat,sounding_datenum,sounding_ps,
+                  gcrs_dir='/mnt/Data2/GEOS-Chem_Silvern/',
+                  product='NO2',if_monthly=False):
+    """
+    sample a field from GEOS-Chem data by Rachel Silvern (gcrs) in .nc format. 
+    sounding_lon:
+        longitude for interpolation
+    sounding_lat:
+        latitude for interpolation
+    sounding_datenum:
+        time for interpolation in matlab datenum double format
+    sounding_ps:
+        surface pressure for each sounding
+    gcrs_dir:
+        directory where geos chem data are saved
+    if_monthly:
+        if use monthly profile, instead of daily profile
+    created on 2020/03/09
+    """
+    from netCDF4 import Dataset
+    from scipy.interpolate import RegularGridInterpolator
+    from calendar import isleap
+    # hybrid Ap parameter in Pa
+    Ap = np.array([0.000000e+00, 4.804826e-02, 6.593752e+00, 1.313480e+01, 1.961311e+01, 2.609201e+01,
+                   3.257081e+01, 3.898201e+01, 4.533901e+01, 5.169611e+01, 5.805321e+01, 6.436264e+01,
+                   7.062198e+01, 7.883422e+01, 8.909992e+01, 9.936521e+01, 1.091817e+02, 1.189586e+02,
+                   1.286959e+02, 1.429100e+02, 1.562600e+02, 1.696090e+02, 1.816190e+02, 1.930970e+02,
+                   2.032590e+02, 2.121500e+02, 2.187760e+02, 2.238980e+02, 2.243630e+02, 2.168650e+02,
+                   2.011920e+02, 1.769300e+02, 1.503930e+02, 1.278370e+02, 1.086630e+02, 9.236572e+01,
+                   7.851231e+01, 5.638791e+01, 4.017541e+01, 2.836781e+01, 1.979160e+01, 9.292942e+00,
+                   4.076571e+00, 1.650790e+00, 6.167791e-01, 2.113490e-01, 6.600001e-02, 1.000000e-02],dtype=np.float32)*1e2
+    # hybrid Bp parameter
+    Bp = np.array([1.000000e+00, 9.849520e-01, 9.634060e-01, 9.418650e-01, 9.203870e-01, 8.989080e-01,
+                   8.774290e-01, 8.560180e-01, 8.346609e-01, 8.133039e-01, 7.919469e-01, 7.706375e-01,
+                   7.493782e-01, 7.211660e-01, 6.858999e-01, 6.506349e-01, 6.158184e-01, 5.810415e-01,
+                   5.463042e-01, 4.945902e-01, 4.437402e-01, 3.928911e-01, 3.433811e-01, 2.944031e-01,
+                   2.467411e-01, 2.003501e-01, 1.562241e-01, 1.136021e-01, 6.372006e-02, 2.801004e-02,
+                   6.960025e-03, 8.175413e-09, 0.000000e+00, 0.000000e+00, 0.000000e+00, 0.000000e+00,
+                   0.000000e+00, 0.000000e+00, 0.000000e+00, 0.000000e+00, 0.000000e+00, 0.000000e+00,
+                   0.000000e+00, 0.000000e+00, 0.000000e+00, 0.000000e+00, 0.000000e+00, 0.000000e+00],dtype=np.float32)
+    start_datenum = np.amin(sounding_datenum)
+    end_datenum = np.amax(sounding_datenum)
+    start_datetime = datedev_py(start_datenum)
+    end_datetime = datedev_py(end_datenum)
+    nl2 = len(sounding_datenum)
+    nlayer = 47 # layer number in geos chem
+    # claim space for interopolated profiles, at all level 2 pixels
+    sounding_profile = np.zeros((nl2,nlayer),dtype=np.float32)
+    sounding_pEdge = sounding_ps[:,np.newaxis]*Bp+Ap
+    lat_interp = np.tile(sounding_lat,(nlayer,1)).T.astype(np.float32)
+    lon_interp = np.tile(sounding_lon,(nlayer,1)).T.astype(np.float32)
+    layer_interp = np.tile(np.arange(nlayer),(nl2,1)).astype(np.float32)
+    for year in range(start_datetime.year,end_datetime.year+1): 
+        if product == 'NO2' and if_monthly == False:
+            year_sounding_doy = np.floor(sounding_datenum)-(datetime.datetime(year=year,month=1,day=1).toordinal()+365.)
+            year_sounding_doy = year_sounding_doy.astype(int)
+            if isleap(year):
+                nday = 366
+            else:
+                nday = 365
+            loop_sounding_doy = np.unique(year_sounding_doy)
+            f1 = (loop_sounding_doy>=1)
+            f2 = (loop_sounding_doy<=nday)
+            loop_sounding_doy = loop_sounding_doy[f1&f2]
+            gc_fn = os.path.join(gcrs_dir,'NO2_PROF.05x0625_NA.%0d.nc'%year)
+            print('loading '+gc_fn)
+            gc_id = Dataset(gc_fn)
+            gc_gas = gc_id['NO2_ppb'][:].astype(np.float32)
+            gc_lon = gc_id['longitude'][:]
+            gc_lat = gc_id['latitude'][:]
+            for doy in loop_sounding_doy:
+                # remember python is 0-based
+                gc_gas_doy = gc_gas[doy-1,...].squeeze()
+                rowIndex = np.nonzero(year_sounding_doy==doy)
+                f = RegularGridInterpolator((np.arange(nlayer),gc_lat,gc_lon),\
+                                            gc_gas_doy,bounds_error=False,fill_value=np.nan)
+                sounding_profile[rowIndex,:] = f((layer_interp[rowIndex,:],\
+                                lat_interp[rowIndex,:],lon_interp[rowIndex,:]))
+        elif product in {'NH3','HCHO'} or if_monthly == True:
+            sounding_dt = [datedev_py(sounding_datenum[il2]) for il2 in range(nl2)]
+            sounding_year = np.array([dt.year for dt in sounding_dt])
+            sounding_month = np.array([dt.month for dt in sounding_dt])
+            loop_month = np.unique(sounding_month[sounding_year==year])
+            gc_fn = os.path.join(gcrs_dir,'NH3_HCHO_PROF.05x0625_NA.%0d.nc'%year)
+            print('loading '+gc_fn)
+            gc_id = Dataset(gc_fn)
+            gc_gas = gc_id[product+'_ppb'][:].astype(np.float32)
+            gc_lon = gc_id['longitude'][:]
+            gc_lat = gc_id['latitude'][:]
+            for month in loop_month:
+                # remember python is 0-based
+                gc_gas_doy = gc_gas[month-1,...].squeeze()
+                rowIndex = np.nonzero((sounding_year==year)&(sounding_month==month))
+                f = RegularGridInterpolator((np.arange(nlayer),gc_lat,gc_lon),\
+                                            gc_gas_doy,bounds_error=False,fill_value=np.nan)
+                sounding_profile[rowIndex,:] = f((layer_interp[rowIndex,:],\
+                                lat_interp[rowIndex,:],lon_interp[rowIndex,:]))
+    return sounding_profile, sounding_pEdge
+        
+def F_interp_merra2(sounding_lon,sounding_lat,sounding_datenum,\
+                  merra2_dir='/mnt/Data2/MERRA/',\
+                  interp_fields=['PBLTOP','PS','TROPPT'],\
+                  fn_header='MERRA2_300.tavg1_2d_slv_Nx'):
+    """
+    sample a field from merra2 data in .nc format. 
+    see download_merra2.py for downloading
+    sounding_lon:
+        longitude for interpolation
+    sounding_lat:
+        latitude for interpolation
+    sounding_datenum:
+        time for interpolation in matlab datenum double format
+    merra2_dir:
+        directory where merra2 data are saved
+    interp_fields:
+        variables to interpolate from era5, only 2d fields are supported
+    fn_header:
+        following nasa ges disc naming
+    created on 2020/03/09
+    """
+    import glob
+    from scipy.interpolate import RegularGridInterpolator
+    start_datenum = np.amin(sounding_datenum)
+    end_datenum = np.amax(sounding_datenum)
+    start_date = datedev_py(start_datenum).date()
+    
+    end_date = datedev_py(end_datenum).date()
+    days = (end_date-start_date).days+1
+    DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+    merra2_data = {}
+    iday = 0
+    for DATE in DATES:
+        merra_filedir = os.path.join(merra2_dir,DATE.strftime('Y%Y'),\
+                                      DATE.strftime('M%m'),DATE.strftime('D%d'))
+        merra_flist = glob.glob(merra_filedir+'/*.nc')
+        if len(merra_flist) > 1:
+            print('Careful! More than one nc file in MERRA daily folder!')
+        elif len(merra_flist) == 0:
+            print('No merra file')
+            continue
+        fn = merra_flist[0]
+        if not merra2_data:
+            nc_out = F_ncread_selective(fn,np.concatenate(
+                    (interp_fields,['lat','lon','time'])))
+            merra2_data['lon'] = nc_out['lon']
+            merra2_data['lat'] = nc_out['lat']
+            # how many hours are there in each daily file? have to be the same 
+            nhour = len(nc_out['time'])
+            merra2_data['datenum'] = np.zeros((nhour*(days)),dtype=np.float64)
+            # merra2 time is defined as minutes since 00:30:00 on that day
+            merra2_data['datenum'][iday*nhour:((iday+1)*nhour)] = DATE.toordinal()+366.+(nc_out['time']+30)/1440
+            for field in interp_fields:
+                merra2_data[field] = np.zeros((len(merra2_data['lon']),len(merra2_data['lat']),nhour*(days)))
+                # was read in as 3-d array in time, lat, lon; transpose to lon, lat, time
+                merra2_data[field][...,iday*nhour:((iday+1)*nhour)] = nc_out[field].transpose((2,1,0))
+        else:
+            nc_out = F_ncread_selective(fn,np.concatenate(
+                    (interp_fields,['time'])))
+            # merra2 time is defined as minutes since 00:30:00 on that day
+            merra2_data['datenum'][iday*nhour:((iday+1)*nhour)] = DATE.toordinal()+366.+(nc_out['time']+30)/1440
+            for field in interp_fields:
+                # was read in as 3-d array in time, lat, lon; transpose to lon, lat, time
+                merra2_data[field][...,iday*nhour:((iday+1)*nhour)] = nc_out[field].transpose((2,1,0))
+        # forgot to increment iday
+        iday = iday+1
+    
+    sounding_interp = {}
+    if not merra2_data:
+        for fn in interp_fields:
+            sounding_interp[fn] = sounding_lon*np.nan
+        return sounding_interp
+    # interpolate
+    for fn in interp_fields:
+        my_interpolating_function = \
+        RegularGridInterpolator((merra2_data['lon'],merra2_data['lat'],merra2_data['datenum']),\
+                                merra2_data[fn],bounds_error=False,fill_value=np.nan)
+        sounding_interp[fn] = my_interpolating_function((sounding_lon,sounding_lat,sounding_datenum))
+    return sounding_interp
+
 def F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,\
                   era5_dir='/mnt/Data2/ERA5/',\
                   interp_fields=['blh','u10','v10','u100','v100','sp'],\
@@ -40,7 +219,7 @@ def F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,\
     sounding_datenum:
         time for interpolation in matlab datenum double format
     era5_dir:
-        directory where subset era5 data in .mat are saved
+        directory where subset era5 data in .nc are saved
     interp_fields:
         variables to interpolate from era5, only 2d fields are supported
     fn_header:
@@ -2826,13 +3005,43 @@ class popy(object):
         
         self.standard_error_of_weighted_mean = np.sqrt(variance_of_weighted_mean)
     
+    def F_interp_profile(self,which_met,met_dir,if_monthly=False,
+                         surface_pressure_field='merra2_PS'):
+        """
+        place holder for a more versatile function to sample vertical profiles
+        from 3D met/CTM fields at l2g locations and times. currently only support
+        RS's geos-chem
+        which_met:
+            gcrs for now
+        met_dir:
+            gcrs_dir='/mnt/Data2/GEOS-Chem_Silvern/'
+        if_monthly:
+            if use monthly profile, instead of daily profile
+        surface_pressure_field:
+            surface pressure field in l2g_data. suggest to use merra2 for gcrs
+            because surface pressure determines the whole pressure levels
+        created on 2020/03/14
+        """
+        sounding_lon = self.l2g_data['lonc']
+        sounding_lat = self.l2g_data['latc']
+        sounding_datenum = self.l2g_data['UTC_matlab_datenum']
+        sounding_ps = self.l2g_data[surface_pressure_field]
+        if which_met == 'gcrs':
+            sounding_profiles,sounding_pEdge = \
+            F_interp_gcrs(sounding_lon,sounding_lat,sounding_datenum,
+                          sounding_ps,gcrs_dir=met_dir,
+                          product=self.product,if_monthly=if_monthly)
+            self.l2g_data['gcrs_'+self.product+'_profiles'] = sounding_profiles
+            self.l2g_data['gcrs_plevel'] = sounding_pEdge
+            self.logger.info('GEOS-Chem profiles sampled at level 2 g locations')
+    
     def F_interp_met(self,which_met,met_dir,interp_fields,fn_header='',
                      time_collection='inst3'):
         """
         finally made the decision to integrate all meteorological interopolation
         to the same framework.
         which_met:
-            a string, choosen from 'ERA5','NARR','GEOS-FP', (MERRA-2 on wishing list)
+            a string, choosen from 'ERA5', 'NARR', 'GEOS-FP', 'MERRA-2'
         met_dir:
             directory containing those met data, data structure should be consistently
             Y%Y/M%M/D%D
@@ -2877,8 +3086,74 @@ class popy(object):
                                             met_dir,interp_fields,fn_header_local)
             for key in sounding_interp.keys():
                 self.logger.info(key+' from NARR is sampled to L2g coordinate/time')
-                self.l2g_data['narr_'+key] = np.float32(sounding_interp.pop(key))
+                self.l2g_data['narr_'+key] = np.float32(sounding_interp[key])
+        elif which_met in {'merra-2','merra2','merra','MERRA-2','MERRA2','MERRA'}:
+            if not fn_header:
+                fn_header_local = 'MERRA2_300.tavg1_2d_slv_Nx'
+            else:
+                fn_header_local = fn_header
+            sounding_interp = F_interp_merra2(sounding_lon,sounding_lat,sounding_datenum,
+                                            met_dir,interp_fields,fn_header_local)
+            for key in sounding_interp.keys():
+                self.logger.info(key+' from MERRA2 is sampled to L2g coordinate/time')
+                self.l2g_data['merra2_'+key] = np.float32(sounding_interp[key])
     
+    def F_derive_model_subcolumn(self,pressure_boundaries=['ps',600,'tropopause',0],
+                                 surface_pressure_field='merra2_PS',
+                                 tropopause_field='merra2_TROPPT'):
+        """
+        derive subcolumns using interpolated model profiles and stored the results
+        in l2g_data
+        pressure_boundaries:
+            boundaries between which to calculate subcolumn. use 'ps' for surface
+            pressure and 'tropopause' for tropopause pressure. unit is ***hPa***
+        surface_pressure_field:
+            surface pressure in l2g_data dictionary
+        tropopause_field:
+            tropopause pressure in l2g_data dictionary
+        created on 2020/03/14
+        """
+        from scipy.interpolate import interp1d
+        if surface_pressure_field not in self.l2g_data.keys():
+            self.logger.warning(surface_pressure_field+' is not in l2g_data!')
+            return
+        if tropopause_field not in self.l2g_data.keys() and 'tropopause' in pressure_boundaries:
+            self.logger.warning(tropopause_field+' is not in l2g_data!')
+            return
+        if 'gcrs_'+self.product+'_profiles' not in self.l2g_data.keys():
+            self.logger.warning('Please run popy.F_interp_profiles first!')
+            return
+        sounding_profile = self.l2g_data['gcrs_'+self.product+'_profiles']
+        sounding_pEdge = self.l2g_data['gcrs_plevel']
+        sfc_pressure = self.l2g_data[surface_pressure_field]
+        tropopause_pressure = self.l2g_data[tropopause_field]
+        nsubcol = len(pressure_boundaries)-1
+        subcolumns = np.full((self.nl2,nsubcol),np.nan)
+        pressure_boundaries = np.array(pressure_boundaries)
+        ps_idx = np.nonzero(pressure_boundaries=='ps')
+        pt_idx = np.nonzero(pressure_boundaries=='tropopause')
+        num_pressure_boundaries = np.zeros((self.nl2,len(pressure_boundaries)),dtype=np.float32)
+        for ip in range(len(pressure_boundaries)):
+            if ip == ps_idx[0]:
+                num_pressure_boundaries[:,ip] = sfc_pressure
+            elif ip == pt_idx[0]:
+                num_pressure_boundaries[:,ip] = tropopause_pressure
+            else:# hPa to Pa
+                num_pressure_boundaries[:,ip] = pressure_boundaries[ip]*1e2
+        self.num_pressure_boundaries = num_pressure_boundaries
+        for il2 in range(self.nl2):
+            local_pressure_boundaries = num_pressure_boundaries[il2,]
+            local_plevel = sounding_pEdge[il2,:]
+            # subcolum of each layer, in mol/m2
+            local_gas = sounding_profile[il2,:]*1e-9*np.abs(np.diff(local_plevel))/9.8/0.029
+            cum_gas = np.concatenate(([0.],np.cumsum(local_gas)))
+            # 1d interpolation function, cumulated mass from ps
+            f = interp1d(local_plevel,cum_gas,fill_value='extrapolate')
+            sfc2p_subcol = np.array([f(pb) for pb in local_pressure_boundaries])
+            subcolumns[il2,] = np.diff(sfc2p_subcol)
+        self.l2g_data['sub_columns'] = subcolumns
+        self.pressure_boundaries = pressure_boundaries
+            
     def F_remove_l2g_fields(self,fields_to_remove):
         """
         sometimes we don't want some fields in the l2g data anymore, e.g., the 
