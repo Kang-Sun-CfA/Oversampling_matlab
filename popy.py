@@ -11,6 +11,7 @@ Created on Sat Jan 26 15:50:30 2019
 2019/07/13: implement optimized regridding from chris chan miller
 2019/07/19: fix fwhm -> w bug (pixel size corrected, by 2)
 2019/10/23: add CrISNH3 subsetting function
+2020/03/14: standardize met sampling functions
 """
 
 import numpy as np
@@ -3005,6 +3006,17 @@ class popy(object):
         
         self.standard_error_of_weighted_mean = np.sqrt(variance_of_weighted_mean)
     
+    def F_save_l3_to_mat(self,file_path):
+        """
+        save regridded level 3 data, from F_regrid or F_regrid_ccm to .mat file
+        file_path: 
+            absolute path to the .mat file to save
+        created on 2020/03/15
+        """
+        if not self.C:
+            self.logger.warning('l3_data is empty. Nothing to save.')
+            return        
+        import scipy.io
     def F_interp_profile(self,which_met,met_dir,if_monthly=False,
                          surface_pressure_field='merra2_PS'):
         """
@@ -3133,14 +3145,22 @@ class popy(object):
         ps_idx = np.nonzero(pressure_boundaries=='ps')
         pt_idx = np.nonzero(pressure_boundaries=='tropopause')
         num_pressure_boundaries = np.zeros((self.nl2,len(pressure_boundaries)),dtype=np.float32)
+        msg_str = 'calculating subcolumns between'
         for ip in range(len(pressure_boundaries)):
             if ip == ps_idx[0]:
                 num_pressure_boundaries[:,ip] = sfc_pressure
+                msg_str = msg_str+' surface pressure ([%.1f'%(np.min(sfc_pressure)/1e2)+',%.1f] hPa)'%(np.max(sfc_pressure)/1e2)
             elif ip == pt_idx[0]:
                 num_pressure_boundaries[:,ip] = tropopause_pressure
+                msg_str = msg_str+' tropopause pressure ([%.1f'%(np.min(tropopause_pressure)/1e2)+',%.1f] hPa)'%(np.max(tropopause_pressure)/1e2)
             else:# hPa to Pa
-                num_pressure_boundaries[:,ip] = pressure_boundaries[ip]*1e2
+                num_pressure_boundaries[:,ip] = np.float(pressure_boundaries[ip])*1e2
+                msg_str = msg_str+' %.1f hPa'%(np.float(pressure_boundaries[ip]))
+        self.logger.info(msg_str)
         self.num_pressure_boundaries = num_pressure_boundaries
+        nl2 = self.nl2
+        count = 0
+        self.logger.info('Looping through l2g pixels to calculate subcolumns. could be slow...')
         for il2 in range(self.nl2):
             local_pressure_boundaries = num_pressure_boundaries[il2,]
             local_plevel = sounding_pEdge[il2,:]
@@ -3151,6 +3171,9 @@ class popy(object):
             f = interp1d(local_plevel,cum_gas,fill_value='extrapolate')
             sfc2p_subcol = np.array([f(pb) for pb in local_pressure_boundaries])
             subcolumns[il2,] = np.diff(sfc2p_subcol)
+            if il2 == count*np.round(nl2/10.):
+                self.logger.info('%d%% finished' %(count*10))
+                count = count + 1
         self.l2g_data['sub_columns'] = subcolumns
         self.pressure_boundaries = pressure_boundaries
             
