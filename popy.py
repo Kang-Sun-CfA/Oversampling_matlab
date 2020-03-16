@@ -1073,7 +1073,7 @@ class popy(object):
                 
         l2g_data = {}
         for fn in l2_list:
-            fn_dir = l2_dir+fn
+            fn_dir = os.path.join(l2_dir,fn)
             self.logger.info('Loading'+fn_dir)
             outp_he5 = self.F_read_he5(fn_dir,swathname,data_fields,geo_fields,data_fields_l2g,geo_fields_l2g)
             along_track_idx = np.concatenate((outp_he5['nTimes_idx'],np.array([outp_he5['nTimes_idx'][-1]+1])))
@@ -1180,7 +1180,7 @@ class popy(object):
         self.logger.info('Level 2 data are located at '+l2_dir)
         l2g_data = {}
         for fn in l2_list:
-            fn_dir = l2_dir+fn
+            fn_dir = os.path.join(l2_dir,fn)
             self.logger.info('Loading '+fn)
             try:
                 outp_nc = self.F_read_MEaSUREs_nc(fn_dir,data_fields,data_fields_l2g)
@@ -1292,7 +1292,7 @@ class popy(object):
         self.logger.info('Level 2 data are located at '+l2_dir)
         l2g_data = {}
         for fn in l2_list:
-            fn_dir = l2_dir+fn
+            fn_dir = os.path.join(l2_dir,fn)
             self.logger.info('Loading '+fn)
             try:
                 outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
@@ -1415,7 +1415,7 @@ class popy(object):
         self.logger.info('Level 2 data are located at '+l2_dir)
         l2g_data = {}
         for fn in l2_list:
-            fn_dir = l2_dir+fn
+            fn_dir = os.path.join(l2_dir,fn)
             self.logger.info('Loading '+fn)
             try:
                 outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
@@ -1716,7 +1716,7 @@ class popy(object):
         self.logger.info('Level 2 data are located at '+l2_dir)
         l2g_data = {}
         for fn in l2_list:
-            fn_dir = l2_dir+fn
+            fn_dir = os.path.join(l2_dir,fn)
             self.logger.info('Loading '+fn)
             try:
                 outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
@@ -3016,7 +3016,16 @@ class popy(object):
         if not self.C:
             self.logger.warning('l3_data is empty. Nothing to save.')
             return        
-        import scipy.io
+        from scipy.io import savemat
+        C = self.C.copy()
+        C['total_sample_weight'] = self.total_sample_weight
+        C['num_samples'] = self.num_samples
+        C['xgrid'] = self.xgrid
+        C['ygrid'] = self.ygrid
+        C['ncol'] = self.ncols
+        C['nrow'] = self.nrows
+        savemat(file_path,C)
+        
     def F_interp_profile(self,which_met,met_dir,if_monthly=False,
                          surface_pressure_field='merra2_PS'):
         """
