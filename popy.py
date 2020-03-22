@@ -525,7 +525,7 @@ class popy(object):
                                  'cloud_fraction','cloud_pressure','terrain_height']
             xmargin = 1.5
             ymargin = 2
-            maxsza = 60
+            maxsza = 70
             maxcf = 0.3
             self.maxMDQF = 0
             self.maxEXTQF = 0
@@ -607,7 +607,7 @@ class popy(object):
                                  'cloud_fraction']
             xmargin = 1.5
             ymargin = 1.5
-            maxsza = 60
+            maxsza = 70
             maxcf = 0.3
             self.min_qa_value = 0.5
         elif(instrum == "IASI"):
