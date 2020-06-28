@@ -12,6 +12,7 @@ Created on Sat Jan 26 15:50:30 2019
 2019/07/19: fix fwhm -> w bug (pixel size corrected, by 2)
 2019/10/23: add CrISNH3 subsetting function
 2020/03/14: standardize met sampling functions
+2020/05/19: add subsetting fields option as input
 """
 
 import numpy as np
@@ -1224,14 +1225,19 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
         
-    def F_subset_S5PNO2(self,path,s5p_product='*',geos_interp_variables=[],
-                        geos_time_collection=''):
+    def F_subset_S5PNO2(self,path,data_fields=[],data_fields_l2g=[],
+                        s5p_product='*',
+                        geos_interp_variables=[],geos_time_collection=''):
         """ 
         function to subset tropomi no2 level 2 data, calling self.F_read_S5P_nc
         path:
             l2 data directory, or path to control file
         s5p_product:
             choose from RPRO and OFFL, default '*' means all
+        data_fields:
+            a list of strings indicating which fields in the l2 file to keep
+        data_fields_l2g:
+            shortened data_fields used in the output dictionary l2g_data
         geos_interp_variables:
             a list of variables (only 2d fields are supported now) to be 
             resampled from geos fp (has to be subsetted/resaved into .mat). see
@@ -1271,23 +1277,25 @@ class popy(object):
         north = self.north
         min_qa_value = self.min_qa_value
         
-        # absolute path of useful variables in the nc file
-        data_fields = ['/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/cloud_fraction_crb_nitrogendioxide_window',\
-               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds',\
-               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds',\
-               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/solar_zenith_angle',\
-               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/viewing_zenith_angle',\
-               '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_albedo_nitrogendioxide_window',\
-               '/PRODUCT/latitude',\
-               '/PRODUCT/longitude',\
-               '/PRODUCT/qa_value',\
-               '/PRODUCT/time_utc',\
-               '/PRODUCT/nitrogendioxide_tropospheric_column',\
-               '/PRODUCT/nitrogendioxide_tropospheric_column_precision']    
-        # standardized variable names in l2g file. should map one-on-one to data_fields
-        data_fields_l2g = ['cloud_fraction','latitude_bounds','longitude_bounds','SolarZenithAngle',\
-                           'vza','albedo','latc','lonc','qa_value','time_utc',\
-                           'column_amount','column_uncertainty']
+        if not data_fields:
+            # default, absolute path of useful variables in the nc file
+            data_fields = ['/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/cloud_fraction_crb_nitrogendioxide_window',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/solar_zenith_angle',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/viewing_zenith_angle',\
+                           '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_albedo_nitrogendioxide_window',\
+                           '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_pressure',\
+                           '/PRODUCT/latitude',\
+                           '/PRODUCT/longitude',\
+                           '/PRODUCT/qa_value',\
+                           '/PRODUCT/time_utc',\
+                           '/PRODUCT/nitrogendioxide_tropospheric_column',\
+                           '/PRODUCT/nitrogendioxide_tropospheric_column_precision']    
+            # standardized variable names in l2g file. should map one-on-one to data_fields
+            data_fields_l2g = ['cloud_fraction','latitude_bounds','longitude_bounds','SolarZenithAngle',\
+                               'vza','albedo','surface_pressure','latc','lonc','qa_value','time_utc',\
+                               'column_amount','column_uncertainty']
         self.logger.info('Read, subset, and store level 2 data to l2g_data')
         self.logger.info('Level 2 data are located at '+l2_dir)
         l2g_data = {}
@@ -1768,7 +1776,8 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
-    def F_subset_OMNO2(self,path,l2_path_structure=None):
+    def F_subset_OMNO2(self,path,l2_path_structure=None,
+                       data_fields=[],data_fields_l2g=[],):
         """ 
         function to subset omno2, nasa sp level 2 data, calling self.F_read_he5
         path:
@@ -1777,7 +1786,12 @@ class popy(object):
             None by default, indicating individual files are directly under path
             '%Y/' if files are like l2_dir/2019/*.he5
             '%Y/%m/%d/' if files are like l2_dir/2019/05/01/*.he5
+        data_fields:
+            a list of strings indicating which fields in the l2 file to keep
+        data_fields_l2g:
+            shortened data_fields used in the output dictionary l2g_data
         updated on 2019/07/17
+        modified on 2020/05/19 to include data_fields as input
         """      
         # find out list of l2 files to subset
         if os.path.isfile(path):
@@ -1805,13 +1819,13 @@ class popy(object):
             os.chdir(cwd)
             self.l2_dir = l2_dir
             self.l2_list = l2_list
-        
-        data_fields = ['CloudFraction','CloudPressure','TerrainReflectivity',\
-                       'ColumnAmountNO2Trop','ColumnAmountNO2TropStd','VcdQualityFlags',\
-                       'XTrackQualityFlags']
-        data_fields_l2g = ['cloud_fraction','cloud_pressure','albedo',\
-                           'column_amount','column_uncertainty','VcdQualityFlags',\
-                       'XTrackQualityFlags']
+        if not data_fields:
+            data_fields = ['CloudFraction','CloudPressure','TerrainReflectivity',\
+                           'ColumnAmountNO2Trop','ColumnAmountNO2TropStd','VcdQualityFlags',\
+                           'XTrackQualityFlags','TerrainPressure','TropopausePressure']
+            data_fields_l2g = ['cloud_fraction','cloud_pressure','albedo',\
+                               'column_amount','column_uncertainty','VcdQualityFlags',\
+                               'XTrackQualityFlags','surface_pressure','tropopause_pressure']
         geo_fields = ['Latitude','Longitude','Time','SolarZenithAngle','FoV75CornerLatitude','FoV75CornerLongitude']
         geo_fields_l2g = ['latc','lonc','Time','SolarZenithAngle','FoV75CornerLatitude','FoV75CornerLongitude']
         swathname = 'ColumnAmountNO2'
@@ -3077,7 +3091,7 @@ class popy(object):
         sounding_lon = self.l2g_data['lonc']
         sounding_lat = self.l2g_data['latc']
         sounding_datenum = self.l2g_data['UTC_matlab_datenum']
-        if which_met in {'era','ERA','ERA5'}:
+        if which_met in {'era','era5','ERA','ERA5'}:
             if not fn_header:
                 fn_header_local = 'CONUS'
             else:
