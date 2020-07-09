@@ -604,8 +604,11 @@ class popy(object):
             k2 = 2
             k3 = 1
             error_model = "linear"
-            oversampling_list = ['column_amount','albedo',\
-                                 'cloud_fraction']
+            if product in ['AI']:
+                oversampling_list = ['AI']
+            else:
+                oversampling_list = ['column_amount','albedo',\
+                                     'cloud_fraction']
             xmargin = 1.5
             ymargin = 1.5
             maxsza = 70
@@ -1026,6 +1029,7 @@ class popy(object):
         path: directory containing omhcho level 2 files, OR path to control.txt
         updated on 2019/04/23
         updated on 2019/12/17 to handle sub.he5 (but pixel corners are not subset by ges disc)
+        updated on 2020/07/09 to adapt full orbit (non-subset) he5
         """
         # find out list of l2 files to subset
         if os.path.isfile(path):
@@ -1077,10 +1081,11 @@ class popy(object):
             fn_dir = os.path.join(l2_dir,fn)
             self.logger.info('Loading'+fn_dir)
             outp_he5 = self.F_read_he5(fn_dir,swathname,data_fields,geo_fields,data_fields_l2g,geo_fields_l2g)
-            along_track_idx = np.concatenate((outp_he5['nTimes_idx'],np.array([outp_he5['nTimes_idx'][-1]+1])))
-            across_track_idx = np.concatenate((outp_he5['nXtrack_idx'],np.array([outp_he5['nXtrack_idx'][-1]+1])))
-            outp_he5['PixelCornerLatitudes'] = outp_he5['PixelCornerLatitudes'][np.ix_(along_track_idx,across_track_idx)]
-            outp_he5['PixelCornerLongitudes'] = outp_he5['PixelCornerLongitudes'][np.ix_(along_track_idx,across_track_idx)]
+            if 'nTimes_idx' in outp_he5.keys():
+                along_track_idx = np.concatenate((outp_he5['nTimes_idx'],np.array([outp_he5['nTimes_idx'][-1]+1])))
+                across_track_idx = np.concatenate((outp_he5['nXtrack_idx'],np.array([outp_he5['nXtrack_idx'][-1]+1])))
+                outp_he5['PixelCornerLatitudes'] = outp_he5['PixelCornerLatitudes'][np.ix_(along_track_idx,across_track_idx)]
+                outp_he5['PixelCornerLongitudes'] = outp_he5['PixelCornerLongitudes'][np.ix_(along_track_idx,across_track_idx)]
             f1 = outp_he5['SolarZenithAngle'] <= maxsza
             f2 = outp_he5['cloud_fraction'] <= maxcf
             f3 = outp_he5['MainDataQualityFlag'] <= maxMDQF              
@@ -1224,7 +1229,113 @@ class popy(object):
             self.nl2 = 0
         else:
             self.nl2 = len(l2g_data['latc'])
+    
+    def F_subset_S5PAI(self,path,data_fields=[],data_fields_l2g=[],
+                       s5p_product='*',whichAI='aerosol_index_340_380'):
+        """ 
+        function to subset tropomi aerosol level 2 data, calling self.F_read_S5P_nc
+        path:
+            l2 data directory, or path to control file
+        s5p_product:
+            choose from RPRO and OFFL, default '*' means all
+        data_fields:
+            a list of strings indicating which fields in the l2 file to keep
+        data_fields_l2g:
+            shortened data_fields used in the output dictionary l2g_data
+        whichAI:
+            'aerosol_index_340_380' or 'aerosol_index_354_380'
+        updated on 2020/07/09
+        """      
         
+        # find out list of l2 files to subset
+        if os.path.isfile(path):
+            self.F_update_popy_with_control_file(path)
+            l2_list = self.l2_list
+            l2_dir = self.l2_dir
+        else:
+            import glob
+            l2_dir = path
+            l2_list = []
+            cwd = os.getcwd()
+            os.chdir(l2_dir)
+            start_date = self.start_python_datetime.date()
+            end_date = self.end_python_datetime.date()
+            days = (end_date-start_date).days+1
+            DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+            for DATE in DATES:
+                flist = glob.glob('S5P_'+s5p_product+'_L2__AER_AI_'+DATE.strftime("%Y%m%d")+'T*.nc')
+                l2_list = l2_list+flist
+            os.chdir(cwd)
+            self.l2_dir = l2_dir
+            self.l2_list = l2_list
+        
+#        maxsza = self.maxsza
+#        maxcf = self.maxcf
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        min_qa_value = self.min_qa_value
+        
+        if not data_fields:
+            # default, absolute path of useful variables in the nc file
+            data_fields = ['/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds',\
+                           '/PRODUCT/latitude',\
+                           '/PRODUCT/longitude',\
+                           '/PRODUCT/qa_value',\
+                           '/PRODUCT/time_utc',\
+                           '/PRODUCT/'+whichAI,\
+                           '/PRODUCT/'+whichAI+'_precision']    
+            # standardized variable names in l2g file. should map one-on-one to data_fields
+            data_fields_l2g = ['latitude_bounds','longitude_bounds','latc','lonc','qa_value','time_utc',\
+                               'AI','column_uncertainty']
+        self.logger.info('Read, subset, and store level 2 data to l2g_data')
+        self.logger.info('Level 2 data are located at '+l2_dir)
+        l2g_data = {}
+        for fn in l2_list:
+            fn_dir = os.path.join(l2_dir,fn)
+            self.logger.info('Loading '+fn)
+            try:
+                outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
+            except Exception as e:
+                self.logger.warning(fn+' gives error:');
+                print(e)
+                input("Press Enter to continue...")
+                continue
+            f3 = outp_nc['qa_value'] >= min_qa_value              
+            f4 = outp_nc['latc'] >= south
+            f5 = outp_nc['latc'] <= north
+            tmplon = outp_nc['lonc']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp_nc['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp_nc['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            validmask = f3 & f4 & f5 & f6 & f7 & f8 & f9
+            self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            l2g_data0 = {}
+            # yep it's indeed messed up
+            Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][:,:,0])[validmask]
+            Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][:,:,3])[validmask]
+            Lat_lowerright = np.squeeze(outp_nc['latitude_bounds'][:,:,1])[validmask]
+            Lat_upperright = np.squeeze(outp_nc['latitude_bounds'][:,:,2])[validmask]
+            Lon_lowerleft = np.squeeze(outp_nc['longitude_bounds'][:,:,0])[validmask]
+            Lon_upperleft = np.squeeze(outp_nc['longitude_bounds'][:,:,3])[validmask]
+            Lon_lowerright = np.squeeze(outp_nc['longitude_bounds'][:,:,1])[validmask]
+            Lon_upperright = np.squeeze(outp_nc['longitude_bounds'][:,:,2])[validmask]
+            l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
+            l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+            for key in outp_nc.keys():
+                if key not in {'latitude_bounds','longitude_bounds','time_utc','time','delta_time'}:
+                    l2g_data0[key] = outp_nc[key][validmask]
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
+            
     def F_subset_S5PNO2(self,path,data_fields=[],data_fields_l2g=[],
                         s5p_product='*',
                         geos_interp_variables=[],geos_time_collection=''):
