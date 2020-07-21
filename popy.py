@@ -13,6 +13,7 @@ Created on Sat Jan 26 15:50:30 2019
 2019/10/23: add CrISNH3 subsetting function
 2020/03/14: standardize met sampling functions
 2020/05/19: add subsetting fields option as input
+2020/07/20: parallel regrid function done
 """
 
 import numpy as np
@@ -502,6 +503,263 @@ def F_ncread_selective(fn,varnames):
         outp[varname] = ncid.variables[varname][:]
     ncid.close()
     return outp
+
+# Utilities for F_block_regrid_ccm
+def bound_arr(i1,i2,mx,ncols):
+    arr = np.arange(i1,i2,dtype=int)
+    arr[arr<0] += mx
+    arr[arr>=mx] -= mx
+    return arr[arr<ncols]
+
+def bound_lat(i1,i2,mx):
+    arr = np.arange(i1,i2,dtype=int)
+    return arr[ np.logical_and( arr>=0, arr < mx ) ]
+
+def F_lon_distance(lon1,lon2):
+    distance = lon2 - lon1
+    distance[lon2<lon1] += 360.0
+    return distance
+
+def F_ellipse(a,b,alpha,npoint):
+    t = np.linspace(0.,np.pi*2,npoint)[::-1]
+    Q = np.array([[np.cos(alpha),-np.sin(alpha)],[np.sin(alpha),np.cos(alpha)]])
+    X = Q.dot(np.vstack((a * np.cos(t),b * np.sin(t))))
+    minlon_e = X[0,].min()
+    minlat_e = X[1,].min()
+    return X, minlon_e, minlat_e
+
+def F_block_regrid_wrapper(args):
+    '''
+    repackage F_block_regrid_ccm following example of pysplat.hitran_absco
+    '''
+    return F_block_regrid_ccm(*args)
+
+def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
+                       oversampling_list,instrum,error_model,
+                       k1,k2,k3,xmargin,ymargin,
+                       iblock=1):
+    '''
+    a more compact version of F_regrid_ccm designed for parallel regridding
+    l2g_data:
+        a l2g_data dictionary compatible with popy
+    xmesh:
+        lon mesh grid
+    ymesh:
+        lat mesh grid
+    grid_size:
+        in degree
+    oversampling_list:
+        a list of l2(g) variables to be oversampled
+    instrum:
+        instrument name in popy
+    error_model:
+        error model in popy
+    k1, k2, k3:
+        2d super gaussian shape parameter
+    xmargin, ymargin:
+        factors extending beyond pixel boundary
+    iblock:
+        indicate block in parallel regridding
+    created on 2020/07/19
+    '''
+    import cv2
+    from shapely.geometry import Polygon
+    sg_kfacx = 2*(np.log(2)**(1/k1/k3))
+    sg_kfacy = 2*(np.log(2)**(1/k2/k3))
+    nvar_oversampling = len(oversampling_list)
+    nl2 = len(l2g_data['latc'])
+    xgrid = xmesh[0,:]
+    ygrid = ymesh[:,0]
+    nrows = len(ygrid)
+    ncols = len(xgrid)
+    grid_size = np.median(np.abs(np.diff(xgrid)))
+    max_ncol = np.array(np.round(360/grid_size),dtype=int)
+    # Allocate memory for regrid fields
+    total_sample_weight = np.zeros(xmesh.shape)
+    num_samples = np.zeros(xmesh.shape)
+    sum_aboves = []
+    for n in range(nvar_oversampling):
+        sum_aboves.append(np.zeros(xmesh.shape))
+    # To only average cloud pressure using pixels where cloud fraction > 0.0
+    pres_total_sample_weight = np.zeros(xmesh.shape)
+    pres_num_samples = np.zeros(xmesh.shape)
+    pres_sum_aboves = np.zeros(xmesh.shape)
+    
+    # Move as much as possible outside loop
+    if instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B",\
+                            "SCIAMACHY","TROPOMI","OMPS-N20"}:
+        # Set 
+        latc = l2g_data['latc']
+        lonc = l2g_data['lonc']
+        latr = l2g_data['latr']
+        lonr = l2g_data['lonr']
+        # Get lonc/latc center indices
+        lonc_index = [np.argmin(np.abs(xgrid-lonc[i])) for i in range(nl2)]
+        latc_index = [np.argmin(np.abs(ygrid-latc[i])) for i in range(nl2)]
+        # Get East/West indices
+        tmp = np.array([F_lon_distance(lonr[:,0].squeeze(),lonc),F_lon_distance(lonr[:,1].squeeze(),lonc)]).T
+        west_extent = np.round( np.max(tmp,axis=1)/grid_size*xmargin )
+        tmp = np.array([F_lon_distance(lonc,lonr[:,2].squeeze()),F_lon_distance(lonc,lonr[:,3].squeeze())]).T
+        east_extent = np.round( np.max(tmp,axis=1)/grid_size*xmargin )
+        # Get lists of indices
+        lon_index = [bound_arr(lonc_index[i]-west_extent[i],lonc_index[i]+east_extent[i]+1,max_ncol,ncols)  for i in range(nl2)]
+        # The western most longitude
+        patch_west = [xgrid[lon_index[i][0]] for i in range(nl2)]
+        # Get north/south indices
+        north_extent = np.ceil( (latr.max(axis=1)-latr.min(axis=1))/2/grid_size*ymargin)
+        south_extent = north_extent
+        # List of latitude indices
+        lat_index = [bound_lat(latc_index[i]-south_extent[i],latc_index[i]+north_extent[i]+1,nrows) for i in range(nl2)]
+        # This might be faster
+        patch_lonr = np.array([lonr[i,:] - patch_west[i] for i in range(nl2)]) ; #patch_lonr[patch_lonr<0.0] += 360.0
+        patch_lonc = lonc - patch_west ; #patch_lonc[patch_lonc<0.0] += 360.0
+        area_weight = [Polygon(np.column_stack([patch_lonr[i,:],latr[i,:].squeeze()])).area for i in range(nl2)]
+        # Compute transforms for SG outside loop
+        vlist = np.zeros((nl2,4,2),dtype=np.float32)
+        for n in range(4):
+            vlist[:,n,0] = patch_lonr[:,n] - patch_lonc[:]
+            vlist[:,n,1] = latr[:,n] - latc[:]
+        xvector  = np.mean(vlist[:,2:4,:],axis=1) - np.mean(vlist[:,0:2,:],axis=1)
+        yvector = np.mean(vlist[:,1:3,:],axis=1) - np.mean(vlist[:,[0,3],:],axis=1)
+        fwhmx = np.linalg.norm(xvector,axis=1)
+        fwhmy = np.linalg.norm(yvector,axis=1)
+        fixedPoints = np.array([[-fwhmx,-fwhmy],[-fwhmx,fwhmy],[fwhmx,fwhmy],[fwhmx,-fwhmy]],dtype=np.float32).transpose((2,0,1))/2.0
+        tform = [cv2.getPerspectiveTransform(vlist[i,:,:].squeeze(),fixedPoints[i,:,:].squeeze()) for i in range(nl2)]
+        
+    elif instrum in {"IASI","CrIS"}:
+        # Set 
+        latc = l2g_data['latc']
+        lonc = l2g_data['lonc']
+        u = l2g_data['u']
+        v = l2g_data['v']
+        t = l2g_data['t']
+        lonc_index = [np.argmin(np.abs(xgrid-lonc[i])) for i in range(nl2)]
+        latc_index = [np.argmin(np.abs(ygrid-latc[i])) for i in range(nl2)]
+        # Get East/West indices
+        minlon_e = np.zeros((nl2))
+        minlat_e = np.zeros((nl2))
+        for i in range(nl2):
+            X, minlon_e[i], minlat_e[i] = F_ellipse(v[i],u[i],t[i],10)
+        west_extent = np.round(np.abs(minlon_e)/grid_size*xmargin)
+        east_extent = west_extent
+        # Get lists of indices
+        lon_index = [bound_arr(lonc_index[i]-west_extent[i],lonc_index[i]+east_extent[i]+1,max_ncol,ncols)  for i in range(nl2)]
+        # The western most longitude
+        patch_west = [xgrid[lon_index[i][0]] for i in range(nl2)]
+        # Get north/south indices
+        north_extent = np.ceil(np.abs(minlat_e)/grid_size*xmargin)
+        south_extent = north_extent
+        # List of latitude indices
+        lat_index = [bound_lat(latc_index[i]-south_extent[i],latc_index[i]+north_extent[i]+1,nrows) for i in range(nl2)]
+        # This might be faster
+        patch_lonc = lonc - patch_west ; #patch_lonc[patch_lonc<0.0] += 360.0
+        area_weight = u*v
+        fwhmx = 2*v
+        fwhmy = 2*u
+        
+    else:
+        print(instrum+' is not supported for regridding yet!')
+        return
+    # Compute uncertainty weights
+    if error_model == "square":
+        uncertainty_weight = l2g_data['column_uncertainty']**2
+    elif error_model == "log":
+        uncertainty_weight = np.log10(l2g_data['column_uncertainty'])
+    else:
+        uncertainty_weight = l2g_data['column_uncertainty']
+    # Cloud Fraction
+    if 'cloud_fraction' in oversampling_list:
+        cloud_fraction = l2g_data['cloud_fraction']
+    # Pull out grid variables from dictionary as it is slow to access
+    grid_flds = np.zeros((nl2,nvar_oversampling)) ; pcld_idx = -1
+    for n in range(nvar_oversampling):
+        grid_flds[:,n] = l2g_data[oversampling_list[n]]
+        if oversampling_list[n] == 'cloud_pressure':
+            pcld_idx = n
+        # Apply log to variable if error model is log
+        if(error_model == 'log') and (oversampling_list[n] == 'column_amount'):
+            grid_flds[:,n] = np.log10(grid_flds[:,n])
+        #t1 = time.time()
+    sg_wx = fwhmx/sg_kfacx
+    sg_wy = fwhmy/sg_kfacy
+    # Init point counter for logger
+    count = 0
+    for il2 in range(nl2):
+        ijmsh = np.ix_(lat_index[il2],lon_index[il2])
+        patch_xmesh = xmesh[ijmsh] - patch_west[il2]
+        patch_xmesh[patch_xmesh<0.0] += 360.0
+        patch_ymesh = ymesh[ijmsh] - latc[il2]
+        if instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B",\
+                                "SCIAMACHY","TROPOMI","OMPS-N20"}:
+            xym1 = np.column_stack((patch_xmesh.flatten()-patch_lonc[il2],patch_ymesh.flatten()))
+            xym2 = np.hstack((xym1,np.ones((patch_xmesh.size,1)))).dot(tform[il2].T)[:,0:2]
+        elif instrum in {"IASI","CrIS"}:
+            rotation_matrix = np.array([[np.cos(-t[il2]), -np.sin(-t[il2])],[np.sin(-t[il2]),  np.cos(-t[il2])]])
+            xym1 = np.array([patch_xmesh.flatten()-patch_lonc[il2],patch_ymesh.flatten()])#np.column_stack((patch_xmesh.flatten()-patch_lonc[il2],patch_ymesh.flatten())).T
+            xym2 = rotation_matrix.dot(xym1).T
+            
+        SG = np.exp(-(np.power( np.power(np.abs(xym2[:,0]/sg_wx[il2]),k1)           \
+                                  +np.power(np.abs(xym2[:,1]/sg_wy[il2]),k2),k3)) )
+        SG = SG.reshape(patch_xmesh.shape)
+        # Update Number of samples
+        num_samples[ijmsh] += SG
+        # Only bother doing this if regridding cloud pressure
+        if 'cloud_fraction' in oversampling_list:
+            if(pcld_idx > 0 and cloud_fraction[il2] > 0.0):
+                pres_num_samples[ijmsh] += SG
+        # The weights
+        tmp_wt = SG/area_weight[il2]/uncertainty_weight[il2]
+        # Update total weights
+        total_sample_weight[ijmsh] += tmp_wt
+        # This only needs to be done if we are gridding pressure
+        if 'cloud_fraction' in oversampling_list:
+            if(pcld_idx > 0 and cloud_fraction[il2] > 0.0):
+                pres_total_sample_weight[ijmsh] += tmp_wt
+        # Update the desired grid variables
+        for ivar in range(nvar_oversampling):
+            sum_aboves[ivar][ijmsh] += tmp_wt[:,:]*grid_flds[il2,ivar]
+        if 'cloud_fraction' in oversampling_list:
+            if(pcld_idx > 0 and cloud_fraction[il2] > 0.0):
+                pres_sum_aboves[ijmsh] += tmp_wt[:,:]*grid_flds[il2,pcld_idx]
+        if il2 == count*np.round(nl2/10.):
+            print('block %d'%iblock+' %d%% finished' %(count*10))
+            count = count + 1
+        
+    print('block %d'%iblock+' completed at'+datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'))
+    l3_data = {}
+    np.seterr(divide='ignore', invalid='ignore')
+    for ikey in range(len(oversampling_list)):
+        l3_data[oversampling_list[ikey]] = sum_aboves[ikey][:,:].squeeze()\
+        /total_sample_weight
+        # Special case for cloud pressure (only considere pixels with
+        # cloud fraction > 0.0
+        if oversampling_list[ikey] == 'cloud_pressure':
+            l3_data[oversampling_list[ikey]] = pres_sum_aboves[:,:]\
+            /pres_total_sample_weight
+    # Make cloud pressure = 0 where cloud fraction = 0
+    if 'cloud_fraction' in oversampling_list and 'cloud_pressure' in oversampling_list:
+        f1 = (l3_data['cloud_fraction'] == 0.0)
+        l3_data['cloud_pressure'][f1] = 0.0
+    # Set 
+    total_sample_weight = total_sample_weight
+    num_samples = num_samples
+    pres_num_samples = pres_num_samples
+    pres_total_sample_weight = pres_total_sample_weight
+    
+    # Set quality flag based on the number of samples
+    # It has already being initialized to fill value
+    # of 2
+    quality_flag = np.full((nrows,ncols),2,dtype=np.int8)
+    quality_flag[num_samples >= 0.1] = 0
+    quality_flag[(num_samples > 1.e-6) & (num_samples < 0.1)] = 1
+    
+    l3_data['xmesh'] = xmesh
+    l3_data['ymesh'] = ymesh
+    l3_data['total_sample_weight'] = total_sample_weight
+    l3_data['num_samples'] = num_samples
+    l3_data['pres_total_sample_weight'] = pres_total_sample_weight
+    l3_data['pres_num_samples'] = pres_num_samples
+    return l3_data
 
 class popy(object):
     
@@ -2513,6 +2771,127 @@ class popy(object):
         minlat_e = X[1,].min()
         return X, minlon_e, minlat_e
     
+    def F_parallel_regrid(self,block_length=200,ncores=None):
+        '''
+        regrid from l2g to l3 in parallel by cutting the l3 mesh into blocks
+        block_length:
+            l3 mesh grid will be cut to square blocks with this length
+        ncores:
+            number of cores
+        created on 2020/07/19
+        '''
+        west = self.west ; east = self.east ; south = self.south ; north = self.north
+        nrows = self.nrows; ncols = self.ncols
+        xmesh = self.xmesh ; ymesh = self.ymesh
+#        grid_size = self.grid_size ; 
+        xmargin = self.xmargin ; ymargin = self.ymargin
+        start_matlab_datenum = self.start_matlab_datenum
+        end_matlab_datenum = self.end_matlab_datenum
+        oversampling_list = self.oversampling_list.copy()
+        l2g_data = self.l2g_data
+        if 'UTC_matlab_datenum' not in l2g_data.keys():
+            l2g_data['UTC_matlab_datenum'] = l2g_data.pop('utc')
+        for key in self.oversampling_list:
+            if key not in l2g_data.keys():
+                oversampling_list.remove(key)
+                self.logger.warning('You asked to oversample '+key+', but I cannot find it in your data!')
+        self.oversampling_list_final = oversampling_list
+#        error_model = self.error_model
+        
+        if ncores == 0:
+            self.logger.info('ncores = 0 means no parallel and calling F_block_regridd_ccm using the entire domain as a block')
+            l3_data = F_block_regrid_ccm(l2g_data,xmesh,ymesh,
+                       oversampling_list,self.instrum,self.error_model,
+                       self.k1,self.k2,self.k3,xmargin,ymargin,
+                       iblock=1)
+            return l3_data
+        
+        import multiprocessing
+        
+        tmplon = l2g_data['lonc']-west
+        tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+        # filter data within the lat/lon box and time interval
+        validmask = (tmplon >= 0) & (tmplon <= east-west) &\
+        (l2g_data['latc'] >= south) & (l2g_data['latc'] <= north) &\
+        (l2g_data['UTC_matlab_datenum'] >= start_matlab_datenum) &\
+        (l2g_data['UTC_matlab_datenum'] <= end_matlab_datenum) &\
+        (l2g_data['column_amount'] > -1e25)
+        nl20 = len(l2g_data['latc'])
+        l2g_data = {k:v[validmask,] for (k,v) in l2g_data.items()}
+        nl2 = len(l2g_data['latc'])
+        self.nl2 = nl2
+        self.l2g_data = l2g_data
+        self.logger.info('%d pixels in the L2g data' %nl20)
+        if nl2 > 0:
+            self.logger.info('%d pixels to be regridded...' %nl2)
+        else:
+            self.logger.info('No pixel to be regridded, returning...')
+            return None
+        nblock_row = np.max([np.floor(nrows/block_length),1]).astype(np.int)
+        nblock_col = np.max([np.floor(ncols/block_length),1]).astype(np.int)
+        self.nblock_row = nblock_row
+        self.nblock_col = nblock_col
+        
+        tmp = [np.array_split(a,nblock_col,axis=1) for a in np.array_split(xmesh,nblock_row,axis=0)]
+        
+        block_xmesh = [arr for sublist in tmp for arr in sublist]
+        tmp = [np.array_split(a,nblock_col,axis=1) for a in np.array_split(ymesh,nblock_row,axis=0)]
+        block_ymesh = [arr for sublist in tmp for arr in sublist]
+        nblock = len(block_xmesh)
+        self.nblock = nblock
+        self.logger.info('l3 mesh grid will be cut into %d blocks'%nblock)
+        lonc = l2g_data['lonc']
+        latc = l2g_data['latc']
+        lonr = l2g_data['lonr']
+        latr = l2g_data['latr']
+        pixel_width = np.max([F_lon_distance(lonr[:,0],lonr[:,2]),F_lon_distance(lonr[:,1],lonr[:,3])])
+        pixel_height = np.max([np.abs(latr[:,2]-latr[:,0]),np.abs(latr[:,1]-latr[:,3])])
+        pixel_west = lonc-pixel_width/2*xmargin
+        pixel_east = lonc+pixel_width/2*xmargin
+        
+        pixel_south = latc-pixel_height/2*ymargin
+        pixel_north = latc+pixel_height/2*ymargin
+        
+        block_l2g_data = []
+        for iblock in range(nblock):
+            mask = (pixel_west <= block_xmesh[iblock][0,-1]) &\
+            (pixel_east >= block_xmesh[iblock][0,0]) &\
+            (pixel_south <= block_ymesh[iblock][-1,0]) &\
+            (pixel_north >= block_ymesh[iblock][0,0])
+            self.logger.info('block %d'%(iblock+1)+' contains %d pixels'%np.sum(mask))
+            block_l2g_data.append({k:v[mask,] for (k,v) in l2g_data.items()})
+        # parallel stuff
+        ncores_max = multiprocessing.cpu_count()
+        if(ncores is None):
+            self.logger.info('no cpu number specified, use half of them')
+            ncores = int( np.ceil(ncores_max/2) )
+        else:
+            if ncores > ncores_max:
+                self.logger.warning('You asked for more cores than you have! Use max number %d'%ncores_max)
+                ncores = ncores_max
+        self.logger.info('Start parallel computing on '+str(ncores)+' cores...')
+        pp = multiprocessing.Pool(ncores)
+        l3_data_list = pp.map( F_block_regrid_wrapper, \
+                        ((block_l2g_data[iblock],block_xmesh[iblock],\
+                          block_ymesh[iblock],oversampling_list,\
+                          self.instrum,self.error_model, \
+                          self.k1,self.k2,self.k3,
+                          xmargin,ymargin,iblock) for iblock in range(nblock) ) )
+        self.logger.info('Reassemble blocks back to l3 grid')
+        dict_of_lists = {}
+        for iblock in range(nblock):
+            l3_data0 = l3_data_list[iblock]
+            if iblock == 0:
+                for key in l3_data0.keys():
+                    dict_of_lists[key] = []
+            for key in l3_data0.keys():
+                dict_of_lists[key].append(l3_data0[key])
+        l3_data = {}
+        for key in l3_data0.keys():
+            l3_data[key] = np.block([dict_of_lists[key][i:i+nblock_col] for i in range(0,nblock,nblock_col)])
+        
+        return l3_data
+        
     def F_regrid_ccm(self):
         """
         written from F_regrid on 2019/07/13 to honor chris chan miller
@@ -3131,17 +3510,28 @@ class popy(object):
         
         self.standard_error_of_weighted_mean = np.sqrt(variance_of_weighted_mean)
     
-    def F_save_l3_to_mat(self,file_path):
+    def F_save_l3_to_mat(self,file_path,l3_data=None):
         """
         save regridded level 3 data, from F_regrid or F_regrid_ccm to .mat file
         file_path: 
             absolute path to the .mat file to save
         created on 2020/03/15
+        updated on 2020/07/20 to be compatible with external l3_data dictionary
         """
+        from scipy.io import savemat
+        if l3_data is not None:
+            l3_data['xgrid'] = self.xgrid
+            l3_data['ygrid'] = self.ygrid
+            l3_data['ncol'] = self.ncols
+            l3_data['nrow'] = self.nrows
+            l3_data.pop('xmesh');
+            l3_data.pop('ymesh');
+            savemat(file_path,l3_data)    
+            return
         if not self.C:
             self.logger.warning('l3_data is empty. Nothing to save.')
             return        
-        from scipy.io import savemat
+        
         C = self.C.copy()
         C['total_sample_weight'] = self.total_sample_weight
         C['num_samples'] = self.num_samples
