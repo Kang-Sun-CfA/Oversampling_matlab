@@ -768,7 +768,7 @@ class popy(object):
                  start_year=1995,start_month=1,start_day=1,\
                  start_hour=0,start_minute=0,start_second=0,\
                  end_year=2025,end_month=12,end_day=31,\
-                 end_hour=0,end_minute=0,end_second=0):
+                 end_hour=23,end_minute=59,end_second=59):
         
         self.instrum = instrum
         self.product = product
@@ -2691,6 +2691,56 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
+    def F_plot_l2g(self,plot_field='column_amount',max_day=1,l2g_data=None,
+                   alpha=0.7,vmin=None,vmax=None):
+        '''
+        plot l2g pixels as polygons
+        plot_field:
+            which field in l2g_data to plot
+        max_day:
+            only plot limited number of days~layers
+        l2g_data:
+            l2g data dictionary can be supplied externally
+        alpha:
+            1 is opaque
+        vmin, vmax:
+            color limits
+        '''
+        if l2g_data == None:
+            l2g_data = self.l2g_data
+        try:
+            from mpl_toolkits.basemap import Basemap
+            if_map = True
+        except:
+            self.logger.warning('Basemap cannot be imported! plot without map')
+            if_map = False
+        import matplotlib.pyplot as plt
+        from matplotlib.collections import PolyCollection
+        plot_index = np.where(l2g_data['UTC_matlab_datenum']<=l2g_data['UTC_matlab_datenum'].min()+max_day)
+        verts = [np.array([l2g_data['lonr'][i,:],l2g_data['latr'][i,:]]).T for i in plot_index[0]]
+        collection = PolyCollection(verts,
+                             array=l2g_data[plot_field],cmap='rainbow',edgecolors='none')
+        collection.set_alpha(alpha)
+        fig = plt.figure()
+        ax = plt.subplot(111)
+        if if_map:
+            m = Basemap(projection= 'cyl',llcrnrlat=self.south,urcrnrlat=self.north,
+                        llcrnrlon=self.west,urcrnrlon=self.east)
+            m.drawstates(linewidth=0.5)
+            m.drawcoastlines(linewidth=0.5)
+            ax.add_collection(collection)
+            cb = fig.colorbar(collection,ax=ax,label=plot_field)
+        else:
+            ax.add_collection(collection)
+            cb = fig.colorbar(collection,ax=ax,label=plot_field)
+            plt.xlim((self.west,self.east))
+            plt.ylim((self.south,self.north))
+        if vmin != None:
+            collection.set_clim(vmin=vmin)
+        if vmax != None:
+            collection.set_clim(vmax=vmax)
+
+        
     def F_save_l2g_to_mat(self,file_path,data_fields=[],data_fields_l2g=[]):
         """ 
         save l2g dictionary to .mat file
