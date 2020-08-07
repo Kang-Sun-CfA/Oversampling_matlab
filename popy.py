@@ -29,6 +29,15 @@ def datedev_py(matlab_datenum):
     python_datetime = datetime.datetime.fromordinal(int(matlab_datenum)) + datetime.timedelta(days=matlab_datenum%1) - datetime.timedelta(days = 366)
     return python_datetime
 
+def datetime2datenum(python_datetime):
+    '''
+    convert python datetime to matlab datenum
+    '''
+    matlab_datenum = python_datetime.toordinal()\
+                                    +python_datetime.hour/24.\
+                                    +python_datetime.minute/1440.\
+                                    +python_datetime.second/86400.+366.
+    return matlab_datenum
 def F_interp_gcrs(sounding_lon,sounding_lat,sounding_datenum,sounding_ps,
                   gcrs_dir='/mnt/Data2/GEOS-Chem_Silvern/',
                   product='NO2',if_monthly=False):
@@ -520,10 +529,12 @@ def F_lon_distance(lon1,lon2):
     distance[lon2<lon1] += 360.0
     return distance
 
-def F_ellipse(a,b,alpha,npoint):
+def F_ellipse(a,b,alpha,npoint,xcenter=0,ycenter=0):
     t = np.linspace(0.,np.pi*2,npoint)[::-1]
     Q = np.array([[np.cos(alpha),-np.sin(alpha)],[np.sin(alpha),np.cos(alpha)]])
     X = Q.dot(np.vstack((a * np.cos(t),b * np.sin(t))))
+    X[0,] = X[0,]+xcenter
+    X[1,] = X[1,]+ycenter
     minlon_e = X[0,].min()
     minlat_e = X[1,].min()
     return X, minlon_e, minlat_e
@@ -2691,8 +2702,43 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
+    def F_plot_l3(self,plot_field='column_amount',l3_data=None,
+                  vmin=None,vmax=None):
+        '''
+        l3 data plotting utility updated from F_plot_oversampled_variable
+        '''
+        if l3_data == None:
+            l3_data = self.C
+        try:
+            from mpl_toolkits.basemap import Basemap
+            if_map = True
+        except:
+            self.logger.warning('Basemap cannot be imported! plot without map')
+            if_map = False
+        import matplotlib.pyplot as plt
+        fig,ax = plt.subplots()
+        if if_map:
+            m = Basemap(projection= 'cyl',llcrnrlat=self.south,urcrnrlat=self.north,
+                        llcrnrlon=self.west,urcrnrlon=self.east,resolution='l')
+            m.drawstates(linewidth=0.5)
+            m.drawcoastlines(linewidth=0.5)
+            pc = m.pcolormesh(self.xgrid,self.ygrid,l3_data[plot_field],latlon=True,cmap='rainbow')
+            cb = fig.colorbar(pc,ax=ax,label=plot_field)
+        else:
+            pc = plt.pcolormesh(self.xgrid,self.ygrid,l3_data[plot_field])
+            cb = fig.colorbar(pc,ax=ax,label=plot_field)
+            plt.xlim((self.west,self.east))
+            plt.ylim((self.south,self.north))
+        if vmin != None:
+            plt.clim(vmin=vmin)
+        if vmax != None:
+            plt.clim(vmax=vmax)
+        return pc,fig,ax,m,cb
+    
     def F_plot_l2g(self,plot_field='column_amount',max_day=1,l2g_data=None,
-                   alpha=0.7,vmin=None,vmax=None):
+                   alpha=0.7,vmin=None,vmax=None,
+                   x_wind_field='era5_u100',y_wind_field='era5_v100',
+                   wind_arrow_width=0.025,wind_arrow_scale=20):
         '''
         plot l2g pixels as polygons
         plot_field:
@@ -2708,6 +2754,9 @@ class popy(object):
         '''
         if l2g_data == None:
             l2g_data = self.l2g_data
+        if x_wind_field not in l2g_data.keys():
+            self.logger.warning('wind field not in l2g_data! will not plot wind')
+            x_wind_field=None
         try:
             from mpl_toolkits.basemap import Basemap
             if_map = True
@@ -2717,15 +2766,18 @@ class popy(object):
         import matplotlib.pyplot as plt
         from matplotlib.collections import PolyCollection
         plot_index = np.where(l2g_data['UTC_matlab_datenum']<=l2g_data['UTC_matlab_datenum'].min()+max_day)
-        verts = [np.array([l2g_data['lonr'][i,:],l2g_data['latr'][i,:]]).T for i in plot_index[0]]
+        if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B","SCIAMACHY","TROPOMI"}:
+            verts = [np.array([l2g_data['lonr'][i,:],l2g_data['latr'][i,:]]).T for i in plot_index[0]]
+        elif self.instrum in {"IASI","CrIS"}:
+            verts = [F_ellipse(l2g_data['v'][i],l2g_data['u'][i],l2g_data['t'][i],20,
+                               l2g_data['lonc'][i],l2g_data['latc'][i])[0].T for i in plot_index[0]]
         collection = PolyCollection(verts,
                              array=l2g_data[plot_field],cmap='rainbow',edgecolors='none')
         collection.set_alpha(alpha)
-        fig = plt.figure()
-        ax = plt.subplot(111)
+        fig,ax = plt.subplots()
         if if_map:
             m = Basemap(projection= 'cyl',llcrnrlat=self.south,urcrnrlat=self.north,
-                        llcrnrlon=self.west,urcrnrlon=self.east)
+                        llcrnrlon=self.west,urcrnrlon=self.east,resolution='l')
             m.drawstates(linewidth=0.5)
             m.drawcoastlines(linewidth=0.5)
             ax.add_collection(collection)
@@ -2739,6 +2791,14 @@ class popy(object):
             collection.set_clim(vmin=vmin)
         if vmax != None:
             collection.set_clim(vmax=vmax)
+        if x_wind_field != None:
+            quiver = plt.quiver(l2g_data['lonc'][plot_index[0]],l2g_data['latc'][plot_index[0]],
+                                l2g_data[x_wind_field][plot_index[0]],l2g_data[y_wind_field][plot_index[0]],
+                                units='x',width=wind_arrow_width,scale=wind_arrow_scale)
+        else:
+            quiver=None
+        return collection,fig,ax,m,cb,quiver
+            
 
         
     def F_save_l2g_to_mat(self,file_path,data_fields=[],data_fields_l2g=[]):
