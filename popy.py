@@ -1181,7 +1181,10 @@ class popy(object):
                     
             for i in range(len(geo_fields)):
                 DATAFIELD_NAME = '/HDFEOS/SWATHS/'+swathname+'/Geolocation Fields/'+geo_fields[i]
-                data = f[DATAFIELD_NAME]
+                try:
+                    data = f[DATAFIELD_NAME]
+                except:
+                    self.logger.warning(DATAFIELD_NAME+' does not exist');continue
                 data = data[:]
                 outp_he5[geo_fields_l2g[i]] = data
             
