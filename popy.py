@@ -573,6 +573,18 @@ def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
         indicate block in parallel regridding
     created on 2020/07/19
     '''
+    if len(l2g_data['latc']) == 0:
+        l3_data = {}
+        l3_data['xmesh'] = xmesh
+        l3_data['ymesh'] = ymesh
+        l3_data['total_sample_weight'] = xmesh*0.
+        l3_data['num_samples'] = xmesh*0.
+        for ikey in range(len(oversampling_list)):
+            l3_data[oversampling_list[ikey]] = xmesh*np.nan
+        if 'cloud_fraction' in oversampling_list:
+            l3_data['pres_total_sample_weight'] = xmesh*0.
+            l3_data['pres_num_samples'] = xmesh*0.
+        return l3_data
     import cv2
     from shapely.geometry import Polygon
     sg_kfacx = 2*(np.log(2)**(1/k1/k3))
@@ -871,6 +883,8 @@ class popy(object):
             error_model = "linear"
             if product in ['AI']:
                 oversampling_list = ['AI']
+            elif product in ['CH4']:
+                oversampling_list = ['xch4']
             else:
                 oversampling_list = ['column_amount','albedo',\
                                      'cloud_fraction']
@@ -1004,7 +1018,7 @@ class popy(object):
                 l2g_data['latr'] = mat_data['output_subset']['latr'][0][0]
             elif key_name in {'colnh3','colno2','colhcho','colchocho'}:
                 l2g_data['column_amount'] = mat_data['output_subset'][key_name][0][0].flatten()
-            elif key_name in {'colnh3error','colno2error','colhchoerror','colchochoerror'}:
+            elif key_name in {'colnh3error','colno2error','colhchoerror','colchochoerror','xch4error'}:
                 l2g_data['column_uncertainty'] = mat_data['output_subset'][key_name][0][0].flatten()
             elif key_name in {'ift','ifov'}:
                 l2g_data['across_track_position'] = mat_data['output_subset'][key_name][0][0].flatten()
@@ -2994,6 +3008,7 @@ class popy(object):
         ncores:
             number of cores
         created on 2020/07/19
+        fix on 2020/08/17 so multiprocess does not consume all the memory
         '''
         west = self.west ; east = self.east ; south = self.south ; north = self.north
         nrows = self.nrows; ncols = self.ncols
@@ -3030,8 +3045,7 @@ class popy(object):
         validmask = (tmplon >= 0) & (tmplon <= east-west) &\
         (l2g_data['latc'] >= south) & (l2g_data['latc'] <= north) &\
         (l2g_data['UTC_matlab_datenum'] >= start_matlab_datenum) &\
-        (l2g_data['UTC_matlab_datenum'] <= end_matlab_datenum) &\
-        (l2g_data['column_amount'] > -1e25)
+        (l2g_data['UTC_matlab_datenum'] <= end_matlab_datenum)
         nl20 = len(l2g_data['latc'])
         l2g_data = {k:v[validmask,] for (k,v) in l2g_data.items()}
         nl2 = len(l2g_data['latc'])
@@ -3058,10 +3072,14 @@ class popy(object):
         self.logger.info('l3 mesh grid will be cut into %d blocks'%nblock)
         lonc = l2g_data['lonc']
         latc = l2g_data['latc']
-        lonr = l2g_data['lonr']
-        latr = l2g_data['latr']
-        pixel_width = np.max([F_lon_distance(lonr[:,0],lonr[:,2]),F_lon_distance(lonr[:,1],lonr[:,3])])
-        pixel_height = np.max([np.abs(latr[:,2]-latr[:,0]),np.abs(latr[:,1]-latr[:,3])])
+        if 'lonr' in l2g_data.keys():
+            lonr = l2g_data['lonr']
+            latr = l2g_data['latr']
+            pixel_width = np.max([F_lon_distance(lonr[:,0],lonr[:,2]),F_lon_distance(lonr[:,1],lonr[:,3])],axis=0)
+            pixel_height = np.max([np.abs(latr[:,2]-latr[:,0]),np.abs(latr[:,1]-latr[:,3])],axis=0)
+        else:
+            pixel_width = np.max([l2g_data['u'],l2g_data['v']],axis=0)
+            pixel_height = pixel_width
         pixel_west = lonc-pixel_width/2*xmargin
         pixel_east = lonc+pixel_width/2*xmargin
         
@@ -3086,13 +3104,20 @@ class popy(object):
                 self.logger.warning('You asked for more cores than you have! Use max number %d'%ncores_max)
                 ncores = ncores_max
         self.logger.info('Start parallel computing on '+str(ncores)+' cores...')
-        pp = multiprocessing.Pool(ncores)
-        l3_data_list = pp.map( F_block_regrid_wrapper, \
+        with multiprocessing.Pool(ncores) as pp:
+            l3_data_list = pp.map( F_block_regrid_wrapper, \
                         ((block_l2g_data[iblock],block_xmesh[iblock],\
                           block_ymesh[iblock],oversampling_list,\
                           self.instrum,self.error_model, \
                           self.k1,self.k2,self.k3,
                           xmargin,ymargin,iblock) for iblock in range(nblock) ) )
+#        pp = multiprocessing.Pool(ncores)
+#        l3_data_list = pp.map( F_block_regrid_wrapper, \
+#                        ((block_l2g_data[iblock],block_xmesh[iblock],\
+#                          block_ymesh[iblock],oversampling_list,\
+#                          self.instrum,self.error_model, \
+#                          self.k1,self.k2,self.k3,
+#                          xmargin,ymargin,iblock) for iblock in range(nblock) ) )
         self.logger.info('Reassemble blocks back to l3 grid')
         dict_of_lists = {}
         for iblock in range(nblock):
@@ -3143,8 +3168,7 @@ class popy(object):
         validmask = (tmplon >= 0) & (tmplon <= east-west) &\
         (l2g_data['latc'] >= south) & (l2g_data['latc'] <= north) &\
         (l2g_data['UTC_matlab_datenum'] >= start_matlab_datenum) &\
-        (l2g_data['UTC_matlab_datenum'] <= end_matlab_datenum) &\
-        (l2g_data['column_amount'] > -1e25)
+        (l2g_data['UTC_matlab_datenum'] <= end_matlab_datenum)
         nl20 = len(l2g_data['latc'])
         l2g_data = {k:v[validmask,] for (k,v) in l2g_data.items()}
         nl2 = len(l2g_data['latc'])
@@ -3410,8 +3434,7 @@ class popy(object):
         validmask = (tmplon >= 0) & (tmplon <= east-west) &\
         (l2g_data['latc'] >= south) & (l2g_data['latc'] <= north) &\
         (l2g_data['UTC_matlab_datenum'] >= start_matlab_datenum) &\
-        (l2g_data['UTC_matlab_datenum'] <= end_matlab_datenum) &\
-        (l2g_data['column_amount'] > -1e25)
+        (l2g_data['UTC_matlab_datenum'] <= end_matlab_datenum)
         #(not np.isnan(l2g_data['column_amount'])) &\
         #(not np.isnan(l2g_data['column_uncertainty']))
         
