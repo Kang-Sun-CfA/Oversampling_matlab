@@ -736,7 +736,7 @@ def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
             print('block %d'%iblock+' %d%% finished' %(count*10))
             count = count + 1
         
-    print('block %d'%iblock+' completed at'+datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'))
+    print('block %d'%iblock+' completed at '+datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'))
     l3_data = {}
     np.seterr(divide='ignore', invalid='ignore')
     for ikey in range(len(oversampling_list)):
@@ -751,11 +751,6 @@ def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
     if 'cloud_fraction' in oversampling_list and 'cloud_pressure' in oversampling_list:
         f1 = (l3_data['cloud_fraction'] == 0.0)
         l3_data['cloud_pressure'][f1] = 0.0
-    # Set 
-    total_sample_weight = total_sample_weight
-    num_samples = num_samples
-    pres_num_samples = pres_num_samples
-    pres_total_sample_weight = pres_total_sample_weight
     
     # Set quality flag based on the number of samples
     # It has already being initialized to fill value
@@ -768,8 +763,9 @@ def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
     l3_data['ymesh'] = ymesh
     l3_data['total_sample_weight'] = total_sample_weight
     l3_data['num_samples'] = num_samples
-    l3_data['pres_total_sample_weight'] = pres_total_sample_weight
-    l3_data['pres_num_samples'] = pres_num_samples
+    if 'cloud_fraction' in oversampling_list:
+        l3_data['pres_total_sample_weight'] = pres_total_sample_weight
+        l3_data['pres_num_samples'] = pres_num_samples
     return l3_data
 
 class popy(object):
@@ -1065,6 +1061,30 @@ class popy(object):
             l2g_data0[key] = np.concatenate((l2g_data0[key],l2g_data1[key]),0)
         return l2g_data0
     
+    def F_merge_l3_data(self,l3_data0,l3_data1):
+        if not l3_data0:
+            l3_data = l3_data1
+            return l3_data
+        common_keys = set(l3_data0).intersection(set(l3_data1))
+        l3_data = {}
+        for key in common_keys:
+            l3_data0[key][np.isnan(l3_data0[key])] = 0.
+            l3_data1[key][np.isnan(l3_data1[key])] = 0.
+            if key in ['total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
+                l3_data[key] = l3_data0[key]+l3_data1[key]
+            elif key in ['xmesh','ymesh']:
+                l3_data[key] = l3_data0[key]
+            elif key == 'cloud_pressure':
+                l3_data[key] = (l3_data0[key]*l3_data0['pres_total_sample_weight']
+                +l3_data1[key]*l3_data1['pres_total_sample_weight'])\
+                /(l3_data0['pres_total_sample_weight']
+                +l3_data1['pres_total_sample_weight'])
+            else:
+                l3_data[key] = (l3_data0[key]*l3_data0['total_sample_weight']
+                +l3_data1[key]*l3_data1['total_sample_weight'])\
+                /(l3_data0['total_sample_weight']
+                +l3_data1['total_sample_weight'])
+        return l3_data
     def F_read_S5P_nc(self,fn,data_fields,data_fields_l2g=[]):
         """ 
         function to read tropomi's level 2 netcdf file to a dictionary
@@ -2720,18 +2740,24 @@ class popy(object):
             if_map = False
         import matplotlib.pyplot as plt
         fig,ax = plt.subplots()
+        if self.error_model == 'log' and plot_field == 'column_amount':
+            plotdata = np.power(10,l3_data[plot_field])
+        else:
+            plotdata = l3_data[plot_field]
         if if_map:
             m = Basemap(projection= 'cyl',llcrnrlat=self.south,urcrnrlat=self.north,
                         llcrnrlon=self.west,urcrnrlon=self.east,resolution='l')
             m.drawstates(linewidth=0.5)
             m.drawcoastlines(linewidth=0.5)
-            pc = m.pcolormesh(self.xgrid,self.ygrid,l3_data[plot_field],latlon=True,cmap='rainbow')
+            
+            pc = m.pcolormesh(self.xgrid,self.ygrid,plotdata,latlon=True,cmap='rainbow')
             cb = fig.colorbar(pc,ax=ax,label=plot_field)
         else:
-            pc = plt.pcolormesh(self.xgrid,self.ygrid,l3_data[plot_field])
+            pc = plt.pcolormesh(self.xgrid,self.ygrid,plotdata)
             cb = fig.colorbar(pc,ax=ax,label=plot_field)
             plt.xlim((self.west,self.east))
             plt.ylim((self.south,self.north))
+            m = None
         if vmin != None:
             plt.clim(vmin=vmin)
         if vmax != None:
@@ -2884,9 +2910,85 @@ class popy(object):
         minlat_e = X[1,].min()
         return X, minlon_e, minlat_e
     
-    def F_parallel_regrid(self,block_length=200,ncores=None):
+    def F_regrid_divergence(self,omega_field='column_amount',
+                            x_wind_field='era5_u100',y_wind_field='era5_v100',
+                            l2g_data=None,block_length=200,ncores=0,
+                            simplify_oversampling_list=True):
+        '''
+        call F_parallel_regrid to oversample x/y-flux daily and calculate d(x-flux)/dx
+        and d(y-flux)dy to form daily divergence map. Average daily divergence to
+        get oversampled divergence map over the entire period defined by l2g_data
+        omega_field:
+            which scalar to calculate divergence
+        x/y_wind_field:
+            horizontal wind
+        l2g_data:
+            l2g_data in popy-compatible dict format. by default use self.l2g_data
+        block_length:
+            l3 mesh grid will be cut to square blocks with this length
+        ncores:
+            number of cores, 0 calls non parallel F_regrid_ccm
+        created on 2020/08/16
+        '''
+        if l2g_data == None:
+            l2g_data = self.l2g_data
+        if 'UTC_matlab_datenum' not in l2g_data.keys():
+            l2g_data['UTC_matlab_datenum'] = l2g_data.pop('utc')
+        oversampling_list_full = self.oversampling_list.copy()
+        if simplify_oversampling_list:
+            self.oversampling_list = [omega_field,'x_flux','y_flux']
+        else:
+            self.oversampling_list.append('x_flux')
+            self.oversampling_list.append('y_flux')
+        
+        l2g_data['x_flux'] = l2g_data[omega_field]*l2g_data[x_wind_field]
+        l2g_data['y_flux'] = l2g_data[omega_field]*l2g_data[y_wind_field]
+        day_list = np.arange(np.floor(l2g_data['UTC_matlab_datenum'].min()),
+                             np.floor(l2g_data['UTC_matlab_datenum'].max())+1)
+        # x-grid size in m
+        dx_vec = np.cos(self.ygrid/180*np.pi)*111e3*self.grid_size
+        # y-grid size in m
+        dy = 111e3*self.grid_size
+        l3_data = {}
+        for day in day_list:
+            mask = np.floor(l2g_data['UTC_matlab_datenum']) == day
+            if np.sum(mask) == 0:
+                continue
+            self.logger.info('regridding daily fluxes on '+datedev_py(day).strftime('%Y%m%d'))
+            self.logger.info('there are %d pixels'%(np.sum(mask)))
+            daily_l2g_data = {k:v[mask,] for (k,v) in l2g_data.items()}
+            daily_l3_data = self.F_parallel_regrid(l2g_data=daily_l2g_data,
+                                                   block_length=block_length,
+                                                   ncores=ncores)
+            # d(x_flux)/dx
+            xdiv = np.full(daily_l3_data['x_flux'].shape,np.nan,dtype=np.float64)
+            for irow in range(self.nrows):
+                for icol in range(2,self.ncols-2):
+                    xdiv[irow,icol] = (daily_l3_data['x_flux'][irow,icol-2]
+                    -8*daily_l3_data['x_flux'][irow,icol-1]
+                    +8*daily_l3_data['x_flux'][irow,icol+1]
+                    -daily_l3_data['x_flux'][irow,icol+2])/(12*dx_vec[irow])
+            # d(y_flux)/dy
+            ydiv = np.full(daily_l3_data['y_flux'].shape,np.nan,dtype=np.float64)
+            for icol in range(self.ncols):
+                for irow in range(2,self.nrows-2):
+                    ydiv[irow,icol] = (daily_l3_data['y_flux'][irow-2,icol]
+                    -8*daily_l3_data['y_flux'][irow-1,icol]
+                    +8*daily_l3_data['y_flux'][irow+1,icol]
+                    -daily_l3_data['y_flux'][irow+2,icol])/(12*dy)
+            daily_l3_data['div'] = xdiv+ydiv
+#            daily_l3_data.pop('x_flux');
+#            daily_l3_data.pop('y_flux');
+            l3_data = self.F_merge_l3_data(l3_data,daily_l3_data)
+        
+        self.oversampling_list = oversampling_list_full
+        return l3_data
+        
+    def F_parallel_regrid(self,l2g_data=None,block_length=200,ncores=None):
         '''
         regrid from l2g to l3 in parallel by cutting the l3 mesh into blocks
+        l2g_data:
+            l2g_data in popy-compatible dict format. by default use self.l2g_data
         block_length:
             l3 mesh grid will be cut to square blocks with this length
         ncores:
@@ -2901,7 +3003,8 @@ class popy(object):
         start_matlab_datenum = self.start_matlab_datenum
         end_matlab_datenum = self.end_matlab_datenum
         oversampling_list = self.oversampling_list.copy()
-        l2g_data = self.l2g_data
+        if l2g_data == None:
+            l2g_data = self.l2g_data
         if 'UTC_matlab_datenum' not in l2g_data.keys():
             l2g_data['UTC_matlab_datenum'] = l2g_data.pop('utc')
         for key in self.oversampling_list:
