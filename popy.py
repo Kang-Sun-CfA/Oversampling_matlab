@@ -38,6 +38,75 @@ def datetime2datenum(python_datetime):
                                     +python_datetime.minute/1440.\
                                     +python_datetime.second/86400.+366.
     return matlab_datenum
+
+def F_collocate_l2g(l2g_data1,l2g_data2,hour_difference=0.5):
+    '''
+    collocate two l2g dictionaries
+    l2g_data1:
+        the one with bigger pixels
+    hour_difference:
+        max difference between pixels in hour
+    updated on 2020/08/23
+    '''
+    from shapely.geometry import Polygon
+    l2g_2_west = np.min(l2g_data2['lonr'],axis=1)
+    l2g_2_east = np.max(l2g_data2['lonr'],axis=1)
+    l2g_2_south = np.min(l2g_data2['latr'],axis=1)
+    l2g_2_north = np.max(l2g_data2['latr'],axis=1)
+    
+    l2g_1_west = np.min(l2g_data1['lonr'],axis=1)
+    l2g_1_east = np.max(l2g_data1['lonr'],axis=1)
+    l2g_1_south = np.min(l2g_data1['latr'],axis=1)
+    l2g_1_north = np.max(l2g_data1['latr'],axis=1)
+    
+    l2g_2_utc = l2g_data2['UTC_matlab_datenum']
+    l2g_1_utc = l2g_data1['UTC_matlab_datenum']
+    
+    l2g_2_lonr = l2g_data2['lonr']
+    l2g_1_lonr = l2g_data1['lonr']
+    l2g_2_latr = l2g_data2['latr']
+    l2g_1_latr = l2g_data1['latr']
+    
+    l2g_2_C = l2g_data2['column_amount']
+    
+    mask_list = [np.where((l2g_2_utc >= l2g_1_utc[i]-hour_difference/24)\
+        & (l2g_2_utc <= l2g_1_utc[i]+hour_difference/24)\
+        & (l2g_2_south <= l2g_1_north[i])\
+        & (l2g_2_north >= l2g_1_south[i])\
+        & (l2g_2_east >= l2g_1_west[i])\
+        & (l2g_2_west <= l2g_1_east[i])) for i in range(len(l2g_data1['latc']))]
+    
+    def F_poly_intersect(x1,y1,X2,Y2,l2g_2_C):
+        '''
+        x1, y1 defines a bigger polygon
+        each row of X2 Y2 defines a smaller polygon
+        '''
+        if len(X2) == 0:
+            return np.array([np.nan, np.nan, np.nan])
+        poly1 = Polygon(np.vstack((x1,y1)).T)
+        area1 = poly1.area
+        n = X2.shape[0]
+        poly2_list = [Polygon(np.vstack((X2[j,],Y2[j,])).T) for j in range(n)]
+        area_list = np.array([np.array([poly1.intersection(poly2).area,poly2.area]) for poly2 in poly2_list])
+        npix = np.sum(area_list[:,0]/area_list[:,1])
+        weighted_mean_l2g_2_C = np.sum(area_list[:,0]*l2g_2_C)/np.sum(area_list[:,0])
+        relative_overlap = np.sum(area_list[:,0])/area1
+        return np.array([weighted_mean_l2g_2_C,relative_overlap,npix])
+    
+    result_array = np.array([F_poly_intersect(l2g_1_lonr[i,],
+                                              l2g_1_latr[i,],
+                                              l2g_2_lonr[mask_list[i][0],],
+                                              l2g_2_latr[mask_list[i][0],],
+                                              l2g_2_C[mask_list[i][0]]) for i in range(len(l2g_data1['latc']))])
+    l2g_data1['column_amount2'] = result_array[:,0]
+    l2g_data1['relative_overlap2'] = result_array[:,1]
+    l2g_data1['npix2'] = result_array[:,2]
+    overlap_mask = (~np.isnan(result_array[:,0])) & (result_array[:,2] > 0)
+        
+    l2g_data1_has2 = {k:v[overlap_mask,] for (k,v) in l2g_data1.items()}
+    l2g_data1_hasnot2 = {k:v[~overlap_mask,] for (k,v) in l2g_data1.items()}
+    return l2g_data1_has2, l2g_data1_hasnot2
+    
 def F_interp_gcrs(sounding_lon,sounding_lat,sounding_datenum,sounding_ps,
                   gcrs_dir='/mnt/Data2/GEOS-Chem_Silvern/',
                   product='NO2',if_monthly=False):
