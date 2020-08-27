@@ -222,7 +222,7 @@ def F_interp_merra2(sounding_lon,sounding_lat,sounding_datenum,\
     merra2_dir:
         directory where merra2 data are saved
     interp_fields:
-        variables to interpolate from era5, only 2d fields are supported
+        variables to interpolate from merra2, only 2d fields are supported
     fn_header:
         following nasa ges disc naming
     created on 2020/03/09
@@ -1085,9 +1085,9 @@ class popy(object):
                 l2g_data['lonr'] = mat_data['output_subset']['lonr'][0][0]
             elif key_name == 'latr':
                 l2g_data['latr'] = mat_data['output_subset']['latr'][0][0]
-            elif key_name in {'colnh3','colno2','colhcho','colchocho'}:
+            elif key_name in {'colnh3','colno2','colhcho','colchocho','colco'}:
                 l2g_data['column_amount'] = mat_data['output_subset'][key_name][0][0].flatten()
-            elif key_name in {'colnh3error','colno2error','colhchoerror','colchochoerror','xch4error'}:
+            elif key_name in {'colnh3error','colno2error','colhchoerror','colchochoerror','colcoerror','xch4error'}:
                 l2g_data['column_uncertainty'] = mat_data['output_subset'][key_name][0][0].flatten()
             elif key_name in {'ift','ifov'}:
                 l2g_data['across_track_position'] = mat_data['output_subset'][key_name][0][0].flatten()
@@ -1962,6 +1962,8 @@ class popy(object):
             self.nl2 = len(l2g_data['latc'])
         
     def F_subset_S5PCH4(self,path,if_trop_xch4=False,s5p_product='*',
+                        merra2_interp_variables=['TROPPT','PS','U50M','V50M'],
+                        merra2_dir='./',
                         geos_interp_variables=[],geos_time_collection=''):
         """ 
         function to subset tropomi ch4 level 2 data, calling self.F_read_S5P_nc
@@ -1973,7 +1975,11 @@ class popy(object):
             if calculate tropospheric xch4
         s5p_product:
             choose from RPRO and OFFL, '*' means all
-        geos_interp_variables:
+        merra2_interp_fields:
+            variables to interpolate from merra2, only 2d fields are supported
+        merra2_dir:
+            directory where merra2 data are saved
+        geos_interp_variables (the geos fp option is obsolete):
             a list of variables (only 2d fields are supported now) to be 
             resampled from geos fp (has to be subsetted/resaved into .mat). see
             the geos class for geos fp data handling
@@ -2072,12 +2078,19 @@ class popy(object):
                 input("Press Enter to continue...")
                 continue
             
-            if if_trop_xch4:
-                
-                if 'TROPPT' not in geos_interp_variables:
-                    self.logger.warning('tropopause has to be resampled from geos fp to calculate tropospheric xch4!')
-                    geos_interp_variables = np.concatenate((geos_interp_variables,['TROPPT']),0)
+#            if if_trop_xch4:
+#                
+#                if 'TROPPT' not in geos_interp_variables:
+#                    self.logger.warning('tropopause has to be resampled from geos fp to calculate tropospheric xch4!')
+#                    geos_interp_variables = np.concatenate((geos_interp_variables,['TROPPT']),0)
             
+            if merra2_interp_variables != []:
+                sounding_interp = F_interp_merra2(outp_nc['lonc'],outp_nc['latc'],outp_nc['UTC_matlab_datenum'],\
+                                                merra2_dir=merra2_dir,\
+                                                interp_fields=merra2_interp_variables,\
+                                                fn_header='MERRA2_300.tavg1_2d_slv_Nx')
+                for var in merra2_interp_variables:
+                    outp_nc['merra2_'+var] = sounding_interp[var]
             if geos_interp_variables != []:
                 sounding_interp = F_interp_geos_mat(outp_nc['lonc'],outp_nc['latc'],outp_nc['UTC_matlab_datenum'],\
                                                 geos_dir='/mnt/Data2/GEOS/s5p_interp/',\
@@ -2085,6 +2098,7 @@ class popy(object):
                                                 time_collection=geos_time_collection)
                 for var in geos_interp_variables:
                     outp_nc[var] = sounding_interp[var]
+                outp_nc['merra2_TROPPT'] = outp_nc['TROPPT']
             #f1 = outp_nc['SolarZenithAngle'] <= maxsza
             #f2 = outp_nc['cloud_fraction'] <= maxcf
             # ridiculously, qa_value has a scale_factor of 0.01. so error-prone
@@ -2126,7 +2140,7 @@ class popy(object):
                     cum_methane = np.concatenate(([0.],np.cumsum(l2g_data0['methane_profile_apriori'][il2,].squeeze())))
                     # model top is 10 Pa, 12 layers, 13 levels
                     plevel = 10.+np.arange(0,13)*l2g_data0['pressure_interval'][il2]
-                    tropp = l2g_data0['TROPPT'][il2]
+                    tropp = l2g_data0['merra2_TROPPT'][il2]
                     l2g_data0['air_column_total'][il2] = np.sum(l2g_data0['dry_air_subcolumns'][il2,])
                     f = interp1d(plevel,cum_air)
                     l2g_data0['air_column_strat'][il2] = f(tropp)
@@ -2996,7 +3010,7 @@ class popy(object):
     def F_regrid_divergence(self,omega_field='column_amount',
                             x_wind_field='era5_u100',y_wind_field='era5_v100',
                             l2g_data=None,block_length=200,ncores=0,
-                            simplify_oversampling_list=True):
+                            simplify_oversampling_list=True,if_daily=False):
         '''
         call F_parallel_regrid to oversample x/y-flux daily and calculate d(x-flux)/dx
         and d(y-flux)dy to form daily divergence map. Average daily divergence to
@@ -3011,6 +3025,8 @@ class popy(object):
             l3 mesh grid will be cut to square blocks with this length
         ncores:
             number of cores, 0 calls non parallel F_regrid_ccm
+        simplify_oversampling_list:
+            if True, only oversampling omega_field and its divergence
         created on 2020/08/16
         '''
         if l2g_data == None:
@@ -3033,6 +3049,29 @@ class popy(object):
         # y-grid size in m
         dy = 111e3*self.grid_size
         l3_data = {}
+        if not if_daily:
+            l3_data = self.F_parallel_regrid(l2g_data=l2g_data,
+                                             block_length=block_length,
+                                             ncores=ncores)
+            # d(x_flux)/dx
+            xdiv = np.full(l3_data['x_flux'].shape,np.nan,dtype=np.float64)
+            for irow in range(self.nrows):
+                for icol in range(2,self.ncols-2):
+                    xdiv[irow,icol] = (l3_data['x_flux'][irow,icol-2]
+                    -8*l3_data['x_flux'][irow,icol-1]
+                    +8*l3_data['x_flux'][irow,icol+1]
+                    -l3_data['x_flux'][irow,icol+2])/(12*dx_vec[irow])
+            # d(y_flux)/dy
+            ydiv = np.full(l3_data['y_flux'].shape,np.nan,dtype=np.float64)
+            for icol in range(self.ncols):
+                for irow in range(2,self.nrows-2):
+                    ydiv[irow,icol] = (l3_data['y_flux'][irow-2,icol]
+                    -8*l3_data['y_flux'][irow-1,icol]
+                    +8*l3_data['y_flux'][irow+1,icol]
+                    -l3_data['y_flux'][irow+2,icol])/(12*dy)
+            l3_data['div'] = xdiv+ydiv
+            self.oversampling_list = oversampling_list_full
+            return l3_data
         for day in day_list:
             mask = np.floor(l2g_data['UTC_matlab_datenum']) == day
             if np.sum(mask) == 0:
@@ -3832,8 +3871,9 @@ class popy(object):
             l3_data['ygrid'] = self.ygrid
             l3_data['ncol'] = self.ncols
             l3_data['nrow'] = self.nrows
-            l3_data.pop('xmesh');
-            l3_data.pop('ymesh');
+            if 'xmesh' in l3_data.keys():
+                l3_data.pop('xmesh');
+                l3_data.pop('ymesh');
             savemat(file_path,l3_data)    
             return
         if not self.C:
