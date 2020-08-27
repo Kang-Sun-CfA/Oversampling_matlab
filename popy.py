@@ -779,7 +779,7 @@ def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
     for il2 in range(nl2):
         ijmsh = np.ix_(lat_index[il2],lon_index[il2])
         patch_xmesh = xmesh[ijmsh] - patch_west[il2]
-        patch_xmesh[patch_xmesh<0.0] += 360.0
+        #patch_xmesh[patch_xmesh<0.0] += 360.0
         patch_ymesh = ymesh[ijmsh] - latc[il2]
         if instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B",\
                                 "SCIAMACHY","TROPOMI","OMPS-N20"}:
@@ -3186,7 +3186,7 @@ class popy(object):
             pixel_width = np.max([F_lon_distance(lonr[:,0],lonr[:,2]),F_lon_distance(lonr[:,1],lonr[:,3])],axis=0)
             pixel_height = np.max([np.abs(latr[:,2]-latr[:,0]),np.abs(latr[:,1]-latr[:,3])],axis=0)
         else:
-            pixel_width = np.max([l2g_data['u'],l2g_data['v']],axis=0)
+            pixel_width = np.max([l2g_data['u'],l2g_data['v']],axis=0)*3
             pixel_height = pixel_width
         pixel_west = lonc-pixel_width/2*xmargin
         pixel_east = lonc+pixel_width/2*xmargin
