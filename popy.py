@@ -286,6 +286,99 @@ def F_interp_merra2(sounding_lon,sounding_lat,sounding_datenum,\
         sounding_interp[fn] = my_interpolating_function((sounding_lon,sounding_lat,sounding_datenum))
     return sounding_interp
 
+
+def F_interp_era5_3D(sounding_lon,sounding_lat,sounding_datenum,
+                     sounding_p0,sounding_p1,nlevel=10,\
+                     era5_dir='/mnt/Data2/ERA5/',\
+                     interp_fields=['v','u'],\
+                     fn_header='CONUS'):
+    """
+    sample 3D field from era5 data in .nc format. 
+    see era5.py for era5 downloading/subsetting
+    sounding_lon:
+        longitude for interpolation
+    sounding_lat:
+        latitude for interpolation
+    sounding_datenum:
+        time for interpolation in matlab datenum double format
+    sounding_p0:
+        bottom bound of pressure
+    sounding_p1:
+        top bound of pressure
+    nlevel:
+        how many pressure-linear levels between sounding_p0 and sounding_p1
+    era5_dir:
+        directory where subset era5 data in .nc are saved
+    interp_fields:
+        variables to interpolate from era5, u and v
+    fn_header:
+        in general should denote domain location of era5 data
+    created on 2020/09/20
+    """
+    from scipy.interpolate import RegularGridInterpolator
+#    nl2 = len(sounding_datenum)
+    p_interp = np.linspace(sounding_p0,sounding_p1,nlevel).T
+    lat_interp = np.tile(sounding_lat,(nlevel,1)).T
+    lon_interp = np.tile(sounding_lon,(nlevel,1)).T
+    time_interp = np.tile(sounding_datenum,(nlevel,1)).T
+    start_datenum = np.amin(sounding_datenum)
+    end_datenum = np.amax(sounding_datenum)
+    start_date = datedev_py(start_datenum).date()
+    
+    end_date = datedev_py(end_datenum).date()
+    days = (end_date-start_date).days+1
+    DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+    era5_data = {}
+    iday = 0
+    for DATE in DATES:
+        fn = os.path.join(era5_dir,DATE.strftime('Y%Y'),\
+                                   DATE.strftime('M%m'),\
+                                   DATE.strftime('D%d'),\
+                                   fn_header+'_3D_'+DATE.strftime('%Y%m%d')+'.nc')
+        if not era5_data:
+            nc_out = F_ncread_selective(fn,np.concatenate(
+                    (interp_fields,['latitude','longitude','time','level'])))
+            era5_data['lon'] = nc_out['longitude']
+            era5_data['level'] = nc_out['level']*100 # hPa to Pa
+            era5_data['lat'] = nc_out['latitude'][::-1]
+            # how many hours are there in each daily file? have to be the same 
+            nhour = len(nc_out['time'])
+            era5_data['datenum'] = np.zeros((nhour*(days)),dtype=np.float64)
+            # era5 time is defined as 'hours since 1900-01-01 00:00:00.0'
+            era5_data['datenum'][iday*nhour:((iday+1)*nhour)] = nc_out['time']/24.+693962.
+            for field in interp_fields:
+                era5_data[field] = np.zeros((len(era5_data['lon']),len(era5_data['lat']),len(era5_data['level']),nhour*(days)))
+                if len(nc_out[field].shape) != 4:
+                    print('Warning!!! Anomaly in the dimension of ERA5 fields.')
+                    print('Tentatively taking only the first element of the second dimension')
+                    nc_out[field] = nc_out[field][:,0,...].squeeze()
+                # was read in as 4-d array in time, level, lat, lon; transpose to lon, lat, level, time
+                era5_data[field][...,iday*nhour:((iday+1)*nhour)] = nc_out[field].transpose((3,2,1,0))[:,::-1,:,:]
+        else:
+            nc_out = F_ncread_selective(fn,np.concatenate(
+                    (interp_fields,['time'])))
+            # era5 time is defined as 'hours since 1900-01-01 00:00:00.0'
+            era5_data['datenum'][iday*nhour:((iday+1)*nhour)] = nc_out['time']/24.+693962.
+            for field in interp_fields:
+                # was read in as 4-d array in time, level, lat, lon; transpose to lon, lat, level, time
+                era5_data[field][...,iday*nhour:((iday+1)*nhour)] = nc_out[field].transpose((3,2,1,0))[:,::-1,:,:]
+        # forgot to increment iday
+        iday = iday+1
+    
+    sounding_interp = {}
+    if not era5_data:
+        for fn in interp_fields:
+            sounding_interp[fn] = lon_interp*np.nan
+        return sounding_interp
+    # interpolate
+    for fn in interp_fields:
+        my_interpolating_function = \
+        RegularGridInterpolator((era5_data['lon'],era5_data['lat'],era5_data['level'],era5_data['datenum']),\
+                                era5_data[fn],bounds_error=False,fill_value=np.nan)
+        sounding_interp[fn] = my_interpolating_function((lon_interp,lat_interp,p_interp,time_interp))
+    return sounding_interp
+
+
 def F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,\
                   era5_dir='/mnt/Data2/ERA5/',\
                   interp_fields=['blh','u10','v10','u100','v100','sp'],\
@@ -3888,6 +3981,32 @@ class popy(object):
         C['ncol'] = self.ncols
         C['nrow'] = self.nrows
         savemat(file_path,C)
+    
+    def F_vertically_weighted_wind(self,which_met,met_dir,
+                                 fn_header='',nlevel=10):
+        '''
+        sample vertically weighted wind from 3D met data
+        created on 2020/09/22
+        '''
+        sounding_lon = self.l2g_data['lonc']
+        sounding_lat = self.l2g_data['latc']
+        sounding_datenum = self.l2g_data['UTC_matlab_datenum']
+        sounding_p0 = self.l2g_data['era5_sp']
+        sounding_p1 = self.l2g_data['era5_sp']*np.exp(-self.l2g_data['era5_blh']/7500)
+        if which_met in {'era','era5','ERA','ERA5'}:
+            if not fn_header:
+                fn_header_local = 'CONUS'
+            else:
+                fn_header_local = fn_header
+            self.logger.info('sampling 3D u and v wind from ERA5...')
+            sounding_interp = F_interp_era5_3D(sounding_lon,sounding_lat,sounding_datenum,
+                                               sounding_p0,sounding_p1,nlevel,
+                                               era5_dir=met_dir,interp_fields=['u','v'],
+                                               fn_header=fn_header_local)
+            self.logger.info('averaging 3D wind vertically...')
+            self.l2g_data['era5_ubar'] = np.nanmean(sounding_interp['u'],axis=1)
+            self.l2g_data['era5_vbar'] = np.nanmean(sounding_interp['v'],axis=1)
+            
         
     def F_interp_profile(self,which_met,met_dir,if_monthly=False,
                          surface_pressure_field='merra2_PS'):
