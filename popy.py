@@ -3100,10 +3100,62 @@ class popy(object):
         minlat_e = X[1,].min()
         return X, minlon_e, minlat_e
     
+    def F_derive_surface_vmr(self,
+                             omega_field='column_amount',
+                             pblp_field=None,
+                             pblh_field='era5_blh',
+                             surface_pressure_field='surface_pressure',
+                             surface_vmr_field='surface_vmr',
+                             scale_height=7500.,
+                             gamma=1.,
+                             l2g_data=None):
+        '''
+        acmap surface vmr
+        omega_field:
+            column amount, has to be in mol/m2 to make sense
+        pblp_field:
+            thickness of pbl in Pa. will supersede the pblh stuff if provided
+        pblh_field:
+            pblh in m
+        surface_pressure_field:
+            surface pressure
+        surface_vmr_field:
+            surface mixing ratio field name to be saved
+        gamma:
+            non-dimensional shape number
+        l2g_data:
+            l2g_data in popy-compatible dict format. by default use self.l2g_data
+        '''
+        gravity = 9.8 # m/s2
+        MA = 0.029 # kg/mol
+        if l2g_data == None:
+            do_output = False
+            l2g_data = self.l2g_data
+        else:
+            do_output = True
+        if 'UTC_matlab_datenum' not in l2g_data.keys():
+            l2g_data['UTC_matlab_datenum'] = l2g_data.pop('utc')
+        if pblp_field is not None:
+            self.logger.info('pblp is provided and will be used')
+            pblp = l2g_data[pblp_field]
+        else:
+            pblp = l2g_data[surface_pressure_field]*(1-np.exp(-l2g_data[pblh_field]/scale_height))
+        
+        l2g_data[surface_vmr_field] = gravity*MA*l2g_data[omega_field]/gamma/pblp
+        if do_output:
+            return l2g_data
+        else:
+            self.l2g_data = l2g_data
+        
     def F_regrid_divergence(self,omega_field='column_amount',
                             x_wind_field='era5_u100',y_wind_field='era5_v100',
+                            x_surface_wind_field='era5_u10',
+                            y_surface_wind_field='era5_v10',
+                            surface_pressure_field='surface_pressure',
+                            surface_vmr_field='surface_vmr',
                             l2g_data=None,block_length=200,ncores=0,
-                            simplify_oversampling_list=True,if_daily=False):
+                            simplify_oversampling_list=True,if_daily=True,
+                            do_terrain=False):
         '''
         call F_parallel_regrid to oversample x/y-flux daily and calculate d(x-flux)/dx
         and d(y-flux)dy to form daily divergence map. Average daily divergence to
@@ -3111,7 +3163,13 @@ class popy(object):
         omega_field:
             which scalar to calculate divergence
         x/y_wind_field:
-            horizontal wind
+            pbl representative horizontal wind
+        x/y_surface_wind_field:
+            near surface wind
+        surface_pressure_field:
+            surface pressure
+        surface_vmr_field:
+            surface mixing ratio
         l2g_data:
             l2g_data in popy-compatible dict format. by default use self.l2g_data
         block_length:
@@ -3120,21 +3178,48 @@ class popy(object):
             number of cores, 0 calls non parallel F_regrid_ccm
         simplify_oversampling_list:
             if True, only oversampling omega_field and its divergence
+        if_daily:
+            if calculate spatial gradient every day. if False, calculate spatial gradient on the oversampled field
+        do_terrain:
+            calculate the terrain correction term or not
         created on 2020/08/16
+        added terrain on 2020/09/28
         '''
         if l2g_data == None:
             l2g_data = self.l2g_data
         if 'UTC_matlab_datenum' not in l2g_data.keys():
             l2g_data['UTC_matlab_datenum'] = l2g_data.pop('utc')
         oversampling_list_full = self.oversampling_list.copy()
+        
+        if do_terrain:
+            self.logger.info('calculate the terrain correction term')
+            gravity = 9.8 # m/s2
+            MA = 0.029 # kg/mol
+            if not if_daily:
+                self.logger.error('not compatible with non-daily divergence calculation!')
+        
         if simplify_oversampling_list:
             self.oversampling_list = [omega_field,'x_flux','y_flux']
+            if surface_pressure_field not in self.oversampling_list and do_terrain:
+                self.oversampling_list.append(surface_pressure_field)
+            if do_terrain:
+                self.oversampling_list.append('surface_x_flux')
+                self.oversampling_list.append('surface_y_flux')
         else:
             self.oversampling_list.append('x_flux')
             self.oversampling_list.append('y_flux')
+            if surface_pressure_field not in self.oversampling_list and do_terrain:
+                self.oversampling_list.append(surface_pressure_field)
+            if do_terrain:
+                self.oversampling_list.append('surface_x_flux')
+                self.oversampling_list.append('surface_y_flux')
         
         l2g_data['x_flux'] = l2g_data[omega_field]*l2g_data[x_wind_field]
         l2g_data['y_flux'] = l2g_data[omega_field]*l2g_data[y_wind_field]
+        
+        l2g_data['surface_x_flux'] = l2g_data[surface_vmr_field]*l2g_data[x_surface_wind_field]
+        l2g_data['surface_y_flux'] = l2g_data[surface_vmr_field]*l2g_data[y_surface_wind_field]
+        
         day_list = np.arange(np.floor(l2g_data['UTC_matlab_datenum'].min()),
                              np.floor(l2g_data['UTC_matlab_datenum'].max())+1)
         # x-grid size in m
@@ -3192,8 +3277,30 @@ class popy(object):
                     +8*daily_l3_data['y_flux'][irow+1,icol]
                     -daily_l3_data['y_flux'][irow+2,icol])/(12*dy)
             daily_l3_data['div'] = xdiv+ydiv
-#            daily_l3_data.pop('x_flux');
-#            daily_l3_data.pop('y_flux');
+            
+            if do_terrain:
+                # d(p0)/dx
+                xdp = np.full(daily_l3_data['x_flux'].shape,np.nan,dtype=np.float64)
+                for irow in range(self.nrows):
+                    for icol in range(2,self.ncols-2):
+                        xdp[irow,icol] = (daily_l3_data[surface_pressure_field][irow,icol-2]
+                        -8*daily_l3_data[surface_pressure_field][irow,icol-1]
+                        +8*daily_l3_data[surface_pressure_field][irow,icol+1]
+                        -daily_l3_data[surface_pressure_field][irow,icol+2])/(12*dx_vec[irow])
+                # d(p0)/dy
+                ydp = np.full(daily_l3_data['y_flux'].shape,np.nan,dtype=np.float64)
+                for icol in range(self.ncols):
+                    for irow in range(2,self.nrows-2):
+                        ydp[irow,icol] = (daily_l3_data[surface_pressure_field][irow-2,icol]
+                        -8*daily_l3_data[surface_pressure_field][irow-1,icol]
+                        +8*daily_l3_data[surface_pressure_field][irow+1,icol]
+                        -daily_l3_data[surface_pressure_field][irow+2,icol])/(12*dy)
+                daily_l3_data['terrain_correction'] = (daily_l3_data['surface_x_flux']*xdp
+                             +daily_l3_data['surface_y_flux']*ydp)/gravity/MA
+                daily_l3_data.pop('surface_x_flux');
+                daily_l3_data.pop('surface_y_flux');
+            daily_l3_data.pop('x_flux');
+            daily_l3_data.pop('y_flux');
             l3_data = self.F_merge_l3_data(l3_data,daily_l3_data)
         
         self.oversampling_list = oversampling_list_full
