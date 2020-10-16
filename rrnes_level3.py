@@ -45,7 +45,7 @@ import os
 import logging
 import matplotlib.pyplot as plt
 sys.path.append(control['popy directory'])
-from popy import popy
+from popy import popy, F_collocate_l2g
 logging.basicConfig(level=logging.INFO)
 from scipy.io import loadmat
 from calendar import monthrange
@@ -82,6 +82,12 @@ elif control['which sensor'] == 'OMI':
     block_length = 100
     grid_size = 0.05
 nv = len(control['oversampling list'])
+
+if 'if exclude fire AI' in control.keys():
+    if_ai = control['if exclude fire AI']
+else:
+    if_ai = False
+
 if not os.path.exists(control['output directory']):
     os.makedirs(control['output directory'])
 basin_boundary_fn = os.path.join(control['auxiliary directory'],
@@ -125,6 +131,19 @@ for year in range(start_year,end_year+1):
                  start_year=year,start_month=month,start_day=1,
                  end_year=year,end_month=month,end_day=monthrange(year,month)[-1],
                  grid_size=grid_size)
+        if if_ai:
+            ai = popy(instrum=control['which sensor'],
+                      product='AI',
+                      west=basin_boundary['minlon3'].squeeze(),
+                      east=basin_boundary['maxlon3'].squeeze(),
+                      south=basin_boundary['minlat3'].squeeze(),
+                      north=basin_boundary['maxlat3'].squeeze(),
+                      start_year=year,start_month=month,start_day=1,
+                      end_year=year,end_month=month,end_day=monthrange(year,month)[-1],
+                      grid_size=grid_size)
+            ai.F_mat_reader(os.path.join(control['AI level 2g directory'],
+                                    control['AI level 2g file header']
+                                    +'_%04d'%year+'_%02d'%month+'.mat'))
         if 'basin_grid_mask' not in locals():
             grid_points = np.hstack((p.xmesh.flatten()[:,np.newaxis],p.ymesh.flatten()[:,np.newaxis]))
             basin_grid_mask = basin_polygon.contains_points(grid_points).reshape(p.xmesh.shape)
@@ -173,6 +192,14 @@ for year in range(start_year,end_year+1):
                 l2g_data['x'] = l2g_data['column_amount']/dp*9.8*0.029
         if 'dx' in control['oversampling list']:
             l2g_data['dx'] = np.zeros(l2g_data['x'].shape)
+        # remove fire pixels if aerosol index data are to be used
+        if if_ai:
+            mask = ai.l2g_data['AI'] > control['fire AI threshold']
+            fire_l2g = {k:v[mask,] for (k,v) in ai.l2g_data.items()}
+            # keep only pixels that don't overlap with fire AI pixels
+            _,l2g_data = F_collocate_l2g(l2g_data1=l2g_data,
+                                         l2g_data2=fire_l2g,
+                                         hour_difference=1,field_to_average='AI')
         # this loop is like chicken rib now
         for iday in range(int(np.floor(l2g_data['UTC_matlab_datenum'].min())),
                           int(np.ceil(l2g_data['UTC_matlab_datenum'].max()))):

@@ -39,14 +39,18 @@ def datetime2datenum(python_datetime):
                                     +python_datetime.second/86400.+366.
     return matlab_datenum
 
-def F_collocate_l2g(l2g_data1,l2g_data2,hour_difference=0.5):
+def F_collocate_l2g(l2g_data1,l2g_data2,hour_difference=0.5,
+                    field_to_average='column_amount'):
     '''
     collocate two l2g dictionaries
     l2g_data1:
         the one with bigger pixels
     hour_difference:
         max difference between pixels in hour
+    field_to_average:
+        the l2g field in l2g_data2 to be averaged to l2g_data1 pixels
     updated on 2020/08/23
+    updated on 2020/10/13
     '''
     from shapely.geometry import Polygon
     l2g_2_west = np.min(l2g_data2['lonr'],axis=1)
@@ -67,7 +71,7 @@ def F_collocate_l2g(l2g_data1,l2g_data2,hour_difference=0.5):
     l2g_2_latr = l2g_data2['latr']
     l2g_1_latr = l2g_data1['latr']
     
-    l2g_2_C = l2g_data2['column_amount']
+    l2g_2_C = l2g_data2[field_to_average]
     
     mask_list = [np.where((l2g_2_utc >= l2g_1_utc[i]-hour_difference/24)\
         & (l2g_2_utc <= l2g_1_utc[i]+hour_difference/24)\
@@ -98,7 +102,7 @@ def F_collocate_l2g(l2g_data1,l2g_data2,hour_difference=0.5):
                                               l2g_2_lonr[mask_list[i][0],],
                                               l2g_2_latr[mask_list[i][0],],
                                               l2g_2_C[mask_list[i][0]]) for i in range(len(l2g_data1['latc']))])
-    l2g_data1['column_amount2'] = result_array[:,0]
+    l2g_data1[field_to_average+'2'] = result_array[:,0]
     l2g_data1['relative_overlap2'] = result_array[:,1]
     l2g_data1['npix2'] = result_array[:,2]
     overlap_mask = (~np.isnan(result_array[:,0])) & (result_array[:,2] > 0)
@@ -2954,10 +2958,10 @@ class popy(object):
             plt.clim(vmax=vmax)
         return pc,fig,ax,m,cb
     
-    def F_plot_l2g(self,plot_field='column_amount',max_day=1,l2g_data=None,
+    def F_plot_l2g(self,ax=None,plot_field='column_amount',max_day=1,l2g_data=None,
                    alpha=0.7,vmin=None,vmax=None,
                    x_wind_field='era5_u100',y_wind_field='era5_v100',
-                   wind_arrow_width=0.025,wind_arrow_scale=20):
+                   wind_arrow_width=0.01,wind_arrow_scale=20):
         '''
         plot l2g pixels as polygons
         plot_field:
@@ -2984,6 +2988,8 @@ class popy(object):
             if_map = False
         import matplotlib.pyplot as plt
         from matplotlib.collections import PolyCollection
+        ax = plt.gca() if ax is None else ax
+        fig = plt.gcf()
         plot_index = np.where(l2g_data['UTC_matlab_datenum']<=l2g_data['UTC_matlab_datenum'].min()+max_day)
         if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B","SCIAMACHY","TROPOMI"}:
             verts = [np.array([l2g_data['lonr'][i,:],l2g_data['latr'][i,:]]).T for i in plot_index[0]]
@@ -2993,7 +2999,7 @@ class popy(object):
         collection = PolyCollection(verts,
                              array=l2g_data[plot_field],cmap='rainbow',edgecolors='none')
         collection.set_alpha(alpha)
-        fig,ax = plt.subplots()
+#        fig,ax = plt.subplots()
         if if_map:
             m = Basemap(projection= 'cyl',llcrnrlat=self.south,urcrnrlat=self.north,
                         llcrnrlon=self.west,urcrnrlon=self.east,resolution='l')
