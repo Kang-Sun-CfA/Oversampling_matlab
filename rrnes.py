@@ -43,7 +43,35 @@ def F_forward(inp,Q,tau):
         dydQ = 1/(A*(ws/L/f+1/tau))
         dydtau = (Q+inp['Omega_bg']*ws*A/f/L)/A*1/(ws/L/f+1/tau)**2*1/tau**2
         return y, dydQ, dydtau
-        
+
+def F_forward12(inp,Q_array,tau_array):
+    """
+    forward model for multiple month ime
+    """
+    A = inp['A']
+    L = inp['L']
+    xx = inp['xx']
+    f = inp['f']
+    nx_per_month = inp['nx_per_month']
+    index_array = np.cumsum(nx_per_month)
+    nmonth = len(nx_per_month)
+    yhat = np.full(xx.shape,np.nan)
+    dydQ = np.zeros((len(xx),nmonth))
+    dydtau = np.zeros((len(xx),nmonth))
+    for i in range(nmonth):
+        if i == 0:
+            ind1 = 0 
+        else:
+            ind1 = int(index_array[i-1])
+        ind2 = int(index_array[i])
+        yhat[ind1:ind2] = Q_array[i]/(A*(xx[ind1:ind2]/L/f+1/tau_array[i]))
+        dydQ[ind1:ind2,i] = 1/(A*(xx[ind1:ind2]/L/f+1/tau_array[i]))
+        dydtau[ind1:ind2,i] = Q_array[i]/A*1/(xx[ind1:ind2]/L/f+1/tau_array[i])**2*1/tau_array[i]**2
+    return yhat, dydQ, dydtau
+
+def F_month_corr(m1,m2,dm):
+    # error correlation between two months
+    return np.exp(-np.min([np.abs(m1-m2),12-np.abs(m1-m2)])/dm)
 
 class IME():
     """
@@ -168,6 +196,84 @@ class RRNES(object):
         
         Q = np.nansum(ime_Q*weight)/np.nansum(weight)
         return Q
+    
+    def F_multimonth_OE(self,monthlyDictArray,Q_ap,tau_ap,Sa,
+                        universal_f,
+                        dateArray=[],
+                        ridgeLambda = 3.3e-10,
+                        wsRange=(2.,8.),tol=1e-10,maxIteration=100,
+                        convergenceThreshold=0):
+        
+        nmonth = len(monthlyDictArray)
+        xx = np.array([])
+        yy = np.array([])
+        nx_per_month = np.full((nmonth),np.nan)
+        for (i,mergedDict) in enumerate(monthlyDictArray):
+            mask = (~np.isnan(mergedDict['NO2']['ime_ws'])) & (~np.isnan(mergedDict['NO2']['ime_C'])) \
+            & (mergedDict['NO2']['ime_ws'] >= wsRange[0]) & (mergedDict['NO2']['ime_ws'] <= wsRange[1])
+            xx = np.append(xx,mergedDict['NO2']['ime_ws'][mask])
+            yy = np.append(yy,mergedDict['NO2']['ime_C'][mask])
+            nx_per_month[i] = np.sum(mask)
+#        self.nx_per_month = nx_per_month
+        inp={};inp['A'] = mergedDict['L']**2;inp['L'] = mergedDict['L'];inp['xx'] = xx;inp['f'] = universal_f;inp['nx_per_month'] = nx_per_month
+        y0, dy0dQ, dy0dtau = F_forward12(inp,Q_ap,tau_ap)
+        K = np.column_stack((dy0dQ,dy0dtau))
+        beta0 = np.concatenate((Q_ap,tau_ap))
+        beta = beta0
+        Sa_inv = np.linalg.inv(Sa)*ridgeLambda
+        Sy_inv = np.diag(np.ones(yy.shape)/ridgeLambda)
+        count = 0
+        diffNorm = tol+1
+        dsigma2 = np.inf
+        while(dsigma2 > len(beta)*convergenceThreshold and diffNorm > tol and count < maxIteration):
+            try:
+                y, dydQ, dydtau = F_forward12(inp,beta[0:nmonth],beta[nmonth:])
+                K = np.column_stack((dydQ,dydtau))
+                dbeta = np.linalg.inv(Sa_inv+K.T@K)@(K.T@(yy-y)-Sa_inv@(beta-beta0))
+                if convergenceThreshold != 0:
+                    dsigma2 = dbeta.T@(K.T@Sy_inv@(yy-y)+Sa_inv@(beta-beta0))
+                else:
+                    norm_dbeta = dbeta/beta0
+                    diffNorm = np.linalg.norm(norm_dbeta)
+                beta = beta+dbeta
+                count = count+1
+            except Exception as e:
+                self.logger.warning('Fitting error occurred at iteration%d'%count)
+                self.logger.warning(e)
+                break
+            self.logger.info('step %d'%count)
+            if convergenceThreshold == 0:
+                self.logger.info('relative increment: %.3e'%diffNorm)
+            else:
+                self.logger.info('dsigma square={:.1f}'.format(dsigma2))
+            self.logger.info('Q = %.1f'%np.mean(beta[0:nmonth])+', tau = %.1f'%(np.mean(beta[nmonth:])/3600))
+            if count == maxIteration:
+                self.logger.warning('max iteration number reached!')
+        
+        imeFit = IMEOE()
+        
+        imeFit.Q_post = beta[0:nmonth]
+        imeFit.tau_post = beta[nmonth:]
+        imeFit.nx_per_month = nx_per_month
+        imeFit.xData0 = xx
+        imeFit.yData0 = yy
+        imeFit.yHat0 = y0
+        imeFit.yHat = y
+        imeFit.jacobian = K
+        imeFit.avk = np.linalg.inv(K.T@K+Sa_inv)@K.T@K
+#        imeFit.avk_Sy = np.linalg.inv(K.T@Sy_inv@K+np.linalg.inv(Sa))@K.T@Sy_inv@K
+        imeFit.SHat = np.linalg.inv(K.T@Sy_inv@K+np.linalg.inv(Sa))
+        SHat = imeFit.SHat
+        imeFit.rHat = SHat[0,1]/np.sqrt(SHat[0,0])/np.sqrt(SHat[1,1])
+        imeFit.residual0 = yy-y
+        imeFit.residualRMS = np.sqrt(np.sum(np.power(yy-y,2))/len(yy))
+        imeFit.nIter = count
+        imeFit.Jprior = (beta-beta0).T@np.linalg.inv(Sa)@(beta-beta0)
+        imeFit.Jobs = (yy-y).T@(yy-y)
+        return imeFit
+        
+        
+        
     def F_GaussNewton_OE(self,monthlyDict,ime_f=[],initialGuess=(500.,10800.),
                     ridgeLambda = 1e-10,priorSD=(300,7200),priorRho=0.2,
                     wsRange=(2.,8.),tol=1e-10,maxIteration=100):
@@ -250,7 +356,7 @@ class RRNES(object):
             self.logger.info('Q = %.1f'%beta[0]+', tau = %.1f'%(beta[1]/3600))
             if count == maxIteration:
                 self.logger.warning('max iteration number reached!')
-        
+        Sy_inv = np.diag(np.ones(yData0.shape)/ridgeLambda)
         imeFit = IMEOE()
         imeFit.popt = beta
         imeFit.xData0 = xData0
@@ -259,9 +365,16 @@ class RRNES(object):
         imeFit.yHat0 = y0
         imeFit.yHat = y
         imeFit.jacobian = K
+        imeFit.avk = np.linalg.inv(K.T@K+Sa_inv)@K.T@K
+#        imeFit.avk_Sy = np.linalg.inv(K.T@Sy_inv@K+np.linalg.inv(Sa))@K.T@Sy_inv@K
+        imeFit.SHat = np.linalg.inv(K.T@Sy_inv@K+np.linalg.inv(Sa))
+        SHat = imeFit.SHat
+        imeFit.rHat = SHat[0,1]/np.sqrt(SHat[0,0])/np.sqrt(SHat[1,1])
         imeFit.residual0 = yData0-y
-        imeFit.residualRMS = np.sqrt(np.sum(np.power(yData0-y,2)))
+        imeFit.residualRMS = np.sqrt(np.sum(np.power(yData0-y,2))/len(yData0))
         imeFit.nIter = count
+        imeFit.Jprior = (beta-beta0).T@np.linalg.inv(Sa)@(beta-beta0)
+        imeFit.Jobs = (yData0-y).T@(yData0-y)
         return imeFit
         
     def F_fit_ime_C(self,monthlyDict,ime_f=[],initialGuess=(500.,10800.),
@@ -392,7 +505,7 @@ class RRNES(object):
         """
         calculate f number using monthlyDictArray and coQArray from previous steps
         """
-        return np.array([d['CO']['ime_x']*d['CO']['ime_sp']*d['CO']['ime_ws']*d['L']\
+        return np.array([d['CO']['ime_dx']*d['CO']['ime_sp']*d['CO']['ime_ws']*d['L']\
                   /self.inventories['CO'][ind]/9.8/0.029 for (ind,d) in enumerate(monthlyDictArray)])
     
     def F_merge_monthly_data(self,monthlyDictArray):
