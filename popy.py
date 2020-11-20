@@ -4262,6 +4262,7 @@ class popy(object):
         pt_idx = np.nonzero(pressure_boundaries=='tropopause')
         pbltop_idxs = np.nonzero(pressure_boundaries=='pbl')
         num_pressure_boundaries = np.zeros((self.nl2,len(pressure_boundaries)),dtype=np.float32)
+        vmr_pressure_boundaries = np.zeros((self.nl2,len(pressure_boundaries)),dtype=np.float32)
         msg_str = 'calculating subcolumns between'
         count_pbl = 0
         for ip in range(len(pressure_boundaries)):
@@ -4295,11 +4296,15 @@ class popy(object):
             f = interp1d(local_plevel,cum_gas,fill_value='extrapolate')
             sfc2p_subcol = np.array([f(pb) for pb in local_pressure_boundaries])
             subcolumns[il2,] = np.diff(sfc2p_subcol)
+            # interpolating vmr at pressure boundaries
+            fvmr = interp1d(local_plevel[0:-1],sounding_profile[il2,:],fill_value='extrapolate')
+            vmr_pressure_boundaries[il2,] = np.array([fvmr(pb) for pb in local_pressure_boundaries])
             if il2 == count*np.round(nl2/10.):
                 self.logger.info('%d%% finished' %(count*10))
                 count = count + 1
         self.l2g_data['sub_columns'] = subcolumns
         self.pressure_boundaries = pressure_boundaries
+        self.vmr_pressure_boundaries = vmr_pressure_boundaries
             
     def F_remove_l2g_fields(self,fields_to_remove):
         """
