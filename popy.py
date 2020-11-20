@@ -3198,6 +3198,8 @@ class popy(object):
         oversampling_list_full = self.oversampling_list.copy()
         
         if do_terrain:
+            l2g_data['surface_x_flux'] = l2g_data[surface_vmr_field]*l2g_data[x_surface_wind_field]
+            l2g_data['surface_y_flux'] = l2g_data[surface_vmr_field]*l2g_data[y_surface_wind_field]
             self.logger.info('calculate the terrain correction term')
             gravity = 9.8 # m/s2
             MA = 0.029 # kg/mol
@@ -3223,8 +3225,6 @@ class popy(object):
         l2g_data['x_flux'] = l2g_data[omega_field]*l2g_data[x_wind_field]
         l2g_data['y_flux'] = l2g_data[omega_field]*l2g_data[y_wind_field]
         
-        l2g_data['surface_x_flux'] = l2g_data[surface_vmr_field]*l2g_data[x_surface_wind_field]
-        l2g_data['surface_y_flux'] = l2g_data[surface_vmr_field]*l2g_data[y_surface_wind_field]
         
         day_list = np.arange(np.floor(l2g_data['UTC_matlab_datenum'].min()),
                              np.floor(l2g_data['UTC_matlab_datenum'].max())+1)
