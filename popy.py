@@ -4214,19 +4214,30 @@ class popy(object):
                 self.logger.info(key+' from MERRA2 is sampled to L2g coordinate/time')
                 self.l2g_data['merra2_'+key] = np.float32(sounding_interp[key])
     
-    def F_derive_model_subcolumn(self,pressure_boundaries=['ps',600,'tropopause',0],
+    def F_derive_model_subcolumn(self,pressure_boundaries=['ps','pbl',600,'tropopause',0],
+                                 pbl_multiplier=[2.5],
+                                 min_pbltop_pressure=600.,
                                  surface_pressure_field='merra2_PS',
-                                 tropopause_field='merra2_TROPPT'):
+                                 tropopause_field='merra2_TROPPT',
+                                 pbltop_field='merra2_PBLTOP'):
         """
         derive subcolumns using interpolated model profiles and stored the results
         in l2g_data
         pressure_boundaries:
-            boundaries between which to calculate subcolumn. use 'ps' for surface
-            pressure and 'tropopause' for tropopause pressure. unit is ***hPa***
+            boundaries between which to calculate subcolumn. for pressure boundaries,
+            the unit is ***hPa***. use 'ps' for surface pressure and 'tropopause' 
+            for tropopause pressure. 'pbl' marks a boundary at pbl_multiplier*pbl height in pressure
+        pbl_multiplier:
+            a list the same size as the number of appearances of 'pbl' in pressure_boundaries
+        min_pbltop_pressure:
+            the min pressure (highest altitude) that is allowed for the boundaries related to the pbl
+            unit is ***hPa***
         surface_pressure_field:
             surface pressure in l2g_data dictionary
         tropopause_field:
             tropopause pressure in l2g_data dictionary
+        pbltop_field:
+            pbl top pressure in l2g_data dictionary
         created on 2020/03/14
         """
         from scipy.interpolate import interp1d
@@ -4242,14 +4253,17 @@ class popy(object):
         sounding_profile = self.l2g_data['gcrs_'+self.product+'_profiles']
         sounding_pEdge = self.l2g_data['gcrs_plevel']
         sfc_pressure = self.l2g_data[surface_pressure_field]
+        pbltop_pressure = self.l2g_data[pbltop_field]
         tropopause_pressure = self.l2g_data[tropopause_field]
         nsubcol = len(pressure_boundaries)-1
         subcolumns = np.full((self.nl2,nsubcol),np.nan)
         pressure_boundaries = np.array(pressure_boundaries)
         ps_idx = np.nonzero(pressure_boundaries=='ps')
         pt_idx = np.nonzero(pressure_boundaries=='tropopause')
+        pbltop_idxs = np.nonzero(pressure_boundaries=='pbl')
         num_pressure_boundaries = np.zeros((self.nl2,len(pressure_boundaries)),dtype=np.float32)
         msg_str = 'calculating subcolumns between'
+        count_pbl = 0
         for ip in range(len(pressure_boundaries)):
             if ip == ps_idx[0]:
                 num_pressure_boundaries[:,ip] = sfc_pressure
@@ -4257,6 +4271,12 @@ class popy(object):
             elif ip == pt_idx[0]:
                 num_pressure_boundaries[:,ip] = tropopause_pressure
                 msg_str = msg_str+' tropopause pressure ([%.1f'%(np.min(tropopause_pressure)/1e2)+',%.1f] hPa)'%(np.max(tropopause_pressure)/1e2)
+            elif ip in pbltop_idxs:
+                tmp = sfc_pressure-(sfc_pressure-pbltop_pressure)*pbl_multiplier[count_pbl]
+                tmp[tmp < min_pbltop_pressure*100] = min_pbltop_pressure*100
+                num_pressure_boundaries[:,ip] = tmp
+                msg_str = msg_str+' %.1f'%(pbl_multiplier[count_pbl])+' x pbl thickness ([%.1f'%(np.min(tmp)/1e2)+',%.1f] hPa)'%(np.max(tmp)/1e2)
+                count_pbl = count_pbl+1
             else:# hPa to Pa
                 num_pressure_boundaries[:,ip] = np.float(pressure_boundaries[ip])*1e2
                 msg_str = msg_str+' %.1f hPa'%(np.float(pressure_boundaries[ip]))
