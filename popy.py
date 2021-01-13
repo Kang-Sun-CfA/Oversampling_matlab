@@ -714,7 +714,7 @@ def F_block_regrid_wrapper(args):
 def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
                        oversampling_list,instrum,error_model,
                        k1,k2,k3,xmargin,ymargin,
-                       iblock=1):
+                       iblock=1,verbose=False):
     '''
     a more compact version of F_regrid_ccm designed for parallel regridding
     l2g_data:
@@ -911,10 +911,10 @@ def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
             if(pcld_idx > 0 and cloud_fraction[il2] > 0.0):
                 pres_sum_aboves[ijmsh] += tmp_wt[:,:]*grid_flds[il2,pcld_idx]
         if il2 == count*np.round(nl2/10.):
-            print('block %d'%iblock+' %d%% finished' %(count*10))
+            if verbose:print('block %d'%iblock+' %d%% finished' %(count*10))
             count = count + 1
         
-    print('block %d'%iblock+' completed at '+datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'))
+    if verbose:print('block %d'%iblock+' completed at '+datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'))
     l3_data = {}
     np.seterr(divide='ignore', invalid='ignore')
     for ikey in range(len(oversampling_list)):
@@ -953,13 +953,13 @@ class popy(object):
                  start_year=1995,start_month=1,start_day=1,\
                  start_hour=0,start_minute=0,start_second=0,\
                  end_year=2025,end_month=12,end_day=31,\
-                 end_hour=23,end_minute=59,end_second=59):
+                 end_hour=23,end_minute=59,end_second=59,verbose=False):
         
         self.instrum = instrum
         self.product = product
         self.logger = logging.getLogger(__name__)
         self.logger.info('creating an instance of popy')
-        
+        self.verbose = verbose
         if(instrum == "OMI"):
             k1 = 4
             k2 = 2
@@ -3424,7 +3424,7 @@ class popy(object):
                           block_ymesh[iblock],oversampling_list,\
                           self.instrum,self.error_model, \
                           self.k1,self.k2,self.k3,
-                          xmargin,ymargin,iblock) for iblock in range(nblock) ) )
+                          xmargin,ymargin,iblock,self.verbose) for iblock in range(nblock) ) )
 #        pp = multiprocessing.Pool(ncores)
 #        l3_data_list = pp.map( F_block_regrid_wrapper, \
 #                        ((block_l2g_data[iblock],block_xmesh[iblock],\

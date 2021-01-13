@@ -28,7 +28,7 @@ control['minimal qa_value'] = 0.5
 control['if exclude row anomaly'] = True
 control['oversampling list'] = ['dx','x','column_amount','ws','sp']
 control['how many cores'] = 10
-
+control['if verbose'] = True
 with open('/home/kangsun/RRNES/control.txt', 'w') as stream:
     yaml.dump(control, stream,sort_keys=False)
 '''
@@ -46,7 +46,11 @@ import logging
 import matplotlib.pyplot as plt
 sys.path.append(control['popy directory'])
 from popy import popy, F_collocate_l2g
-logging.basicConfig(level=logging.INFO)
+if 'if verbose' not in control.keys(): control['if verbose']=False
+if control['if verbose']:
+    logging.basicConfig(level=logging.INFO)
+else:
+    logging.basicConfig(level=logging.WARNING)
 from scipy.io import loadmat
 from calendar import monthrange
 from matplotlib import path
@@ -130,7 +134,7 @@ for year in range(start_year,end_year+1):
                  north=basin_boundary['maxlat3'].squeeze(),
                  start_year=year,start_month=month,start_day=1,
                  end_year=year,end_month=month,end_day=monthrange(year,month)[-1],
-                 grid_size=grid_size)
+                 grid_size=grid_size,verbose=control['if verbose'])
         if if_ai:
             ai = popy(instrum=control['which sensor'],
                       product='AI',
@@ -140,7 +144,7 @@ for year in range(start_year,end_year+1):
                       north=basin_boundary['maxlat3'].squeeze(),
                       start_year=year,start_month=month,start_day=1,
                       end_year=year,end_month=month,end_day=monthrange(year,month)[-1],
-                      grid_size=grid_size)
+                      grid_size=grid_size,verbose=control['if verbose'])
             ai.F_mat_reader(os.path.join(control['AI level 2g directory'],
                                     control['AI level 2g file header']
                                     +'_%04d'%year+'_%02d'%month+'.mat'))

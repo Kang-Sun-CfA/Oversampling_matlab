@@ -398,7 +398,7 @@ class RRNES(object):
 #        self.logger.info('fitting year %d'%monthlyDict['NO2']['year_vec']+', month %d'%monthlyDict['NO2']['month_vec'])
         xData = monthlyDict['NO2']['ime_ws']
         if 'ime_C_bg' not in monthlyDict['NO2'].keys():
-            self.logger.warning('background column does not exist! use zeros')
+            #self.logger.warning('background column does not exist! use zeros')
             yBG = xData*0.
         else:
             yBG = monthlyDict['NO2']['ime_C_bg']
