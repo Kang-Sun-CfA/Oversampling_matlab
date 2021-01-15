@@ -1359,6 +1359,30 @@ class popy(object):
             (outp['latc'].shape[0],1)).astype(np.int16)
         return outp
     
+    def F_read_BEHR_h5(self,fn,data_fields,data_fields_l2g=[]):
+        
+        import h5py
+        outp = {}
+        swath_count = 0
+        f = h5py.File(fn,mode='r')
+        for swath in f['Data'].keys():
+            try:
+                for (i,field) in enumerate(data_fields):
+                    if swath_count == 0:
+                        outp[data_fields_l2g[i]] = f['Data'][swath][field][:]
+                    else:
+                        outp[data_fields_l2g[i]] = np.concatenate((outp[data_fields_l2g[i]],f['Data'][swath][field][:]),axis=1)                
+                swath_count = swath_count+1
+            except:# Exception as e:
+                self.logger.warning('BEHR '+swath+' cannot be read!')
+        outp['Time'] = np.tile(outp['Time'],(outp['latc'].shape[0],1)).astype(np.float64)#BEHR Time is float32, not accurate
+        outp['UTC_matlab_datenum'] = outp['Time']/86400.+727930.
+        outp['across_track_position'] = np.tile(np.arange\
+                        (1.,outp['latc'].shape[1]+1),\
+                        (outp['latc'].shape[0],1)).astype(np.int16)
+        f.close()
+        return outp        
+    
     def F_read_he5(self,fn,swathname,data_fields,geo_fields,data_fields_l2g=[],geo_fields_l2g=[]):
         import h5py
         outp_he5 = {}
@@ -2373,8 +2397,111 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
+    def F_subset_BEHR(self,path,l2_path_structure='OMI_BEHR-DAILY_US_v3-0B_%Y%m/',
+                       data_fields=[],data_fields_l2g=[]):
+        '''
+        subsetting behr no2 level 2 product
+        written on 2021/01/14
+        '''
+        if os.path.isfile(path):
+            self.F_update_popy_with_control_file(path)
+            l2_list = self.l2_list
+            l2_dir = self.l2_dir
+        else:
+            import glob
+            l2_dir = path
+            l2_list = []
+            cwd = os.getcwd()
+            os.chdir(l2_dir)
+            start_date = self.start_python_datetime.date()
+            end_date = self.end_python_datetime.date()
+            days = (end_date-start_date).days+1
+            DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+            for DATE in DATES:
+                if l2_path_structure == None:
+                    flist = glob.glob('OMI_BEHR-DAILY_US_*'+DATE.strftime("%Y%m%d")+'*.hdf')
+                else:
+                    flist = glob.glob(DATE.strftime(l2_path_structure)+\
+                                      'OMI_BEHR-DAILY_US_*'+DATE.strftime("%Y%m%d")+'*.hdf')
+                l2_list = l2_list+flist
+            
+            os.chdir(cwd)
+            self.l2_dir = l2_dir
+            self.l2_list = l2_list
+        if not data_fields:
+            data_fields = ['CloudFraction','CloudPressure','TerrainReflectivity',\
+                           'BEHRColumnAmountNO2Trop','ColumnAmountNO2TropStd',
+                           'BEHRNO2apriori','BEHRAvgKernels','BEHRPressureLevels',
+                           'BEHRQualityFlags','VcdQualityFlags',\
+                           'XTrackQualityFlags','BEHRSurfacePressure','BEHRTropopausePressure',
+                           'Latitude','Longitude','Time','SolarZenithAngle','FoV75CornerLatitude','FoV75CornerLongitude']
+            data_fields_l2g = ['cloud_fraction','cloud_pressure','albedo',\
+                               'column_amount','column_uncertainty',
+                               'BEHRNO2apriori','BEHRAvgKernels','BEHRPressureLevels',
+                               'BEHRQualityFlags','VcdQualityFlags',\
+                               'XTrackQualityFlags','surface_pressure','tropopause_pressure',
+                               'latc','lonc','Time','SolarZenithAngle','FoV75CornerLatitude','FoV75CornerLongitude']
+        maxsza = self.maxsza
+        maxcf = self.maxcf
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        start_date = self.start_python_datetime.date()
+        end_date = self.end_python_datetime.date()
+        days = (end_date-start_date).days+1
+        DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+        l2g_data = {}
+        for fn in l2_list:
+            file_path = os.path.join(l2_dir,fn)
+            self.logger.info('loading '+fn)
+            try:
+                outp_h5 = self.F_read_BEHR_h5(file_path,data_fields,data_fields_l2g)
+            except:
+                self.logger.warning(fn+' cannot be read!')
+                continue
+            f1 = outp_h5['SolarZenithAngle'] <= maxsza
+            f2 = outp_h5['cloud_fraction'] <= maxcf
+            f3 = (outp_h5['VcdQualityFlags'] == 0) & \
+            ((outp_h5['XTrackQualityFlags'] == 0) | (outp_h5['XTrackQualityFlags'] == 255)) & \
+            (outp_h5['BEHRQualityFlags']%2 == 0)
+            f4 = outp_h5['latc'] >= south
+            f5 = outp_h5['latc'] <= north
+            tmplon = outp_h5['lonc']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp_h5['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp_h5['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+            self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            l2g_data0 = {}
+            if np.sum(validmask) == 0:
+                continue
+            # some omno2 fov is not consistently defined
+            pixcor_dim = outp_h5['FoV75CornerLatitude'].shape.index(4)
+            Lat_lowerleft = np.take(outp_h5['FoV75CornerLatitude'],0,axis=pixcor_dim)[validmask]
+            Lat_upperleft = np.take(outp_h5['FoV75CornerLatitude'],3,axis=pixcor_dim)[validmask]
+            Lat_lowerright = np.take(outp_h5['FoV75CornerLatitude'],1,axis=pixcor_dim)[validmask]
+            Lat_upperright = np.take(outp_h5['FoV75CornerLatitude'],2,axis=pixcor_dim)[validmask]
+            Lon_lowerleft = np.take(outp_h5['FoV75CornerLongitude'],0,axis=pixcor_dim)[validmask]
+            Lon_upperleft = np.take(outp_h5['FoV75CornerLongitude'],3,axis=pixcor_dim)[validmask]
+            Lon_lowerright = np.take(outp_h5['FoV75CornerLongitude'],1,axis=pixcor_dim)[validmask]
+            Lon_upperright = np.take(outp_h5['FoV75CornerLongitude'],2,axis=pixcor_dim)[validmask]
+            l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
+            l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+            for key in outp_h5.keys():
+                if key not in {'VcdQualityFlags','XTrackQualityFlags','FoV75CornerLatitude','FoV75CornerLongitude','TimeUTC','BEHRQualityFlags'}:
+                    l2g_data0[key] = outp_h5[key][validmask]
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
+        
     def F_subset_OMNO2(self,path,l2_path_structure=None,
-                       data_fields=[],data_fields_l2g=[],):
+                       data_fields=[],data_fields_l2g=[]):
         """ 
         function to subset omno2, nasa sp level 2 data, calling self.F_read_he5
         path:
@@ -3012,6 +3139,7 @@ class popy(object):
             cb = fig.colorbar(collection,ax=ax,label=plot_field)
             plt.xlim((self.west,self.east))
             plt.ylim((self.south,self.north))
+            m = None
         if vmin != None:
             collection.set_clim(vmin=vmin)
         if vmax != None:
