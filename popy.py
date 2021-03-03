@@ -230,6 +230,7 @@ def F_interp_merra2(sounding_lon,sounding_lat,sounding_datenum,\
     fn_header:
         following nasa ges disc naming
     created on 2020/03/09
+    noted on 2021/03/01 that some troppt is masked
     """
     import glob
     from scipy.interpolate import RegularGridInterpolator
@@ -675,7 +676,7 @@ def F_ncread_selective(fn,varnames):
     ncid = Dataset(fn,'r')
     outp = {}
     for varname in varnames:
-        outp[varname] = ncid.variables[varname][:]
+        outp[varname] = ncid.variables[varname][:].filled(np.nan)
     ncid.close()
     return outp
 
@@ -1167,7 +1168,7 @@ class popy(object):
         self.end_matlab_datenum = end_matlab_datenum
         self.show_progress = True
     
-    def F_mat_reader(self,mat_filename):
+    def F_mat_reader(self,mat_filename,boundary_polygon=None):
         import scipy.io
         
         mat_data = scipy.io.loadmat(mat_filename)
@@ -1193,8 +1194,8 @@ class popy(object):
             elif key_name == 'utc':
                 l2g_data['UTC_matlab_datenum'] = mat_data['output_subset']['utc'][0][0].flatten()
             else:
-                l2g_data[key_name] = mat_data['output_subset'][key_name][0][0].flatten()
-                #exec(key_name + " =  mat_data['output_subset'][key_name][0][0].flatten()")
+                l2g_data[key_name] = mat_data['output_subset'][key_name][0][0].squeeze()
+#                #exec(key_name + " =  mat_data['output_subset'][key_name][0][0].flatten()")
                 #exec('l2g_data[key_name]=' + key_name)
         
         west = self.west
@@ -1212,6 +1213,16 @@ class popy(object):
         (l2g_data['latc'] >= south) & (l2g_data['latc'] <= north) &\
         (l2g_data['UTC_matlab_datenum'] >= start_matlab_datenum) &\
         (l2g_data['UTC_matlab_datenum'] <= end_matlab_datenum)
+        
+        if 'cloud_fraction' in l2g_data.keys():
+            validmask = validmask & (l2g_data['cloud_fraction'] <=self.maxcf)
+            self.logger.info('cloud fraction filter is applied')
+        if 'SolarZenithAngle' in l2g_data.keys():
+            validmask = validmask & (l2g_data['SolarZenithAngle'] <=self.maxsza)
+            self.logger.info('solar zenith angle filter is applied')
+        if 'qa_value' in l2g_data.keys():
+            validmask = validmask & (l2g_data['qa_value'] >=self.min_qa_value)
+            self.logger.info('qa value filter is applied')
         
         nl20 = len(l2g_data['latc'])
         min_time = datedev_py(
@@ -1232,7 +1243,33 @@ class popy(object):
         del mat_data    
         self.l2g_data = l2g_data
         self.nl2 = nl2
+        if boundary_polygon is not None:
+            self.logger.info('boundary polygon provided, further filtering l2g pixels...')
+            self.F_mask_l2g_with_boundary(boundary_polygon=boundary_polygon,center_only=False)
     
+    def F_load_l3_mat(self,l3_filename,boundary_polygon=None):
+        '''
+        load l3 mat files to l3_data dictionary
+        written by Kang Sun on 2021/02/25
+        '''
+        from scipy.io import loadmat
+        d = loadmat(l3_filename)
+        d.pop('__globals__')
+        d.pop('__header__')
+        d.pop('__version__')
+        
+        l3_data = {k:v.squeeze() for (k,v) in d.items()}
+        if boundary_polygon is not None:
+            self.logger.info('boundary polygon provided, masking out-of-boundary grid cells...')
+            [xmesh,ymesh] = np.meshgrid(l3_data['xgrid'],l3_data['ygrid'])
+            xlin = xmesh.reshape(-1)
+            ylin = ymesh.reshape(-1)
+            mask=~boundary_polygon.contains_points(np.hstack((xlin[:,np.newaxis],ylin[:,np.newaxis]))).reshape(xmesh.shape)
+            for (k,v) in l3_data.items():
+                if len(v.shape) == 2:
+                    l3_data[k][mask] = np.nan
+        return l3_data    
+        
     def F_merge_l2g_data(self,l2g_data0,l2g_data1):
         if not l2g_data0:
             return l2g_data1
@@ -1607,8 +1644,8 @@ class popy(object):
             Lon_upperleft = outp_he5['PixelCornerLongitudes'][1:,0:-1][validmask]
             Lon_lowerright = outp_he5['PixelCornerLongitudes'][0:-1,1:][validmask]
             Lon_upperright = outp_he5['PixelCornerLongitudes'][1:,1:][validmask]
-            l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
-            l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+            l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright)).astype(np.float32)
+            l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright)).astype(np.float32)
             for key in outp_he5.keys():
                 if key not in {'MainDataQualityFlag','PixelCornerLatitudes',\
                                'PixelCornerLongitudes','TimeUTC','XtrackQualityFlagsExpanded',\
@@ -2398,7 +2435,9 @@ class popy(object):
             self.nl2 = len(l2g_data['latc'])
     
     def F_subset_BEHR(self,path,l2_path_structure='OMI_BEHR-DAILY_US_v3-0B_%Y%m/',
-                       data_fields=[],data_fields_l2g=[]):
+                       data_fields=[],data_fields_l2g=[],
+                       met_dir=None,
+                       boundary_polygon=None):
         '''
         subsetting behr no2 level 2 product
         written on 2021/01/14
@@ -2494,11 +2533,42 @@ class popy(object):
                 if key not in {'VcdQualityFlags','XTrackQualityFlags','FoV75CornerLatitude','FoV75CornerLongitude','TimeUTC','BEHRQualityFlags'}:
                     l2g_data0[key] = outp_h5[key][validmask]
             l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        # standardize pressure from hPa to Pa
+        l2g_data['surface_pressure'] = l2g_data['surface_pressure']*100
+        l2g_data['tropopause_pressure'] = l2g_data['tropopause_pressure']*100
+        l2g_data['cloud_pressure'] = l2g_data['cloud_pressure']*100
+        l2g_data['BEHRPressureLevels'] = l2g_data['BEHRPressureLevels']*100
+        #kludge to remove fill values in behr
+        l2g_data['BEHRNO2apriori'][l2g_data['BEHRNO2apriori'] < -1] = np.nan
+        if np.sum(l2g_data['BEHRNO2apriori'] > 1e-4) > 0:
+            self.logger.warning('BEHR gives {} > 100 ppm NO2'.format(np.sum(l2g_data['BEHRNO2apriori'] > 1e-4)))
+            l2g_data['BEHRNO2apriori'][l2g_data['BEHRNO2apriori'] > 1e-4] = np.nan
+        l2g_data['BEHRPressureLevels'][l2g_data['BEHRPressureLevels'] < -1] = np.nan
         self.l2g_data = l2g_data
         if not l2g_data:
             self.nl2 = 0
         else:
             self.nl2 = len(l2g_data['latc'])
+        if boundary_polygon is not None:
+            self.F_mask_l2g_with_boundary(boundary_polygon=boundary_polygon,center_only=False)
+        # if met_dir is provided, sample pblh and calculate model subcolumns from provided a priori profile
+        if met_dir is not None:
+            self.logger.info('Sample pblh at BEHR sounding locations and calculate subcolumns')
+            self.F_interp_met(which_met='ERA5',met_dir=met_dir,interp_fields=['blh','sp'])
+            self.l2g_data['era5_pbltop'] = self.l2g_data['era5_sp']*np.exp(-self.l2g_data['era5_blh']/7500.)
+            self.F_derive_model_subcolumn(pressure_boundaries=['ps','pbl','tropopause'],
+                                          pbl_multiplier=[2.5],
+                                          min_pbltop_dp=300.,
+                                          max_pbltop_dp=400.,
+                                          surface_pressure_field='surface_pressure',
+                                          tropopause_field='tropopause_pressure',
+                                          pbltop_field='era5_pbltop',
+                                          profile_field='BEHRNO2apriori',
+                                          plevel_field='BEHRPressureLevels',
+                                          subcolumn_field_header='behr_')
+            # remove profiles to lighten l2g files
+            # self.F_remove_l2g_fields(['BEHRNO2apriori','BEHRPressureLevels'])
+            
         
     def F_subset_OMNO2(self,path,l2_path_structure=None,
                        data_fields=[],data_fields_l2g=[]):
@@ -3177,7 +3247,7 @@ class popy(object):
         for key in l2g_data.keys():
             if key not in {'UTC_matlab_datenum','utc','ift','across_track_position','xa_type'}:
                 l2g_data[key] = np.float32(l2g_data[key])
-            if key not in {'latr','lonr'}:
+            if len(l2g_data[key].shape)==1:#key not in {'latr','lonr'}:
                 l2g_data[key] = l2g_data[key].reshape(len(l2g_data[key]),1)
             else:# otherwise, the order of 2d array is COMPLETELY screwed
                 l2g_data[key] = np.asfortranarray(l2g_data[key])
@@ -4344,10 +4414,16 @@ class popy(object):
     
     def F_derive_model_subcolumn(self,pressure_boundaries=['ps','pbl',600,'tropopause',0],
                                  pbl_multiplier=[2.5],
-                                 min_pbltop_pressure=600.,
+                                 min_pbltop_pressure=None,
+                                 max_pbltop_pressure=None,
+                                 min_pbltop_dp=300.,
+                                 max_pbltop_dp=400.,
                                  surface_pressure_field='merra2_PS',
                                  tropopause_field='merra2_TROPPT',
-                                 pbltop_field='merra2_PBLTOP'):
+                                 pbltop_field='merra2_PBLTOP',
+                                 profile_field=None,
+                                 plevel_field=None,
+                                 subcolumn_field_header=''):
         """
         derive subcolumns using interpolated model profiles and stored the results
         in l2g_data
@@ -4359,6 +4435,9 @@ class popy(object):
             a list the same size as the number of appearances of 'pbl' in pressure_boundaries
         min_pbltop_pressure:
             the min pressure (highest altitude) that is allowed for the boundaries related to the pbl
+            unit is ***hPa***
+        max_pbltop_pressure:
+            the max pressure (lowest altitude) that is allowed for the boundaries related to the pbl
             unit is ***hPa***
         surface_pressure_field:
             surface pressure in l2g_data dictionary
@@ -4375,11 +4454,25 @@ class popy(object):
         if tropopause_field not in self.l2g_data.keys() and 'tropopause' in pressure_boundaries:
             self.logger.warning(tropopause_field+' is not in l2g_data!')
             return
-        if 'gcrs_'+self.product+'_profiles' not in self.l2g_data.keys():
-            self.logger.warning('Please run popy.F_interp_profiles first!')
-            return
-        sounding_profile = self.l2g_data['gcrs_'+self.product+'_profiles']
-        sounding_pEdge = self.l2g_data['gcrs_plevel']
+        # if 'gcrs_'+self.product+'_profiles' not in self.l2g_data.keys():
+        #     self.logger.warning('Please run popy.F_interp_profiles first!')
+        #     return
+        if profile_field is None:
+            # gcrs profile is in ppb, convert to parts per part
+            sounding_profile = self.l2g_data['gcrs_'+self.product+'_profiles']*1e-9
+        else:
+            sounding_profile = self.l2g_data[profile_field]
+        if plevel_field is None:
+            sounding_pEdge = self.l2g_data['gcrs_plevel']
+        else:
+            sounding_pEdge = self.l2g_data[plevel_field]
+        if sounding_pEdge.shape[-1] == sounding_profile.shape[-1]:
+            if_behr = True
+            self.logger.info('this appears to be behr, plevel has the same size as profile and need a padded zero')
+        else:
+            if_behr = False
+        #     self.logger.warning('pressure level should have one more element than profile, padding with zeros...')
+        #     sounding_pEdge = np.concatenate((sounding_pEdge,np.zeros((self.nl2,1))),axis=1)
         sfc_pressure = self.l2g_data[surface_pressure_field]
         pbltop_pressure = self.l2g_data[pbltop_field]
         tropopause_pressure = self.l2g_data[tropopause_field]
@@ -4396,44 +4489,89 @@ class popy(object):
         for ip in range(len(pressure_boundaries)):
             if ip == ps_idx[0]:
                 num_pressure_boundaries[:,ip] = sfc_pressure
-                msg_str = msg_str+' surface pressure ([%.1f'%(np.min(sfc_pressure)/1e2)+',%.1f] hPa)'%(np.max(sfc_pressure)/1e2)
+                msg_str = msg_str+' surface pressure ([%.1f'%(np.nanmin(sfc_pressure)/1e2)+',%.1f] hPa)'%(np.nanmax(sfc_pressure)/1e2)
             elif ip == pt_idx[0]:
                 num_pressure_boundaries[:,ip] = tropopause_pressure
-                msg_str = msg_str+' tropopause pressure ([%.1f'%(np.min(tropopause_pressure)/1e2)+',%.1f] hPa)'%(np.max(tropopause_pressure)/1e2)
+                msg_str = msg_str+' tropopause pressure ([%.1f'%(np.nanmin(tropopause_pressure)/1e2)+',%.1f] hPa)'%(np.nanmax(tropopause_pressure)/1e2)
             elif ip in pbltop_idxs:
                 tmp = sfc_pressure-(sfc_pressure-pbltop_pressure)*pbl_multiplier[count_pbl]
-                tmp[tmp < min_pbltop_pressure*100] = min_pbltop_pressure*100
+                if min_pbltop_pressure is not None:
+                    tmp[tmp < min_pbltop_pressure*100] = min_pbltop_pressure*100
+                    tmp[tmp > max_pbltop_pressure*100] = max_pbltop_pressure*100
+                else:
+                    tmp[sfc_pressure-tmp < min_pbltop_dp*100] = sfc_pressure[sfc_pressure-tmp < min_pbltop_dp*100]-min_pbltop_dp*100
+                    tmp[sfc_pressure-tmp > max_pbltop_dp*100] = sfc_pressure[sfc_pressure-tmp > max_pbltop_dp*100]-max_pbltop_dp*100
                 num_pressure_boundaries[:,ip] = tmp
-                msg_str = msg_str+' %.1f'%(pbl_multiplier[count_pbl])+' x pbl thickness ([%.1f'%(np.min(tmp)/1e2)+',%.1f] hPa)'%(np.max(tmp)/1e2)
+                msg_str = msg_str+' %.1f'%(pbl_multiplier[count_pbl])+' x pbl thickness ([%.1f'%(np.nanmin(tmp)/1e2)+',%.1f] hPa)'%(np.nanmax(tmp)/1e2)
                 count_pbl = count_pbl+1
             else:# hPa to Pa
                 num_pressure_boundaries[:,ip] = np.float(pressure_boundaries[ip])*1e2
                 msg_str = msg_str+' %.1f hPa'%(np.float(pressure_boundaries[ip]))
         self.logger.info(msg_str)
-        self.num_pressure_boundaries = num_pressure_boundaries
+        self.l2g_data[subcolumn_field_header+'num_pressure_boundaries'] = num_pressure_boundaries
         nl2 = self.nl2
         count = 0
         self.logger.info('Looping through l2g pixels to calculate subcolumns. could be slow...')
         for il2 in range(self.nl2):
             local_pressure_boundaries = num_pressure_boundaries[il2,]
             local_plevel = sounding_pEdge[il2,:]
+            #kludge to remove fill values in behr
+            local_gas = sounding_profile[il2,:]
+            if if_behr:
+                localmask = ~np.isnan(local_gas)
+                local_gas = local_gas[localmask]
+                local_plevel = local_plevel[localmask]
+                local_plevel = np.append(local_plevel,0)
             # subcolum of each layer, in mol/m2
-            local_gas = sounding_profile[il2,:]*1e-9*np.abs(np.diff(local_plevel))/9.8/0.029
+            local_gas = local_gas*np.abs(np.diff(local_plevel))/9.8/0.029
             cum_gas = np.concatenate(([0.],np.cumsum(local_gas)))
             # 1d interpolation function, cumulated mass from ps
             f = interp1d(local_plevel,cum_gas,fill_value='extrapolate')
             sfc2p_subcol = np.array([f(pb) for pb in local_pressure_boundaries])
             subcolumns[il2,] = np.diff(sfc2p_subcol)
             # interpolating vmr at pressure boundaries
-            fvmr = interp1d(local_plevel[0:-1],sounding_profile[il2,:],fill_value='extrapolate')
+            if if_behr:
+                fvmr = interp1d(local_plevel[0:-1],sounding_profile[il2,localmask],fill_value='extrapolate')
+            else:
+                fvmr = interp1d(local_plevel[0:-1],sounding_profile[il2,],fill_value='extrapolate')
             vmr_pressure_boundaries[il2,] = np.array([fvmr(pb) for pb in local_pressure_boundaries])
             if il2 == count*np.round(nl2/10.):
                 self.logger.info('%d%% finished' %(count*10))
                 count = count + 1
-        self.l2g_data['sub_columns'] = subcolumns
-        self.pressure_boundaries = pressure_boundaries
-        self.vmr_pressure_boundaries = vmr_pressure_boundaries
-            
+        self.l2g_data[subcolumn_field_header+'sub_columns'] = subcolumns.astype(np.float32)
+        setattr(self,subcolumn_field_header+'pressure_boundaries',pressure_boundaries)
+        self.l2g_data[subcolumn_field_header+'vmr_pressure_boundaries'] = vmr_pressure_boundaries
+    
+    def F_mask_l2g_with_boundary(self,boundary_polygon=None,boundary_x=None,boundary_y=None,center_only=False):
+        '''
+        carve out l2 pixels within the boundary
+        boundary_polygon:
+            boundary polygon construct from path.Path()
+        boundary_x:
+            longitude of boundary
+        boundary_y:
+            latitude of boundary
+        center_only:
+            if True, consider pixels as points at centroids, works only for quadrilaterals for now
+        written by Kang Sun on 2021/02/21
+        '''
+        if boundary_polygon is None:
+            if boundary_x is None:
+                self.logger.warning('all empty!')
+                return
+            from matplotlib import path
+            boundary_polygon = path.Path([(boundary_x[i],boundary_y[i]) for i in range(len(boundary_x))])
+        all_points = np.hstack((self.l2g_data['lonc'][:,np.newaxis],self.l2g_data['latc'][:,np.newaxis]))
+        mask = boundary_polygon.contains_points(all_points)
+        self.logger.info('reducing from {} pixels to {} pixels'.format(self.nl2,np.sum(mask)))
+        if not center_only and 'latr' in self.l2g_data.keys():
+            for icorner in range(4):
+                all_points = np.hstack((self.l2g_data['lonr'][:,icorner,np.newaxis],self.l2g_data['latr'][:,icorner,np.newaxis]))
+                mask = mask | boundary_polygon.contains_points(all_points)
+            self.logger.info('adjusting to {} pixels after considering corners'.format(np.sum(mask)))
+        self.nl2 = np.sum(mask)
+        self.l2g_data = {k:v[mask,] for (k,v) in self.l2g_data.items()}
+        
     def F_remove_l2g_fields(self,fields_to_remove):
         """
         sometimes we don't want some fields in the l2g data anymore, e.g., the 
