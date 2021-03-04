@@ -4294,16 +4294,21 @@ class popy(object):
         savemat(file_path,C)
     
     def F_vertically_weighted_wind(self,which_met,met_dir,
-                                 fn_header='',nlevel=10):
+                                 fn_header='',nlevel=10,fix_height=None):
         '''
         sample vertically weighted wind from 3D met data
         created on 2020/09/22
+        updated on 2021/03/03 to include the fix_height (m) option. 
+        by default use era5 blh, otherwise use scalar input in meter
         '''
         sounding_lon = self.l2g_data['lonc']
         sounding_lat = self.l2g_data['latc']
         sounding_datenum = self.l2g_data['UTC_matlab_datenum']
         sounding_p0 = self.l2g_data['era5_sp']
-        sounding_p1 = self.l2g_data['era5_sp']*np.exp(-self.l2g_data['era5_blh']/7500)
+        if fix_height is None:
+            sounding_p1 = self.l2g_data['era5_sp']*np.exp(-self.l2g_data['era5_blh']/7500)
+        else:
+            sounding_p1 = self.l2g_data['era5_sp']*np.exp(-fix_height/7500)
         if which_met in {'era','era5','ERA','ERA5'}:
             if not fn_header:
                 fn_header_local = 'CONUS'
@@ -4315,8 +4320,12 @@ class popy(object):
                                                era5_dir=met_dir,interp_fields=['u','v'],
                                                fn_header=fn_header_local)
             self.logger.info('averaging 3D wind vertically...')
-            self.l2g_data['era5_ubar'] = np.nanmean(sounding_interp['u'],axis=1)
-            self.l2g_data['era5_vbar'] = np.nanmean(sounding_interp['v'],axis=1)
+            if fix_height is None:
+                self.l2g_data['era5_ubar'] = np.nanmean(sounding_interp['u'],axis=1)
+                self.l2g_data['era5_vbar'] = np.nanmean(sounding_interp['v'],axis=1)
+            else:
+                self.l2g_data['era5_ubar_{:.0f}'.format(fix_height)] = np.nanmean(sounding_interp['u'],axis=1)
+                self.l2g_data['era5_vbar_{:.0f}'.format(fix_height)] = np.nanmean(sounding_interp['v'],axis=1)
             
         
     def F_interp_profile(self,which_met,met_dir,if_monthly=False,
