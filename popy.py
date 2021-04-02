@@ -676,7 +676,11 @@ def F_ncread_selective(fn,varnames):
     ncid = Dataset(fn,'r')
     outp = {}
     for varname in varnames:
-        outp[varname] = ncid.variables[varname][:].filled(np.nan)
+        try:
+            outp[varname] = ncid.variables[varname][:].filled(np.nan)
+        except:
+            logging.warning('varname appears to be integer and cannot be filed with nan')
+            outp[varname] = ncid.variables[varname][:].filled(-999)
     ncid.close()
     return outp
 
