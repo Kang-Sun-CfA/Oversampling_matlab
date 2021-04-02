@@ -2974,6 +2974,106 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
+    def F_subset_IASINH3(self,path,which_metop='A',
+                         l2_path_structure=None,
+                         ellipse_lut_path='daysss.mat'):
+        '''
+        function to subset IASI NH3 level2 files
+        path:
+            l2 data root directory, only flat l2 file structure is supported
+        which_metop:
+            iasi-a or iasi-b
+        l2_path_structure:
+            None indicates that individual files are directly under path;
+            '%Y/' if files are like l2_dir/2017/*.nc;
+            '%Y/%m/%d/' if files are like l2_dir/2017/05/01/*.nc
+        ellipse_lut_path:
+            path to a look up table storing u, v, and t data to reconstruct IASI pixel ellipsis
+        created on 2021/04/01 based on CrIS subset and matlab-based iasi subset function, work for iasi v3
+        '''
+        # find out list of l2 files to subset
+        import glob
+        from scipy.io import loadmat
+        from scipy.interpolate import RegularGridInterpolator
+        l2_dir = path
+        l2_list = []
+        cwd = os.getcwd()
+        os.chdir(l2_dir)
+        start_date = self.start_python_datetime.date()
+        end_date = self.end_python_datetime.date()
+        days = (end_date-start_date).days+1
+        DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+        for DATE in DATES:
+            if l2_path_structure == None:
+                flist = glob.glob('IASI_METOP'+which_metop+'_L2_NH3_'+DATE.strftime("%Y%m%d")+'*.nc')
+            else:
+                flist = glob.glob(DATE.strftime(l2_path_structure)+\
+                                  'IASI_METOP'+which_metop+'_L2_NH3_'+DATE.strftime("%Y%m%d")+'*.nc')
+            l2_list = l2_list+flist
+        
+        os.chdir(cwd)
+        self.l2_dir = l2_dir
+        self.l2_list = l2_list
+        
+        varnames = ['time','latitude','longitude','solar_zenith_angle',
+                    'pixel_number','cloud_coverage','AMPM',
+                    'nh3_total_column','nh3_total_column_uncertainty']
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        l2g_data = {}
+        pixel_lut = loadmat(ellipse_lut_path)
+        f_uuu = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,121)),pixel_lut['uuu4']) 
+        f_vvv = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,121)),pixel_lut['vvv4']) 
+        f_ttt = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,121)),pixel_lut['ttt4']) 
+        ref_dt = datetime.datetime(2007,1,1,0,0,0)
+        for fn in l2_list:
+            file_path = os.path.join(l2_dir,fn)
+            self.logger.info('loading '+fn)
+            try:
+                outp = F_ncread_selective(file_path,varnames)
+            except:
+                self.logger.warning(fn+' cannot be read!')
+                continue
+            
+            outp['UTC_matlab_datenum'] = np.array([datetime2datenum(ref_dt+datetime.timedelta(seconds=t)) for t in outp['time']])
+            f1 = outp['cloud_coverage']/100 < self.maxcf
+            f2 = ~np.isnan(outp['nh3_total_column'])
+            f3 = outp['AMPM'] == 0
+            f4 = outp['latitude'] >= south
+            f5 = outp['latitude'] <= north
+            tmplon = outp['longitude']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+            self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            l2g_data0 = {}
+            if np.sum(validmask) == 0:
+                continue
+            l2g_data0['ifov'] = outp['pixel_number'][validmask]
+            l2g_data0['latc'] = outp['latitude'][validmask]
+            l2g_data0['lonc'] = outp['longitude'][validmask]
+            # find out elliptical parameters using lookup table            
+            l2g_data0['u'] = f_uuu((l2g_data0['latc'],l2g_data0['ifov']))
+            l2g_data0['v'] = f_vvv((l2g_data0['latc'],l2g_data0['ifov']))
+            l2g_data0['t'] = f_ttt((l2g_data0['latc'],l2g_data0['ifov']))
+            l2g_data0['column_amount'] = outp['nh3_total_column'][validmask]
+            l2g_data0['column_uncertainty'] = outp['nh3_total_column_uncertainty'][validmask]/100*outp['nh3_total_column'][validmask]
+            l2g_data0['UTC_matlab_datenum'] = outp['UTC_matlab_datenum'][validmask]
+            l2g_data0['SolarZenithAngle'] = outp['solar_zenith_angle'][validmask]
+            l2g_data0['cloud_fraction'] = outp['cloud_coverage'][validmask]/100
+            
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
+        
     def F_subset_CrISNH3(self,path,l2_path_structure='%Y/%m/%d/',ellipse_lut_path='CrIS_footprint.mat'):
         """ 
         function to subset CrIS NH3 level2 files
@@ -3154,6 +3254,64 @@ class popy(object):
         if vmax != None:
             plt.clim(vmax=vmax)
         return pc,fig,ax,m,cb
+    
+    def F_plot_l2g_cartopy(self,plot_field='column_amount',
+                           max_day=1,l2g_data=None,
+                           x_wind_field='era5_u100',y_wind_field='era5_v100',
+                           **kwargs):
+        '''
+        l2g plotting utility using cartopy
+        plot_field:
+            which field in l2g_data to plot
+        max_day:
+            only plot limited number of days~layers
+        l2g_data:
+            l2g data dictionary supplied externally if None
+        kwargs:
+            arguments to plotting functions
+        created on 2021/04/01
+        '''
+        import matplotlib.pyplot as plt
+        from matplotlib.collections import PolyCollection
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+        if l2g_data == None:
+            l2g_data = self.l2g_data
+        if x_wind_field not in l2g_data.keys():
+            self.logger.warning('wind field not in l2g_data! will not plot wind')
+            x_wind_field=None
+        if 'cmap' not in kwargs.keys():
+            kwargs['cmap'] = 'rainbow'
+        if 'alpha' not in kwargs.keys():
+            kwargs['alpha'] = 1.
+        if 'edgecolor' not in kwargs.keys():
+            kwargs['edgecolor'] = 'none'
+        if 'vmin' not in kwargs.keys():
+            kwargs['vmin'] = np.nanmin(l2g_data[plot_field])
+            kwargs['vmax'] = np.nanmax(l2g_data[plot_field])
+        plot_index = np.where(l2g_data['UTC_matlab_datenum']<=l2g_data['UTC_matlab_datenum'].min()+max_day)
+        if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B","SCIAMACHY","TROPOMI"}:
+            verts = [np.array([l2g_data['lonr'][i,:],l2g_data['latr'][i,:]]).T for i in plot_index[0]]
+        elif self.instrum in {"IASI","CrIS"}:
+            verts = [F_ellipse(l2g_data['v'][i],l2g_data['u'][i],l2g_data['t'][i],20,
+                               l2g_data['lonc'][i],l2g_data['latc'][i])[0].T for i in plot_index[0]]
+        collection = PolyCollection(verts,
+                             array=l2g_data[plot_field],cmap=kwargs['cmap'],edgecolors=kwargs['edgecolor'])
+        collection.set_alpha(kwargs['alpha'])
+        collection.set_clim(vmin=kwargs['vmin'],vmax=kwargs['vmax'])
+        fig,ax = plt.subplots(1,1,figsize=(10,5),
+                       subplot_kw={"projection": ccrs.PlateCarree()})
+        ax.set_extent([self.west, self.east, self.south, self.north], ccrs.Geodetic())
+        ax.add_feature(cfeature.COASTLINE)
+        ax.add_feature(cfeature.BORDERS, edgecolor='gray')
+        ax.add_feature(cfeature.STATES,edgecolor='gray')
+        ax.add_collection(collection)
+        cb = fig.colorbar(collection,ax=ax,label=plot_field,shrink=0.75)
+        fig_output = {}
+        fig_output['fig'] = fig
+        fig_output['ax'] = ax
+        fig_output['cb'] = cb
+        return fig_output
     
     def F_plot_l2g(self,ax=None,plot_field='column_amount',max_day=1,l2g_data=None,
                    alpha=0.7,vmin=None,vmax=None,
