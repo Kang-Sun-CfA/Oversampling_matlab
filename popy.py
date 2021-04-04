@@ -1072,7 +1072,7 @@ class popy(object):
             oversampling_list = ['column_amount']
             xmargin = 2
             ymargin = 2
-            maxsza = 60
+            maxsza = 90
             maxcf = 0.25
         elif(instrum == "CrIS"):
             k1 = 2
@@ -1082,7 +1082,7 @@ class popy(object):
             oversampling_list = ['column_amount']
             xmargin = 2
             ymargin = 2
-            maxsza = 60
+            maxsza = 90
             maxcf = 0.25
             self.mindofs = 0.0
             self.min_Quality_Flag = 3
@@ -1094,7 +1094,7 @@ class popy(object):
             oversampling_list = ['column_amount']
             xmargin = 2
             ymargin = 2
-            maxsza = 60
+            maxsza = 90
             maxcf = 0.25
             self.mindofs = 0.1
         else:
