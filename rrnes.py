@@ -154,16 +154,13 @@ class RRNES(object):
             self.logger.info('loading '+fileName)
             with h5py.File(fileName,mode='r') as f:
                 for key in list(f['/'+self.whichBasin].keys()):
-                    if key not in {'NO2','CO'}:
+                    if key not in self.moleculeList:
                         m[key] = f['/'+self.whichBasin+'/'+key][...].squeeze()
-                    elif key == 'NO2':
-                        m['NO2'] = {}
-                        for k in list(f['/'+self.whichBasin+'/NO2'].keys()):
-                            m['NO2'][k] = f['/'+self.whichBasin+'/NO2/'+k][...].squeeze()
-                    elif key == 'CO':
-                        m['CO'] = {}
-                        for k in list(f['/'+self.whichBasin+'/CO'].keys()):
-                            m['CO'][k] = f['/'+self.whichBasin+'/CO/'+k][...].squeeze()
+                    else:
+                        m[key] = {}
+                        for k in list(f['/'+self.whichBasin+'/'+key].keys()):
+                            m[key][k] = f['/'+self.whichBasin+'/'+key+'/'+k][...].squeeze()
+                    
             monthlyDictArray[ifile] = m
         return monthlyDictArray
     
@@ -398,7 +395,7 @@ class RRNES(object):
 #        self.logger.info('fitting year %d'%monthlyDict['NO2']['year_vec']+', month %d'%monthlyDict['NO2']['month_vec'])
         xData = monthlyDict['NO2']['ime_ws']
         if 'ime_C_bg' not in monthlyDict['NO2'].keys():
-            #self.logger.warning('background column does not exist! use zeros')
+            self.logger.warning('background column does not exist! use zeros')
             yBG = xData*0.
         else:
             yBG = monthlyDict['NO2']['ime_C_bg']

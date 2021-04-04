@@ -4,38 +4,9 @@ Created on Sun Aug  9 22:24:03 2020
 
 @author: kangsun
 """
-
-'''# use this section to generate a control txt file
-import yaml
-control = {}
-control['which air basin'] = 'po'
-control['which molecule'] = 'NO2'
-control['which sensor'] = 'OMI'
-control['level 2g directory'] = '/mnt/Data2/OMNO2/L2g'
-control['level 2g file header'] = 'EU'
-control['popy directory'] = '/home/kangsun/OMI/Oversampling_matlab'
-control['output directory'] = '/home/kangsun/RRNES/omno2_era5'
-control['auxiliary directory'] = '/home/kangsun/RRNES/auxiliary_data'
-control['x wind'] = 'era5_u100'
-control['y wind'] = 'era5_v100'
-control['start year'] = 2020
-control['start month'] = 5
-control['end year'] = 2020
-control['end month'] = 5
-control['maximal cloud fraction'] = 0.3
-control['maximal solar zenith angle'] = 70
-control['minimal qa_value'] = 0.5
-control['if exclude row anomaly'] = True
-control['oversampling list'] = ['dx','x','column_amount','ws','sp']
-control['how many cores'] = 10
-control['if verbose'] = True
-with open('/home/kangsun/RRNES/control.txt', 'w') as stream:
-    yaml.dump(control, stream,sort_keys=False)
-'''
-#%%
 import sys
-control_path = '/home/kangsun/RRNES/control.txt'
-if __name__ == "__main__":
+control_path = 'control.txt'
+if len(sys.argv) > 1:
     control_path = str(sys.argv[1])
 import yaml
 with open(control_path,'r') as stream:
@@ -85,6 +56,9 @@ if control['which sensor'] == 'TROPOMI':
 elif control['which sensor'] == 'OMI':
     block_length = 100
     grid_size = 0.05
+elif control['which sensor'] == 'IASI':
+    block_length = 200
+    grid_size = 0.01
 nv = len(control['oversampling list'])
 
 if 'if exclude fire AI' in control.keys():
@@ -157,6 +131,9 @@ for year in range(start_year,end_year+1):
         p.F_mat_reader(os.path.join(control['level 2g directory'],
                                     control['level 2g file header']
                                     +'_%04d'%year+'_%02d'%month+'.mat'))
+        if p.nl2 == 0:
+            logging.warning('Nothing left in this month!')
+            continue
         l2g_data = p.l2g_data
         # keep only rows 5-23 for OMI if excluding row anomaly
         if control['which sensor'] == 'OMI' and control['if exclude row anomaly']:
@@ -167,8 +144,8 @@ for year in range(start_year,end_year+1):
             mask = (l2g_data['scattering_height'] < 2000.) &\
             (l2g_data['scattering_OD'] < 1.)
             l2g_data = {k:v[mask,] for (k,v) in l2g_data.items()}
-        # standardize column ammount to mol/m2
-        if control['which sensor'] != 'TROPOMI':
+        # standardize column ammount to mol/m2, IASI v3 is already in mol/m2
+        if control['which sensor'] in ['OMI']:
             l2g_data['column_amount'] = l2g_data['column_amount']/6.02214e19
         if 'ws' in control['oversampling list']:
             l2g_data['ws'] = np.sqrt(np.power(l2g_data[control['x wind']],2)
