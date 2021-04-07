@@ -3221,13 +3221,17 @@ class popy(object):
             self.nl2 = len(l2g_data['latc'])
     
     def F_plot_l3_cartopy(self,plot_field='column_amount',l3_data=None,
-                          existing_ax=None,**kwargs):
+                          existing_ax=None,draw_admin_level=1,**kwargs):
         '''
         l3 plotting utility using cartopy
         plot_field:
             which field in l3_data to plot
         l3_data:
             l3 data dictionary supplied externally if None
+        existing_ax:
+            plot on existing axes if supplied
+        draw_admin_level:
+            0 draws countries, 1 draws states
         kwargs:
             arguments to pcolormesh
         created on 2021/04/06
@@ -3236,10 +3240,12 @@ class popy(object):
         import cartopy.crs as ccrs
         import cartopy.feature as cfeature
         if l3_data == None:
-            l3_data = self.C
-            xgrid = self.xgrid;ygrid = self.ygrid
-        else:
+            l3_data = self.C   
+        
+        xgrid = self.xgrid;ygrid = self.ygrid
+        if 'xgrid' in l3_data.keys():
             xgrid = l3_data['xgrid'];ygrid = l3_data['ygrid']
+        
         if self.error_model == 'log' and plot_field == 'column_amount':
             plotdata = np.power(10,l3_data[plot_field])
         else:
@@ -3260,8 +3266,11 @@ class popy(object):
             ax = existing_ax
         ax.set_extent([self.west, self.east, self.south, self.north], ccrs.Geodetic())
         ax.add_feature(cfeature.COASTLINE)
-        ax.add_feature(cfeature.BORDERS, edgecolor='gray')
-        ax.add_feature(cfeature.STATES,edgecolor='gray')
+        if draw_admin_level == 0:
+            ax.add_feature(cfeature.BORDERS, edgecolor='gray')
+        elif draw_admin_level == 1:
+            ax.add_feature(cfeature.BORDERS)
+            ax.add_feature(cfeature.STATES,edgecolor='gray')
         pc = ax.pcolormesh(xgrid,ygrid,plotdata,transform=ccrs.PlateCarree(),
                            alpha=kwargs['alpha'],cmap=kwargs['cmap'],vmin=kwargs['vmin'],vmax=kwargs['vmax'])
         cb = plt.colorbar(pc,ax=ax,label=plot_field,shrink=0.75)
@@ -3313,7 +3322,7 @@ class popy(object):
     def F_plot_l2g_cartopy(self,plot_field='column_amount',
                            max_day=1,l2g_data=None,
                            x_wind_field='era5_u100',y_wind_field='era5_v100',
-                           existing_ax=None,
+                           existing_ax=None,draw_admin_level=1,
                            **kwargs):
         '''
         l2g plotting utility using cartopy
@@ -3366,8 +3375,12 @@ class popy(object):
             ax = existing_ax
         ax.set_extent([self.west, self.east, self.south, self.north], ccrs.Geodetic())
         ax.add_feature(cfeature.COASTLINE)
-        ax.add_feature(cfeature.BORDERS, edgecolor='gray')
-        ax.add_feature(cfeature.STATES,edgecolor='gray')
+        ax.add_feature(cfeature.COASTLINE)
+        if draw_admin_level == 0:
+            ax.add_feature(cfeature.BORDERS, edgecolor='gray')
+        elif draw_admin_level == 1:
+            ax.add_feature(cfeature.BORDERS)
+            ax.add_feature(cfeature.STATES,edgecolor='gray')
         ax.add_collection(collection)
         cb = plt.colorbar(collection,ax=ax,label=plot_field,shrink=0.75)
         if x_wind_field != None:
