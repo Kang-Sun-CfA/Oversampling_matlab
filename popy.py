@@ -3220,6 +3220,57 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
+    def F_plot_l3_cartopy(self,plot_field='column_amount',l3_data=None,
+                          existing_ax=None,**kwargs):
+        '''
+        l3 plotting utility using cartopy
+        plot_field:
+            which field in l3_data to plot
+        l3_data:
+            l3 data dictionary supplied externally if None
+        kwargs:
+            arguments to pcolormesh
+        created on 2021/04/06
+        '''
+        import matplotlib.pyplot as plt
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+        if l3_data == None:
+            l3_data = self.C
+            xgrid = self.xgrid;ygrid = self.ygrid
+        else:
+            xgrid = l3_data['xgrid'];ygrid = l3_data['ygrid']
+        if self.error_model == 'log' and plot_field == 'column_amount':
+            plotdata = np.power(10,l3_data[plot_field])
+        else:
+            plotdata = l3_data[plot_field]
+        if 'cmap' not in kwargs.keys():
+            kwargs['cmap'] = 'rainbow'
+        if 'alpha' not in kwargs.keys():
+            kwargs['alpha'] = 1.
+        if 'vmin' not in kwargs.keys():
+            kwargs['vmin'] = np.nanmin(plotdata)
+            kwargs['vmax'] = np.nanmax(plotdata)
+        if existing_ax is None:
+            self.logger.info('axes not supplied, creating one')
+            fig,ax = plt.subplots(1,1,figsize=(10,5),
+                                  subplot_kw={"projection": ccrs.PlateCarree()})
+        else:
+            fig = None
+            ax = existing_ax
+        ax.set_extent([self.west, self.east, self.south, self.north], ccrs.Geodetic())
+        ax.add_feature(cfeature.COASTLINE)
+        ax.add_feature(cfeature.BORDERS, edgecolor='gray')
+        ax.add_feature(cfeature.STATES,edgecolor='gray')
+        pc = ax.pcolormesh(xgrid,ygrid,plotdata,transform=ccrs.PlateCarree(),
+                           alpha=kwargs['alpha'],cmap=kwargs['cmap'],vmin=kwargs['vmin'],vmax=kwargs['vmax'])
+        cb = plt.colorbar(pc,ax=ax,label=plot_field,shrink=0.75)
+        fig_output = {}
+        fig_output['fig'] = fig
+        fig_output['ax'] = ax
+        fig_output['cb'] = cb
+        return fig_output
+    
     def F_plot_l3(self,plot_field='column_amount',l3_data=None,
                   vmin=None,vmax=None):
         '''
@@ -3262,6 +3313,7 @@ class popy(object):
     def F_plot_l2g_cartopy(self,plot_field='column_amount',
                            max_day=1,l2g_data=None,
                            x_wind_field='era5_u100',y_wind_field='era5_v100',
+                           existing_ax=None,
                            **kwargs):
         '''
         l2g plotting utility using cartopy
@@ -3272,7 +3324,8 @@ class popy(object):
         l2g_data:
             l2g data dictionary supplied externally if None
         kwargs:
-            arguments to plotting functions
+            arguments to plotting functions, supporting 'cmap', 'alpha', 'edgecolor', 'vmin', 'vmax' for polygons
+            tune 'unit', 'scale', and 'width' to make sensable wind vector
         created on 2021/04/01
         '''
         import matplotlib.pyplot as plt
@@ -3293,6 +3346,7 @@ class popy(object):
         if 'vmin' not in kwargs.keys():
             kwargs['vmin'] = np.nanmin(l2g_data[plot_field])
             kwargs['vmax'] = np.nanmax(l2g_data[plot_field])
+        
         plot_index = np.where(l2g_data['UTC_matlab_datenum']<=l2g_data['UTC_matlab_datenum'].min()+max_day)
         if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B","SCIAMACHY","TROPOMI"}:
             verts = [np.array([l2g_data['lonr'][i,:],l2g_data['latr'][i,:]]).T for i in plot_index[0]]
@@ -3303,18 +3357,30 @@ class popy(object):
                              array=l2g_data[plot_field],cmap=kwargs['cmap'],edgecolors=kwargs['edgecolor'])
         collection.set_alpha(kwargs['alpha'])
         collection.set_clim(vmin=kwargs['vmin'],vmax=kwargs['vmax'])
-        fig,ax = plt.subplots(1,1,figsize=(10,5),
-                       subplot_kw={"projection": ccrs.PlateCarree()})
+        if existing_ax is None:
+            self.logger.info('axes not supplied, creating one')
+            fig,ax = plt.subplots(1,1,figsize=(10,5),
+                                  subplot_kw={"projection": ccrs.PlateCarree()})
+        else:
+            fig = None
+            ax = existing_ax
         ax.set_extent([self.west, self.east, self.south, self.north], ccrs.Geodetic())
         ax.add_feature(cfeature.COASTLINE)
         ax.add_feature(cfeature.BORDERS, edgecolor='gray')
         ax.add_feature(cfeature.STATES,edgecolor='gray')
         ax.add_collection(collection)
-        cb = fig.colorbar(collection,ax=ax,label=plot_field,shrink=0.75)
+        cb = plt.colorbar(collection,ax=ax,label=plot_field,shrink=0.75)
+        if x_wind_field != None:
+            quiver=ax.quiver(l2g_data['lonc'][plot_index[0]],l2g_data['latc'][plot_index[0]],
+                             l2g_data[x_wind_field][plot_index[0]],l2g_data[y_wind_field][plot_index[0]],
+                             **{k:v for (k,v) in kwargs.items() if k in ['unit','width','scale']})
+        else:
+             quiver = None   
         fig_output = {}
         fig_output['fig'] = fig
         fig_output['ax'] = ax
         fig_output['cb'] = cb
+        fig_output['quiver'] =quiver
         return fig_output
     
     def F_plot_l2g(self,ax=None,plot_field='column_amount',max_day=1,l2g_data=None,
