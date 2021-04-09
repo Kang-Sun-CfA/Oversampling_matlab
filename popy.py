@@ -1369,13 +1369,16 @@ class popy(object):
         outp = {}
         for i in range(len(data_fields)):
             tmp = ncid[data_fields[i]]
-            tmpdtype = tmp.dtype
+#            tmpdtype = tmp.dtype
             if not data_fields_l2g:
                 varname = tmp.name
             else:
                 varname = data_fields_l2g[i]
-            outp[varname] = tmp[:]
-        
+            try:
+                outp[varname] = tmp[:].filled(np.nan)
+            except:
+                self.logger.info('{} cannot be filled by nan or is not a masked array'.format(varname))
+                outp[varname] = tmp[:]
         if 'time' in outp.keys():
             UTC_matlab_datenum = np.zeros((len(outp['time']),1),dtype=np.float64)
             ref_dt = datetime.datetime.strptime('1993-01-01T00:00:00Z','%Y-%m-%dT%H:%M:%SZ')
