@@ -679,8 +679,8 @@ def F_ncread_selective(fn,varnames):
         try:
             outp[varname] = ncid.variables[varname][:].filled(np.nan)
         except:
-            logging.warning('{} appears to be integer and cannot be filed with nan'.format(varname))
-            outp[varname] = ncid.variables[varname][:].filled(-999)
+            logging.info('{} cannot be filled by nan or is not a masked array'.format(varname))
+            outp[varname] = ncid.variables[varname][:]
     ncid.close()
     return outp
 
@@ -1662,6 +1662,114 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
+    def F_subset_MEaSUREs(self,path,l2_path_structure='%Y/%m/%d/',
+                          min_MDQF=0,max_MDQF=1):
+        """ 
+        function to subset MEaSUREs level 2 data, calling self.F_read_MEaSUREs_nc
+        path:
+            l2 data directory
+        l2_path_structure:
+            None indicates that individual files are directly under path;
+            '%Y/' if files are like l2_dir/2017/*.nc;
+            '%Y/%m/%d/' if files are like l2_dir/2017/05/01/*.nc
+        created on 2021/04/07
+        """      
+        # find out list of l2 files to subset
+        import glob
+        instrum = self.instrum
+        product = self.product
+        l2_dir = path
+        l2_list = []
+        cwd = os.getcwd()
+        os.chdir(l2_dir)
+        start_date = self.start_python_datetime.date()
+        end_date = self.end_python_datetime.date()
+        days = (end_date-start_date).days+1
+        DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+        for DATE in DATES:
+            if l2_path_structure == None:
+                flist = glob.glob(str(instrum)+'-'+str(product)+'-L2_'+DATE.strftime("%Ym%m%d")+'t*.nc')
+            else:
+                flist = glob.glob(DATE.strftime(l2_path_structure)+\
+                                  str(instrum)+'-'+str(product)+'-L2_'+DATE.strftime("%Ym%m%d")+'t*.nc')
+            l2_list = l2_list+flist
+        os.chdir(cwd)
+        self.l2_dir = l2_dir
+        self.l2_list = l2_list
+        
+        maxsza = self.maxsza
+        maxcf = self.maxcf
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+#        max_MDQF = self.max_MDQF
+#        min_MDQF = self.min_MDQF
+         
+        # absolute path of useful variables in the nc file
+        data_fields = ['/support_data/cloud_fraction',\
+                       '/support_data/cloud_pressure',\
+               '/geolocation/latitude_bounds',\
+               '/geolocation/longitude_bounds',\
+               '/geolocation/solar_zenith_angle',\
+               '/geolocation/viewing_zenith_angle',\
+               '/support_data/albedo',\
+               '/geolocation/latitude',\
+               '/geolocation/longitude',\
+               '/key_science_data/main_data_quality_flag',\
+               '/geolocation/time',\
+               '/key_science_data/column_amount',\
+               '/key_science_data/column_uncertainty']    
+        # standardized variable names in l2g file. should map one-on-one to data_fields
+        data_fields_l2g = ['cloud_fraction','cloud_pressure','latitude_bounds','longitude_bounds','SolarZenithAngle',\
+                           'vza','albedo','latc','lonc','main_data_quality_flag','time',\
+                           'column_amount','column_uncertainty']
+        self.logger.info('Read, subset, and store level 2 data to l2g_data')
+        self.logger.info('Level 2 data are located at '+l2_dir)
+        l2g_data = {}
+        for fn in l2_list:
+            fn_dir = os.path.join(l2_dir,fn)
+            self.logger.info('Loading '+fn)
+            try:
+                outp_nc = self.F_read_MEaSUREs_nc(fn_dir,data_fields,data_fields_l2g)
+            except:
+                self.logger.warning(fn+' gives error!');
+                continue
+            f1 = outp_nc['SolarZenithAngle'] <= maxsza
+            f2 = outp_nc['cloud_fraction'] <= maxcf
+            f3 = (outp_nc['main_data_quality_flag'] <= max_MDQF) & (outp_nc['main_data_quality_flag'] >= min_MDQF)             
+            f4 = outp_nc['latc'] >= south
+            f5 = outp_nc['latc'] <= north
+            tmplon = outp_nc['lonc']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp_nc['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp_nc['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+            self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            l2g_data0 = {}
+            # yep it's indeed messed up
+            Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][:,:,0])[validmask]
+            Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][:,:,3])[validmask]
+            Lat_lowerright = np.squeeze(outp_nc['latitude_bounds'][:,:,1])[validmask]
+            Lat_upperright = np.squeeze(outp_nc['latitude_bounds'][:,:,2])[validmask]
+            Lon_lowerleft = np.squeeze(outp_nc['longitude_bounds'][:,:,0])[validmask]
+            Lon_upperleft = np.squeeze(outp_nc['longitude_bounds'][:,:,3])[validmask]
+            Lon_lowerright = np.squeeze(outp_nc['longitude_bounds'][:,:,1])[validmask]
+            Lon_upperright = np.squeeze(outp_nc['longitude_bounds'][:,:,2])[validmask]
+            l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
+            l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+            for key in outp_nc.keys():
+                if key not in {'latitude_bounds','longitude_bounds','time_utc','time','delta_time'}:
+                    l2g_data0[key] = outp_nc[key][validmask]
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
+        
     def F_subset_OMPSN20HCHO(self,path):
         """ 
         function to subset OMPS-N20 hcho level 2 data, calling self.F_read_S5P_nc
@@ -3078,6 +3186,134 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
         
+    def F_subset_CrISNH3_Lite(self,path,
+                              l2_path_structure='%Y/%m/%d/',
+                              ellipse_lut_path='CrIS_footprint.mat',
+                              min_Quality_Flag=None,min_LandFraction=0.):
+        '''
+        subsetting lite version of CrIS NH3 files
+        created on 2021/04/07
+        '''
+        from scipy.io import loadmat
+        from scipy.interpolate import RegularGridInterpolator
+        l2_dir = path
+        l2_list = []
+        cwd = os.getcwd()
+        os.chdir(l2_dir)
+        start_date = self.start_python_datetime.date()
+        end_date = self.end_python_datetime.date()
+        days = (end_date-start_date).days+1
+        DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+        lon_bound = np.arange(-180,180,20)
+        lat_bound = np.arange(-90,90,15)
+        lon_bound = lon_bound[np.where(lon_bound<=self.west)[0][-1]:np.min([np.where(lon_bound>=self.east)[0][0]+1,len(lon_bound)])]
+        lat_bound = lat_bound[np.where(lat_bound<=self.south)[0][-1]:np.min([np.where(lat_bound>=self.north)[0][0]+1,len(lat_bound)])]
+        def F_pn(number):
+            if number >= 0:
+                pn = 'p'
+            else:
+                pn = 'n'
+            return pn
+        for DATE in DATES:
+            for ilon in range(len(lon_bound[:-1])):
+                for ilat in range(len(lat_bound[:-1])):
+                    if l2_path_structure == None:
+                        fn = 'Lite_Combined_NH3_'\
+                        +F_pn(lon_bound[ilon])+'{:03d}_0_'.format(np.abs(lon_bound[ilon]))\
+                        +F_pn(lon_bound[ilon+1])+'{:03d}_0_'.format(np.abs(lon_bound[ilon+1]))\
+                        +F_pn(lat_bound[ilat])+'{:03d}_0_'.format(np.abs(lat_bound[ilat]))\
+                        +F_pn(lat_bound[ilat+1])+'{:03d}_0_'.format(np.abs(lat_bound[ilat+1]))+DATE.strftime('%Y%m%d.nc')
+                        if os.path.exists(fn):l2_list.append(fn)
+                    else:
+                        fn = DATE.strftime(l2_path_structure)+'Lite_Combined_NH3_'\
+                        +F_pn(lon_bound[ilon])+'{:03d}_0_'.format(np.abs(lon_bound[ilon]))\
+                        +F_pn(lon_bound[ilon+1])+'{:03d}_0_'.format(np.abs(lon_bound[ilon+1]))\
+                        +F_pn(lat_bound[ilat])+'{:03d}_0_'.format(np.abs(lat_bound[ilat]))\
+                        +F_pn(lat_bound[ilat+1])+'{:03d}_0_'.format(np.abs(lat_bound[ilat+1]))+DATE.strftime('%Y%m%d.nc')
+                        if os.path.exists(fn):l2_list.append(fn)
+        os.chdir(cwd)
+        self.l2_dir = l2_dir
+        self.l2_list = l2_list
+        
+        varnames = ['DOF','Day_Night_Flag','LandFraction','Latitude','Longitude',
+                    'Quality_Flag','Run_ID','mdate','rvmr','tot_col','xretv','pressure',
+                    'tot_col_total_error']
+        
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        l2g_data = {}
+        pixel_lut = loadmat(ellipse_lut_path)
+        f_uuu = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,271)),pixel_lut['uuu4']) 
+        f_vvv = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,271)),pixel_lut['vvv4']) 
+        f_ttt = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,271)),pixel_lut['ttt4']) 
+        if min_Quality_Flag is None:
+            min_Quality_Flag = self.min_Quality_Flag
+        for fn in l2_list:
+            file_path = os.path.join(l2_dir,fn)
+            self.logger.info('loading '+fn)
+            try:
+                outp = F_ncread_selective(file_path,varnames)
+            except:
+                self.logger.warning(fn+' cannot be read!')
+                continue
+            outp['UTC_matlab_datenum'] = outp['mdate']+366.
+            f1 = outp['LandFraction'] >= min_LandFraction
+            f2 = outp['DOF'] >= self.mindofs
+            f3 = (outp['Quality_Flag'] >= min_Quality_Flag) & \
+            (outp['Day_Night_Flag'] == 1)
+            f4 = outp['Latitude'] >= south
+            f5 = outp['Latitude'] <= north
+            tmplon = outp['Longitude']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+            self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            l2g_data0 = {}
+            if np.sum(validmask) == 0:
+                continue
+            
+            nobs = np.sum(validmask)
+            # work out footprint number
+            tmprunID = outp['Run_ID'][validmask]
+            tmpfov = np.asarray([np.float(tmprunID[i][-3:]) for i in range(nobs)])
+            tmpfor = np.asarray([np.float(tmprunID[i][-8:-4]) for i in range(nobs)])
+            l2g_data0['ifov'] = (tmpfor-1)*9+tmpfov
+            latc = outp['Latitude'][validmask]
+            lonc = outp['Longitude'][validmask]
+            l2g_data0['latc'] = latc
+            l2g_data0['lonc'] = lonc
+            # find out elliptical parameters using lookup table            
+            l2g_data0['u'] = f_uuu((latc,l2g_data0['ifov']))
+            l2g_data0['v'] = f_vvv((latc,l2g_data0['ifov']))
+            l2g_data0['t'] = f_ttt((latc,l2g_data0['ifov']))
+            l2g_data0['column_amount'] = outp['tot_col'][validmask]
+            l2g_data0['column_uncertainty'] = outp['tot_col_total_error'][validmask]
+            l2g_data0['UTC_matlab_datenum'] = outp['UTC_matlab_datenum'][validmask]
+            l2g_data0['dofs'] = outp['DOF'][validmask]
+            nobs = np.sum(validmask)
+            l2g_data0['sfcvmr'] = np.zeros((nobs))
+            l2g_data0['surface_pressure'] = np.zeros((nobs))
+            # loop over observations
+            for io in range(nobs):
+                index = (outp['pressure'][validmask,][io,] > 0)
+                pressure = outp['pressure'][validmask,][io,index]
+                xretv = outp['xretv'][validmask,][io,index]
+                l2g_data0['sfcvmr'][io] = xretv[0]
+                l2g_data0['surface_pressure'][io] = pressure[0]
+            
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
+        
     def F_subset_CrISNH3(self,path,l2_path_structure='%Y/%m/%d/',ellipse_lut_path='CrIS_footprint.mat'):
         """ 
         function to subset CrIS NH3 level2 files
@@ -3239,6 +3475,10 @@ class popy(object):
         import matplotlib.pyplot as plt
         import cartopy.crs as ccrs
         import cartopy.feature as cfeature
+        # workaround for cartopy 0.16
+        from matplotlib.axes import Axes
+        from cartopy.mpl.geoaxes import GeoAxes
+        GeoAxes._pcolormesh_patched = Axes.pcolormesh
         if l3_data == None:
             l3_data = self.C   
         
@@ -3272,7 +3512,7 @@ class popy(object):
             ax.add_feature(cfeature.BORDERS)
             ax.add_feature(cfeature.STATES,edgecolor='gray')
         pc = ax.pcolormesh(xgrid,ygrid,plotdata,transform=ccrs.PlateCarree(),
-                           alpha=kwargs['alpha'],cmap=kwargs['cmap'],vmin=kwargs['vmin'],vmax=kwargs['vmax'])
+                           alpha=kwargs['alpha'],cmap=kwargs['cmap'],vmin=kwargs['vmin'],vmax=kwargs['vmax'],shading='auto')
         cb = plt.colorbar(pc,ax=ax,label=plot_field,shrink=0.75)
         fig_output = {}
         fig_output['fig'] = fig

@@ -170,7 +170,7 @@ class RRNES(object):
         tau:
             chemical lifetime in s
         '''
-        U = monthlyDict['NO2']['ime_ws']
+        U = monthlyDict[self.moleculeList[0]]['ime_ws']
         if len(ime_f)==0:
             ime_f = 2*np.ones(U.shape)
         elif len(ime_f)==1:
@@ -178,12 +178,12 @@ class RRNES(object):
         mask = (U >= wsRange[0]) & (U <= wsRange[1])
         U = U[mask]
         ime_f = ime_f[mask]
-        yData = monthlyDict['NO2']['ime_C'][mask]
+        yData = monthlyDict[self.moleculeList[0]]['ime_C'][mask]
 #        if self.whichSatellite == 'OMI':
-#            yData = monthlyDict['NO2']['ime_C'][mask]/6.02214e19
+#            yData = monthlyDict[self.moleculeList[0]]['ime_C'][mask]/6.02214e19
 #        elif self.whichSatellite == 'TROPOMI':
-#            yData = monthlyDict['NO2']['ime_C'][mask]        
-        weight = monthlyDict['NO2']['ime_B'][mask]
+#            yData = monthlyDict[self.moleculeList[0]]['ime_C'][mask]        
+        weight = monthlyDict[self.moleculeList[0]]['ime_B'][mask]
         A = monthlyDict['L']**2
         L = monthlyDict['L']
         if if_use_ws:
@@ -206,10 +206,10 @@ class RRNES(object):
         yy = np.array([])
         nx_per_month = np.full((nmonth),np.nan)
         for (i,mergedDict) in enumerate(monthlyDictArray):
-            mask = (~np.isnan(mergedDict['NO2']['ime_ws'])) & (~np.isnan(mergedDict['NO2']['ime_C'])) \
-            & (mergedDict['NO2']['ime_ws'] >= wsRange[0]) & (mergedDict['NO2']['ime_ws'] <= wsRange[1])
-            xx = np.append(xx,mergedDict['NO2']['ime_ws'][mask])
-            yy = np.append(yy,mergedDict['NO2']['ime_C'][mask])
+            mask = (~np.isnan(mergedDict[self.moleculeList[0]]['ime_ws'])) & (~np.isnan(mergedDict[self.moleculeList[0]]['ime_C'])) \
+            & (mergedDict[self.moleculeList[0]]['ime_ws'] >= wsRange[0]) & (mergedDict[self.moleculeList[0]]['ime_ws'] <= wsRange[1])
+            xx = np.append(xx,mergedDict[self.moleculeList[0]]['ime_ws'][mask])
+            yy = np.append(yy,mergedDict[self.moleculeList[0]]['ime_C'][mask])
             nx_per_month[i] = np.sum(mask)
 #        self.nx_per_month = nx_per_month
         inp={};inp['A'] = mergedDict['L']**2;inp['L'] = mergedDict['L'];inp['xx'] = xx;inp['f'] = universal_f;inp['nx_per_month'] = nx_per_month
@@ -280,7 +280,7 @@ class RRNES(object):
             one element in monthlyDictArray that output from F_load_monthly_h5, 
             or the mergedDict from F_merge_monthly_data
         ime_f:
-            an array of same size as monthlyDict['NO2']['ime_C']
+            an array of same size as monthlyDict[self.moleculeList[0]]['ime_C']
         intitialGuess:
             prior of (Q,tau)
         ridgeLambda:
@@ -297,13 +297,13 @@ class RRNES(object):
         maxIteration:
             as indicated
         """
-        xData = monthlyDict['NO2']['ime_ws']
-        yData = monthlyDict['NO2']['ime_C']
+        xData = monthlyDict[self.moleculeList[0]]['ime_ws']
+        yData = monthlyDict[self.moleculeList[0]]['ime_C']
 #        if self.whichSatellite == 'OMI':
-#            yData = monthlyDict['NO2']['ime_C']/6.02214e19
+#            yData = monthlyDict[self.moleculeList[0]]['ime_C']/6.02214e19
 #        elif self.whichSatellite == 'TROPOMI':
-#            yData = monthlyDict['NO2']['ime_C']
-        sData = monthlyDict['NO2']['ime_D']
+#            yData = monthlyDict[self.moleculeList[0]]['ime_C']
+        sData = monthlyDict[self.moleculeList[0]]['ime_D']
         if len(ime_f) == 0:
             ime_f = 2*np.ones(xData.shape)
         elif len(ime_f) == 1:
@@ -382,7 +382,7 @@ class RRNES(object):
             one element in monthlyDictArray that output from F_load_monthly_h5, 
             or the mergedDict from F_merge_monthly_data
         ime_f:
-            an array of same size as monthlyDict['NO2']['ime_C']
+            an array of same size as monthlyDict[self.moleculeList[0]]['ime_C']
         intitialGuess:
             prior of (Q,tau)
         wsRange:
@@ -392,21 +392,21 @@ class RRNES(object):
             removed, and fit another time
         """
         from scipy.optimize import curve_fit
-#        self.logger.info('fitting year %d'%monthlyDict['NO2']['year_vec']+', month %d'%monthlyDict['NO2']['month_vec'])
-        xData = monthlyDict['NO2']['ime_ws']
-        if 'ime_C_bg' not in monthlyDict['NO2'].keys():
+#        self.logger.info('fitting year %d'%monthlyDict[self.moleculeList[0]]['year_vec']+', month %d'%monthlyDict[self.moleculeList[0]]['month_vec'])
+        xData = monthlyDict[self.moleculeList[0]]['ime_ws']
+        if 'ime_C_bg' not in monthlyDict[self.moleculeList[0]].keys():
             self.logger.warning('background column does not exist! use zeros')
             yBG = xData*0.
         else:
-            yBG = monthlyDict['NO2']['ime_C_bg']
+            yBG = monthlyDict[self.moleculeList[0]]['ime_C_bg']
         yBG = xData*0.
-        yData = monthlyDict['NO2']['ime_C']
+        yData = monthlyDict[self.moleculeList[0]]['ime_C']
 #        if self.whichSatellite == 'OMI':
-#            yData = monthlyDict['NO2']['ime_C']/6.02214e19
+#            yData = monthlyDict[self.moleculeList[0]]['ime_C']/6.02214e19
 #            yBG = yBG/6.02214e19
 #        elif self.whichSatellite == 'TROPOMI':
-#            yData = monthlyDict['NO2']['ime_C']
-        sData = monthlyDict['NO2']['ime_D']
+#            yData = monthlyDict[self.moleculeList[0]]['ime_C']
+        sData = monthlyDict[self.moleculeList[0]]['ime_D']
         if len(ime_f) == 0:
             ime_f = 2*np.ones(xData.shape)
         elif len(ime_f) == 1:
@@ -518,13 +518,13 @@ class RRNES(object):
         mergedDict = {}
         for idict,d in enumerate(monthlyDictArray):
             if not d:
-                self.logger.warning('%02d'%d['NO2']['month_vec']+'/%04d'%d['NO2']['year_vec']+' gives empty data!')
+                self.logger.warning('%02d'%d[self.moleculeList[0]]['month_vec']+'/%04d'%d[self.moleculeList[0]]['year_vec']+' gives empty data!')
                 continue
             if not mergedDict:
-                self.logger.info('initiate merge with data in '+'%02d'%d['NO2']['month_vec']+'/%04d'%d['NO2']['year_vec'])
+                self.logger.info('initiate merge with data in '+'%02d'%d[self.moleculeList[0]]['month_vec']+'/%04d'%d[self.moleculeList[0]]['year_vec'])
                 mergedDict = deepcopy(d)
             else:
-                self.logger.info('merging with data in '+'%02d'%d['NO2']['month_vec']+'/%04d'%d['NO2']['year_vec'])
+                self.logger.info('merging with data in '+'%02d'%d[self.moleculeList[0]]['month_vec']+'/%04d'%d[self.moleculeList[0]]['year_vec'])
                 for key in self.moleculeList:
                     if key not in mergedDict.keys():
                         self.logger.info(key+' is not a key in the dict')
