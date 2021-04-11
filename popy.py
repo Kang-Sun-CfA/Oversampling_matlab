@@ -14,10 +14,10 @@ Created on Sat Jan 26 15:50:30 2019
 2020/03/14: standardize met sampling functions
 2020/05/19: add subsetting fields option as input
 2020/07/20: parallel regrid function done
+2021/04/11: OMPS-NM to OMPS-NPP; MEaSUREs, IASI, CrIS subsetting
 """
 
 import numpy as np
-# conda install -c conda-forge opencv 
 import datetime
 import os
 import logging
@@ -679,7 +679,7 @@ def F_ncread_selective(fn,varnames):
         try:
             outp[varname] = ncid.variables[varname][:].filled(np.nan)
         except:
-            logging.info('{} cannot be filled by nan or is not a masked array'.format(varname))
+            logging.debug('{} cannot be filled by nan or is not a masked array'.format(varname))
             outp[varname] = ncid.variables[varname][:]
     ncid.close()
     return outp
@@ -717,7 +717,7 @@ def F_block_regrid_wrapper(args):
     return F_block_regrid_ccm(*args)
 
 def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
-                       oversampling_list,instrum,error_model,
+                       oversampling_list,pixel_shape,error_model,
                        k1,k2,k3,xmargin,ymargin,
                        iblock=1,verbose=False):
     '''
@@ -732,8 +732,8 @@ def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
         in degree
     oversampling_list:
         a list of l2(g) variables to be oversampled
-    instrum:
-        instrument name in popy
+    pixel_shape:
+        'quadrilateral' or 'elliptical'
     error_model:
         error model in popy
     k1, k2, k3:
@@ -780,8 +780,7 @@ def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
     pres_sum_aboves = np.zeros(xmesh.shape)
     
     # Move as much as possible outside loop
-    if instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B",\
-                            "SCIAMACHY","TROPOMI","OMPS-N20"}:
+    if pixel_shape == 'quadrilateral':
         # Set 
         latc = l2g_data['latc']
         lonc = l2g_data['lonc']
@@ -820,7 +819,7 @@ def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
         fixedPoints = np.array([[-fwhmx,-fwhmy],[-fwhmx,fwhmy],[fwhmx,fwhmy],[fwhmx,-fwhmy]],dtype=np.float32).transpose((2,0,1))/2.0
         tform = [cv2.getPerspectiveTransform(vlist[i,:,:].squeeze(),fixedPoints[i,:,:].squeeze()) for i in range(nl2)]
         
-    elif instrum in {"IASI","CrIS"}:
+    elif pixel_shape == 'elliptical':
         # Set 
         latc = l2g_data['latc']
         lonc = l2g_data['lonc']
@@ -852,7 +851,7 @@ def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
         fwhmy = 2*u
         
     else:
-        print(instrum+' is not supported for regridding yet!')
+        logging.warning('Pixel shape has to be quadrilateral or elliptical!')
         return
     # Compute uncertainty weights
     if error_model == "square":
@@ -883,11 +882,10 @@ def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
         patch_xmesh = xmesh[ijmsh] - patch_west[il2]
         #patch_xmesh[patch_xmesh<0.0] += 360.0
         patch_ymesh = ymesh[ijmsh] - latc[il2]
-        if instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B",\
-                                "SCIAMACHY","TROPOMI","OMPS-N20"}:
+        if pixel_shape == 'quadrilateral':
             xym1 = np.column_stack((patch_xmesh.flatten()-patch_lonc[il2],patch_ymesh.flatten()))
             xym2 = np.hstack((xym1,np.ones((patch_xmesh.size,1)))).dot(tform[il2].T)[:,0:2]
-        elif instrum in {"IASI","CrIS"}:
+        elif pixel_shape == 'elliptical':
             rotation_matrix = np.array([[np.cos(-t[il2]), -np.sin(-t[il2])],[np.sin(-t[il2]),  np.cos(-t[il2])]])
             xym1 = np.array([patch_xmesh.flatten()-patch_lonc[il2],patch_ymesh.flatten()])#np.column_stack((patch_xmesh.flatten()-patch_lonc[il2],patch_ymesh.flatten())).T
             xym2 = rotation_matrix.dot(xym1).T
@@ -978,6 +976,7 @@ class popy(object):
             maxcf = 0.3
             self.maxMDQF = 0
             self.maxEXTQF = 0
+            self.pixel_shape = 'quadrilateral'
             if product == 'H2O':
                 maxcf = 0.15
         elif(instrum == "GOME-1"):
@@ -991,6 +990,7 @@ class popy(object):
             ymargin = 1.5
             maxsza = 60
             maxcf = 0.3
+            self.pixel_shape = 'quadrilateral'
         elif(instrum == "SCIAMACHY"):
             k1 = 4
             k2 = 2
@@ -1002,6 +1002,7 @@ class popy(object):
             ymargin = 1.5
             maxsza = 60
             maxcf = 0.3
+            self.pixel_shape = 'quadrilateral'
         elif(instrum == "GOME-2A"):
             k1 = 4
             k2 = 2
@@ -1013,6 +1014,7 @@ class popy(object):
             ymargin = 1.5
             maxsza = 60
             maxcf = 0.3
+            self.pixel_shape = 'quadrilateral'
         elif(instrum == "GOME-2B"):
             k1 = 4
             k2 = 2
@@ -1024,7 +1026,7 @@ class popy(object):
             ymargin = 1.5
             maxsza = 60
             maxcf = 0.3
-        elif(instrum == "OMPS-NM"):
+        elif(instrum == "OMPS-NPP"):
             k1 = 6
             k2 = 2
             k3 = 3
@@ -1035,6 +1037,7 @@ class popy(object):
             ymargin = 1.5
             maxsza = 60
             maxcf = 0.3
+            self.pixel_shape = 'quadrilateral'
         elif(instrum == "OMPS-N20"):
             k1 = 4
             k2 = 2
@@ -1047,6 +1050,7 @@ class popy(object):
             maxsza = 60
             maxcf = 0.3
             self.max_qa_value = 0
+            self.pixel_shape = 'quadrilateral'
         elif(instrum == "TROPOMI"):
             k1 = 4
             k2 = 2
@@ -1064,6 +1068,7 @@ class popy(object):
             maxsza = 70
             maxcf = 0.3
             self.min_qa_value = 0.5
+            self.pixel_shape = 'quadrilateral'
         elif(instrum == "IASI"):
             k1 = 2
             k2 = 2
@@ -1074,6 +1079,7 @@ class popy(object):
             ymargin = 2
             maxsza = 90
             maxcf = 0.25
+            self.pixel_shape = 'elliptical'
         elif(instrum == "CrIS"):
             k1 = 2
             k2 = 2
@@ -1086,6 +1092,7 @@ class popy(object):
             maxcf = 0.25
             self.mindofs = 0.0
             self.min_Quality_Flag = 3
+            self.pixel_shape = 'elliptical'
         elif(instrum == "TES"):
             k1 = 4
             k2 = 4
@@ -1097,6 +1104,7 @@ class popy(object):
             maxsza = 90
             maxcf = 0.25
             self.mindofs = 0.1
+            self.pixel_shape = 'quadrilateral'
         else:
             k1 = 2
             k2 = 2
@@ -1107,6 +1115,7 @@ class popy(object):
             ymargin = 2
             maxsza = 60
             maxcf = 0.3
+            self.pixel_shape = 'quadrilateral'
         
         self.xmargin = xmargin
         self.ymargin = ymargin
@@ -1377,7 +1386,7 @@ class popy(object):
             try:
                 outp[varname] = tmp[:].filled(np.nan)
             except:
-                self.logger.info('{} cannot be filled by nan or is not a masked array'.format(varname))
+                self.logger.debug('{} cannot be filled by nan or is not a masked array'.format(varname))
                 outp[varname] = tmp[:]
         if 'time' in outp.keys():
             UTC_matlab_datenum = np.zeros((len(outp['time']),1),dtype=np.float64)
@@ -3497,6 +3506,8 @@ class popy(object):
             kwargs['cmap'] = 'rainbow'
         if 'alpha' not in kwargs.keys():
             kwargs['alpha'] = 1.
+        if 'shrink' not in kwargs.keys():
+            kwargs['shrink'] = 0.75
         if 'vmin' not in kwargs.keys():
             kwargs['vmin'] = np.nanmin(plotdata)
             kwargs['vmax'] = np.nanmax(plotdata)
@@ -3516,7 +3527,7 @@ class popy(object):
             ax.add_feature(cfeature.STATES,edgecolor='gray')
         pc = ax.pcolormesh(xgrid,ygrid,plotdata,transform=ccrs.PlateCarree(),
                            alpha=kwargs['alpha'],cmap=kwargs['cmap'],vmin=kwargs['vmin'],vmax=kwargs['vmax'],shading='auto')
-        cb = plt.colorbar(pc,ax=ax,label=plot_field,shrink=0.75)
+        cb = plt.colorbar(pc,ax=ax,label=plot_field,shrink=kwargs['shrink'])
         fig_output = {}
         fig_output['fig'] = fig
         fig_output['ax'] = ax
@@ -3526,6 +3537,7 @@ class popy(object):
     def F_plot_l3(self,plot_field='column_amount',l3_data=None,
                   vmin=None,vmax=None):
         '''
+        THIS FUNCTION IS NOT SUPPORTED ANY MORE
         l3 data plotting utility updated from F_plot_oversampled_variable
         '''
         if l3_data == None:
@@ -3593,20 +3605,23 @@ class popy(object):
             kwargs['cmap'] = 'rainbow'
         if 'alpha' not in kwargs.keys():
             kwargs['alpha'] = 1.
+        if 'shrink' not in kwargs.keys():
+            kwargs['shrink'] = 0.75
         if 'edgecolor' not in kwargs.keys():
             kwargs['edgecolor'] = 'none'
-        if 'vmin' not in kwargs.keys():
-            kwargs['vmin'] = np.nanmin(l2g_data[plot_field])
-            kwargs['vmax'] = np.nanmax(l2g_data[plot_field])
         
         plot_index = np.where(l2g_data['UTC_matlab_datenum']<=l2g_data['UTC_matlab_datenum'].min()+max_day)
-        if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B","SCIAMACHY","TROPOMI"}:
+        if 'vmin' not in kwargs.keys():
+            kwargs['vmin'] = np.nanmin(l2g_data[plot_field][plot_index[0]])
+            kwargs['vmax'] = np.nanmax(l2g_data[plot_field][plot_index[0]])
+        if self.pixel_shape == 'quadrilateral':
             verts = [np.array([l2g_data['lonr'][i,:],l2g_data['latr'][i,:]]).T for i in plot_index[0]]
-        elif self.instrum in {"IASI","CrIS"}:
+        elif self.pixel_shape == 'elliptical':
             verts = [F_ellipse(l2g_data['v'][i],l2g_data['u'][i],l2g_data['t'][i],20,
                                l2g_data['lonc'][i],l2g_data['latc'][i])[0].T for i in plot_index[0]]
         collection = PolyCollection(verts,
-                             array=l2g_data[plot_field],cmap=kwargs['cmap'],edgecolors=kwargs['edgecolor'])
+                             array=l2g_data[plot_field][plot_index[0]],
+                             cmap=kwargs['cmap'],edgecolors=kwargs['edgecolor'])
         collection.set_alpha(kwargs['alpha'])
         collection.set_clim(vmin=kwargs['vmin'],vmax=kwargs['vmax'])
         if existing_ax is None:
@@ -3625,7 +3640,7 @@ class popy(object):
             ax.add_feature(cfeature.BORDERS)
             ax.add_feature(cfeature.STATES,edgecolor='gray')
         ax.add_collection(collection)
-        cb = plt.colorbar(collection,ax=ax,label=plot_field,shrink=0.75)
+        cb = plt.colorbar(collection,ax=ax,label=plot_field,shrink=kwargs['shrink'])
         if x_wind_field != None:
             quiver=ax.quiver(l2g_data['lonc'][plot_index[0]],l2g_data['latc'][plot_index[0]],
                              l2g_data[x_wind_field][plot_index[0]],l2g_data[y_wind_field][plot_index[0]],
@@ -3644,6 +3659,7 @@ class popy(object):
                    x_wind_field='era5_u100',y_wind_field='era5_v100',
                    wind_arrow_width=0.01,wind_arrow_scale=20):
         '''
+        THIS FUNCTION IS NOT SUPPORTED ANY MORE
         plot l2g pixels as polygons
         plot_field:
             which field in l2g_data to plot
@@ -3672,7 +3688,7 @@ class popy(object):
         ax = plt.gca() if ax is None else ax
         fig = plt.gcf()
         plot_index = np.where(l2g_data['UTC_matlab_datenum']<=l2g_data['UTC_matlab_datenum'].min()+max_day)
-        if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B","SCIAMACHY","TROPOMI"}:
+        if self.instrum in {"OMI","OMPS-NPP","GOME-1","GOME-2A","GOME-2B","SCIAMACHY","TROPOMI"}:
             verts = [np.array([l2g_data['lonr'][i,:],l2g_data['latr'][i,:]]).T for i in plot_index[0]]
         elif self.instrum in {"IASI","CrIS"}:
             verts = [F_ellipse(l2g_data['v'][i],l2g_data['u'][i],l2g_data['t'][i],20,
@@ -4028,7 +4044,7 @@ class popy(object):
         if ncores == 0:
             self.logger.info('ncores = 0 means no parallel and calling F_block_regridd_ccm using the entire domain as a block')
             l3_data = F_block_regrid_ccm(l2g_data,xmesh,ymesh,
-                       oversampling_list,self.instrum,self.error_model,
+                       oversampling_list,self.pixel_shape,self.error_model,
                        self.k1,self.k2,self.k3,xmargin,ymargin,
                        iblock=1)
             return l3_data
@@ -4104,7 +4120,7 @@ class popy(object):
             l3_data_list = pp.map( F_block_regrid_wrapper, \
                         ((block_l2g_data[iblock],block_xmesh[iblock],\
                           block_ymesh[iblock],oversampling_list,\
-                          self.instrum,self.error_model, \
+                          self.pixel_shape,self.error_model, \
                           self.k1,self.k2,self.k3,
                           xmargin,ymargin,iblock,self.verbose) for iblock in range(nblock) ) )
 #        pp = multiprocessing.Pool(ncores)
@@ -4203,8 +4219,7 @@ class popy(object):
             return distance
         
         # Move as much as possible outside loop
-        if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B",\
-                            "SCIAMACHY","TROPOMI","OMPS-N20"}:
+        if self.pixel_shape == 'quadrilateral':
             # Set 
             latc = l2g_data['latc']
             lonc = l2g_data['lonc']
@@ -4247,7 +4262,7 @@ class popy(object):
             fixedPoints = np.array([[-fwhmx,-fwhmy],[-fwhmx,fwhmy],[fwhmx,fwhmy],[fwhmx,-fwhmy]],dtype=np.float32).transpose((2,0,1))/2.0
             tform = [cv2.getPerspectiveTransform(vlist[i,:,:].squeeze(),fixedPoints[i,:,:].squeeze()) for i in range(nl2)]
         
-        elif self.instrum in {"IASI","CrIS"}:
+        elif self.pixel_shape == 'elliptical':
             # Set 
             latc = l2g_data['latc']
             lonc = l2g_data['lonc']
@@ -4281,7 +4296,7 @@ class popy(object):
             fwhmy = 2*u
         
         else:
-            self.logger.error(self.instrum+' is not supported for regridding yet!')
+            self.logger.error('Pixel shape should be either quadrilateral or elliptical!')
             return
         # Compute uncertainty weights
         if error_model == "square":
@@ -4312,11 +4327,10 @@ class popy(object):
             patch_xmesh = xmesh[ijmsh] - patch_west[il2]
             patch_xmesh[patch_xmesh<0.0] += 360.0
             patch_ymesh = ymesh[ijmsh] - latc[il2]
-            if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B",\
-                                "SCIAMACHY","TROPOMI","OMPS-N20"}:
+            if self.pixel_shape == 'quadrilateral':
                 xym1 = np.column_stack((patch_xmesh.flatten()-patch_lonc[il2],patch_ymesh.flatten()))
                 xym2 = np.hstack((xym1,np.ones((patch_xmesh.size,1)))).dot(tform[il2].T)[:,0:2]
-            elif self.instrum in {"IASI","CrIS"}:
+            elif self.pixel_shape == 'elliptical':
                 rotation_matrix = np.array([[np.cos(-t[il2]), -np.sin(-t[il2])],[np.sin(-t[il2]),  np.cos(-t[il2])]])
                 xym1 = np.array([patch_xmesh.flatten()-patch_lonc[il2],patch_ymesh.flatten()])#np.column_stack((patch_xmesh.flatten()-patch_lonc[il2],patch_ymesh.flatten())).T
                 xym2 = rotation_matrix.dot(xym1).T
@@ -4458,8 +4472,7 @@ class popy(object):
         count = 0
         for il2 in range(nl2):
             local_l2g_data = {k:v[il2,] for (k,v) in l2g_data.items()}
-            if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B",\
-                                "SCIAMACHY","TROPOMI","OMPS-N20"}:
+            if self.pixel_shape == 'quadrilateral':
                 latc = local_l2g_data['latc']
                 latr = local_l2g_data['latr']
                 lonc = local_l2g_data['lonc']-west
@@ -4503,7 +4516,7 @@ class popy(object):
                 SG = self.F_2D_SG_transform(patch_xmesh,patch_ymesh,patch_lonr,latr,
                                             patch_lonc,latc)
                 #if il2==100:self.sg = SG;return
-            elif self.instrum in {"IASI","CrIS"}:
+            elif self.pixel_shape == 'elliptical':
                 latc = local_l2g_data['latc']
                 lonc = local_l2g_data['lonc']-west
                 if lonc < 0:
@@ -4629,7 +4642,7 @@ class popy(object):
         count = 0
         for il2 in range(nl2):
             local_l2g_data = {k:v[il2,] for (k,v) in l2g_data.items()}
-            if self.instrum in {"OMI","OMPS-NM","GOME-1","GOME-2A","GOME-2B","SCIAMACHY","TROPOMI"}:
+            if self.pixel_shape == 'quadrilateral':
                 latc = local_l2g_data['latc']
                 latr = local_l2g_data['latr']
                 lonc = local_l2g_data['lonc']-west
@@ -4672,7 +4685,7 @@ class popy(object):
                 
                 SG = self.F_2D_SG_transform(patch_xmesh,patch_ymesh,patch_lonr,latr,
                                             patch_lonc,latc)
-            elif self.instrum in {"IASI","CrIS"}:
+            elif self.pixel_shape == 'elliptical':
                 latc = local_l2g_data['latc']
                 lonc = local_l2g_data['lonc']-west
                 if lonc < 0:
