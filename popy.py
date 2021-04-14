@@ -22,6 +22,53 @@ import datetime
 import os
 import logging
 
+def F_wrapper_l3(instrum,product,grid_size,l2_dir,
+                 start_year,start_month,end_year,end_month,
+                 start_day=1,end_day=None,
+                 west=-80,east=-69,south=40,north=46,
+                 subset_function=None,l2_path_structure='%Y/%m/%d/',
+                 if_use_presaved_l2g=True,l2g_header='CONUS',
+                 if_plot_l3=True,existing_ax=None,
+                 ncores=0,subset_kw={},plot_kw={}):
+    if end_day is None:
+        from calendar import monthrange
+        end_day = monthrange(end_year,end_month)[-1]
+    o = popy(instrum=instrum,product=product,grid_size=grid_size,
+             start_year=start_year,start_month=start_month,start_day=start_day,
+             end_year=end_year,end_month=end_month,end_day=end_day,
+             west=west,east=east,south=south,north=north)
+    if not if_use_presaved_l2g:
+        if subset_function is None:
+            subset_function = o.default_subset_function
+        getattr(o, subset_function)(path=l2_dir,l2_path_structure=l2_path_structure,**subset_kw)
+        l3_data = o.F_parallel_regrid(ncores=ncores)
+        if if_plot_l3:
+            figout = o.F_plot_l3_cartopy(l3_data=l3_data,existing_ax=existing_ax,**plot_kw)
+        else:
+            figout = None
+    else:
+        l3_data = {}
+        import os
+        for year in range(start_year,end_year+1):
+            for month in range(1,13):
+                if year == start_year and month < start_month:
+                    continue
+                elif year == end_year and month > end_month:
+                    continue
+                l2g_path = os.path.join(l2_dir,l2g_header+'_{:04d}_{:02d}.mat'.format(year,month))
+                if not os.path.exists(l2g_path):
+                    import logging
+                    logging.warning(l2g_path+' does not exist!')
+                    continue
+                o.F_mat_reader(l2g_path)
+                monthly_l3_data = o.F_parallel_regrid(ncores=ncores)
+                l3_data = o.F_merge_l3_data(l3_data,monthly_l3_data)
+        if if_plot_l3:
+            figout = o.F_plot_l3_cartopy(l3_data=l3_data,existing_ax=existing_ax,**plot_kw)
+        else:
+            figout = None
+    return {'l3_data':l3_data,'figout':figout}
+
 def datedev_py(matlab_datenum):
     """
     convert matlab datenum double to python datetime object
@@ -977,8 +1024,11 @@ class popy(object):
             self.maxMDQF = 0
             self.maxEXTQF = 0
             self.pixel_shape = 'quadrilateral'
+            self.default_subset_function = 'F_subset_MEaSUREs'
             if product == 'H2O':
                 maxcf = 0.15
+            if product == 'NO2':
+                self.default_subset_function = 'F_subset_OMNO2'
         elif(instrum == "GOME-1"):
             k1 = 4
             k2 = 2
@@ -991,6 +1041,7 @@ class popy(object):
             maxsza = 60
             maxcf = 0.3
             self.pixel_shape = 'quadrilateral'
+            self.default_subset_function = 'F_subset_MEaSUREs'
         elif(instrum == "SCIAMACHY"):
             k1 = 4
             k2 = 2
@@ -1003,6 +1054,7 @@ class popy(object):
             maxsza = 60
             maxcf = 0.3
             self.pixel_shape = 'quadrilateral'
+            self.default_subset_function = 'F_subset_MEaSUREs'
         elif(instrum == "GOME-2A"):
             k1 = 4
             k2 = 2
@@ -1015,6 +1067,7 @@ class popy(object):
             maxsza = 60
             maxcf = 0.3
             self.pixel_shape = 'quadrilateral'
+            self.default_subset_function = 'F_subset_MEaSUREs'
         elif(instrum == "GOME-2B"):
             k1 = 4
             k2 = 2
@@ -1026,6 +1079,8 @@ class popy(object):
             ymargin = 1.5
             maxsza = 60
             maxcf = 0.3
+            self.pixel_shape = 'quadrilateral'
+            self.default_subset_function = 'F_subset_MEaSUREs'
         elif(instrum == "OMPS-NPP"):
             k1 = 6
             k2 = 2
@@ -1038,6 +1093,7 @@ class popy(object):
             maxsza = 60
             maxcf = 0.3
             self.pixel_shape = 'quadrilateral'
+            self.default_subset_function = 'F_subset_MEaSUREs'
         elif(instrum == "OMPS-N20"):
             k1 = 4
             k2 = 2
@@ -1051,6 +1107,7 @@ class popy(object):
             maxcf = 0.3
             self.max_qa_value = 0
             self.pixel_shape = 'quadrilateral'
+            self.default_subset_function = 'F_subset_MEaSUREs'
         elif(instrum == "TROPOMI"):
             k1 = 4
             k2 = 2
@@ -1058,9 +1115,20 @@ class popy(object):
             error_model = "linear"
             if product in ['AI']:
                 oversampling_list = ['AI']
+                self.default_subset_function = 'F_subset_S5PAI'
             elif product in ['CH4']:
                 oversampling_list = ['xch4']
-            else:
+                self.default_subset_function = 'F_subset_S5PAI'
+            elif product in ['NO2']:
+                self.default_subset_function = 'F_subset_S5PNO2'
+                oversampling_list = ['column_amount','albedo',\
+                                     'cloud_fraction']
+            elif product in ['CO']:
+                self.default_subset_function = 'F_subset_S5PCO'
+                oversampling_list = ['column_amount','albedo',\
+                                     'cloud_fraction']
+            elif product in ['HCHO']:
+                self.default_subset_function = 'F_subset_S5PHCHO'
                 oversampling_list = ['column_amount','albedo',\
                                      'cloud_fraction']
             xmargin = 1.5
@@ -1080,6 +1148,7 @@ class popy(object):
             maxsza = 90
             maxcf = 0.25
             self.pixel_shape = 'elliptical'
+            self.default_subset_function = 'F_subset_IASINH3'
         elif(instrum == "CrIS"):
             k1 = 2
             k2 = 2
@@ -1093,6 +1162,7 @@ class popy(object):
             self.mindofs = 0.0
             self.min_Quality_Flag = 3
             self.pixel_shape = 'elliptical'
+            self.default_subset_function = 'F_subset_CrISNH3_Lite'
         elif(instrum == "TES"):
             k1 = 4
             k2 = 4
@@ -1105,6 +1175,7 @@ class popy(object):
             maxcf = 0.25
             self.mindofs = 0.1
             self.pixel_shape = 'quadrilateral'
+            self.default_subset_function = 'F_subset_TESNH3'
         else:
             k1 = 2
             k2 = 2
