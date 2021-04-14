@@ -56,7 +56,7 @@ if control['which sensor'] == 'TROPOMI':
 elif control['which sensor'] == 'OMI':
     block_length = 100
     grid_size = 0.05
-elif control['which sensor'] == 'IASI':
+elif control['which sensor'] in ['IASI','CrIS']:
     block_length = 200
     grid_size = 0.01
 nv = len(control['oversampling list'])
@@ -145,7 +145,7 @@ for year in range(start_year,end_year+1):
             (l2g_data['scattering_OD'] < 1.)
             l2g_data = {k:v[mask,] for (k,v) in l2g_data.items()}
         # standardize column ammount to mol/m2, IASI v3 is already in mol/m2
-        if control['which sensor'] in ['OMI']:
+        if p.default_column_unit == 'molec/cm2':
             l2g_data['column_amount'] = l2g_data['column_amount']/6.02214e19
         if 'ws' in control['oversampling list']:
             l2g_data['ws'] = np.sqrt(np.power(l2g_data[control['x wind']],2)

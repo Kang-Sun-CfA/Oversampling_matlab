@@ -26,10 +26,12 @@ def F_wrapper_l3(instrum,product,grid_size,l2_dir,
                  start_year,start_month,end_year,end_month,
                  start_day=1,end_day=None,
                  west=-80,east=-69,south=40,north=46,
+                 column_unit='mol/m2',
                  subset_function=None,l2_path_structure='%Y/%m/%d/',
                  if_use_presaved_l2g=True,l2g_header='CONUS',
                  if_plot_l3=True,existing_ax=None,
-                 ncores=0,subset_kw={},plot_kw={}):
+                 ncores=0,block_length=100,
+                 subset_kw={},plot_kw={}):
     if end_day is None:
         from calendar import monthrange
         end_day = monthrange(end_year,end_month)[-1]
@@ -41,7 +43,12 @@ def F_wrapper_l3(instrum,product,grid_size,l2_dir,
         if subset_function is None:
             subset_function = o.default_subset_function
         getattr(o, subset_function)(path=l2_dir,l2_path_structure=l2_path_structure,**subset_kw)
-        l3_data = o.F_parallel_regrid(ncores=ncores)
+        if 'column_amount' in o.oversampling_list:
+            if o.default_column_unit == 'molec/cm2' and column_unit == 'mol/m2':
+                o.l2g_data['column_amount'] = o.l2g_data['column_amount']/6.02214e19
+            elif o.default_column_unit == 'mol/m2' and column_unit == 'molec/cm2':
+                o.l2g_data['column_amount'] = o.l2g_data['column_amount']*6.02214e19
+        l3_data = o.F_parallel_regrid(ncores=ncores,block_length=block_length)
         if if_plot_l3:
             figout = o.F_plot_l3_cartopy(l3_data=l3_data,existing_ax=existing_ax,**plot_kw)
         else:
@@ -61,7 +68,12 @@ def F_wrapper_l3(instrum,product,grid_size,l2_dir,
                     logging.warning(l2g_path+' does not exist!')
                     continue
                 o.F_mat_reader(l2g_path)
-                monthly_l3_data = o.F_parallel_regrid(ncores=ncores)
+                if 'column_amount' in o.oversampling_list:
+                    if o.default_column_unit == 'molec/cm2' and column_unit == 'mol/m2':
+                        o.l2g_data['column_amount'] = o.l2g_data['column_amount']/6.02214e19
+                    elif o.default_column_unit == 'mol/m2' and column_unit == 'molec/cm2':
+                        o.l2g_data['column_amount'] = o.l2g_data['column_amount']*6.02214e19
+                monthly_l3_data = o.F_parallel_regrid(ncores=ncores,block_length=block_length)
                 l3_data = o.F_merge_l3_data(l3_data,monthly_l3_data)
         if if_plot_l3:
             figout = o.F_plot_l3_cartopy(l3_data=l3_data,existing_ax=existing_ax,**plot_kw)
@@ -1025,6 +1037,7 @@ class popy(object):
             self.maxEXTQF = 0
             self.pixel_shape = 'quadrilateral'
             self.default_subset_function = 'F_subset_MEaSUREs'
+            self.default_column_unit = 'molec/cm2'
             if product == 'H2O':
                 maxcf = 0.15
             if product == 'NO2':
@@ -1042,6 +1055,7 @@ class popy(object):
             maxcf = 0.3
             self.pixel_shape = 'quadrilateral'
             self.default_subset_function = 'F_subset_MEaSUREs'
+            self.default_column_unit = 'molec/cm2'
         elif(instrum == "SCIAMACHY"):
             k1 = 4
             k2 = 2
@@ -1055,6 +1069,7 @@ class popy(object):
             maxcf = 0.3
             self.pixel_shape = 'quadrilateral'
             self.default_subset_function = 'F_subset_MEaSUREs'
+            self.default_column_unit = 'molec/cm2'
         elif(instrum == "GOME-2A"):
             k1 = 4
             k2 = 2
@@ -1068,6 +1083,7 @@ class popy(object):
             maxcf = 0.3
             self.pixel_shape = 'quadrilateral'
             self.default_subset_function = 'F_subset_MEaSUREs'
+            self.default_column_unit = 'molec/cm2'
         elif(instrum == "GOME-2B"):
             k1 = 4
             k2 = 2
@@ -1081,6 +1097,7 @@ class popy(object):
             maxcf = 0.3
             self.pixel_shape = 'quadrilateral'
             self.default_subset_function = 'F_subset_MEaSUREs'
+            self.default_column_unit = 'molec/cm2'
         elif(instrum == "OMPS-NPP"):
             k1 = 6
             k2 = 2
@@ -1094,6 +1111,7 @@ class popy(object):
             maxcf = 0.3
             self.pixel_shape = 'quadrilateral'
             self.default_subset_function = 'F_subset_MEaSUREs'
+            self.default_column_unit = 'molec/cm2'
         elif(instrum == "OMPS-N20"):
             k1 = 4
             k2 = 2
@@ -1108,6 +1126,7 @@ class popy(object):
             self.max_qa_value = 0
             self.pixel_shape = 'quadrilateral'
             self.default_subset_function = 'F_subset_MEaSUREs'
+            self.default_column_unit = 'molec/cm2'
         elif(instrum == "TROPOMI"):
             k1 = 4
             k2 = 2
@@ -1137,6 +1156,7 @@ class popy(object):
             maxcf = 0.3
             self.min_qa_value = 0.5
             self.pixel_shape = 'quadrilateral'
+            self.default_column_unit = 'mol/m2'
         elif(instrum == "IASI"):
             k1 = 2
             k2 = 2
@@ -1149,6 +1169,7 @@ class popy(object):
             maxcf = 0.25
             self.pixel_shape = 'elliptical'
             self.default_subset_function = 'F_subset_IASINH3'
+            self.default_column_unit = 'mol/m2'
         elif(instrum == "CrIS"):
             k1 = 2
             k2 = 2
@@ -1163,6 +1184,7 @@ class popy(object):
             self.min_Quality_Flag = 3
             self.pixel_shape = 'elliptical'
             self.default_subset_function = 'F_subset_CrISNH3_Lite'
+            self.default_column_unit = 'molec/cm2'
         elif(instrum == "TES"):
             k1 = 4
             k2 = 4
@@ -1176,6 +1198,7 @@ class popy(object):
             self.mindofs = 0.1
             self.pixel_shape = 'quadrilateral'
             self.default_subset_function = 'F_subset_TESNH3'
+            self.default_column_unit = 'molec/cm2'
         else:
             k1 = 2
             k2 = 2
