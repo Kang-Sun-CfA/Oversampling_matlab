@@ -726,7 +726,7 @@ def F_interp_narr_mat(sounding_lon,sounding_lat,sounding_datenum,\
         sounding_interp[fn] = my_interpolating_function((sounding_x,sounding_y,sounding_datenum))
     return sounding_interp
 
-def F_ncread_selective(fn,varnames):
+def F_ncread_selective(fn,varnames,varnames_short=None):
     """
     very basic netcdf reader, similar to F_ncread_selective.m
     created on 2019/08/13
@@ -734,12 +734,14 @@ def F_ncread_selective(fn,varnames):
     from netCDF4 import Dataset
     ncid = Dataset(fn,'r')
     outp = {}
-    for varname in varnames:
+    if varnames_short is None:
+        varnames_short = varnames
+    for (i,varname) in enumerate(varnames):
         try:
-            outp[varname] = ncid.variables[varname][:].filled(np.nan)
+            outp[varnames_short[i]] = ncid[varname][:].filled(np.nan)
         except:
             logging.debug('{} cannot be filled by nan or is not a masked array'.format(varname))
-            outp[varname] = ncid.variables[varname][:]
+            outp[varnames_short[i]] = ncid[varname][:]
     ncid.close()
     return outp
 
@@ -1127,6 +1129,19 @@ class popy(object):
             self.pixel_shape = 'quadrilateral'
             self.default_subset_function = 'F_subset_MEaSUREs'
             self.default_column_unit = 'molec/cm2'
+        elif(instrum == "MethaneSAT"):
+            k1 = 4
+            k2 = 2
+            k3 = 1
+            error_model = "linear"
+            oversampling_list = ['XCH4','XCO2']
+            xmargin = 1.5
+            ymargin = 1.5
+            maxsza = 60
+            maxcf = 0.3
+            self.pixel_shape = 'quadrilateral'
+            self.default_subset_function = 'F_subset_MethaneSAT'
+            self.default_column_unit = 'molec/cm2'         
         elif(instrum == "TROPOMI"):
             k1 = 4
             k2 = 2
@@ -2336,7 +2351,93 @@ class popy(object):
             self.nl2 = 0
         else:
             self.nl2 = len(l2g_data['latc'])
+    
+    def F_subset_MethaneSAT(self,path,data_fields=None,
+                            data_fields_l2g=None):
+        import glob
+        l2_dir = path
+        l2_list = []
+        cwd = os.getcwd()
+        os.chdir(l2_dir)
+        start_date = self.start_python_datetime.date()
+        end_date = self.end_python_datetime.date()
+        days = (end_date-start_date).days+1
+        DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+        for DATE in DATES:
+            flist = glob.glob('*O2-CH4_'+DATE.strftime("%Y%m%d")+'T*.nc')
+            l2_list = l2_list+flist
+            
+        os.chdir(cwd)
+        self.l2_dir = l2_dir
+        self.l2_list = l2_list
         
+        #maxsza = self.maxsza 
+        #maxcf = self.maxcf
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        if data_fields is None:
+            data_fields = ['Level1/SolarZenithAngle',
+                           'Level1/Longitude',
+                           'Level1/Latitude',
+                           'Level1/CornerLongitudes',
+                           'Level1/CornerLatitudes',
+                           'Level1/Time',
+                           'Posteriori_Profile/CO2_ProxyMixingRatio',
+                           'Posteriori_Profile/CH4_ProxyMixingRatio']
+            data_fields_l2g = ['SolarZenithAngle','lonc','latc',
+                               'longitude_bounds','latitude_bounds',
+                               'time','XCO2','XCH4']
+        self.logger.info('Read, subset, and store level 2 data to l2g_data')
+        self.logger.info('Level 2 data are located at '+l2_dir)
+        l2g_data = {}
+        for fn in l2_list:
+            fn_path = os.path.join(l2_dir,fn)
+            self.logger.info('Loading '+fn)
+            outp =F_ncread_selective(fn_path,data_fields,data_fields_l2g)
+            # move spatial dimensions to the front
+            outp = {k:v.transpose((1,2,0)) for (k,v) in outp.items()}
+            outp['UTC_matlab_datenum'] = np.array([datetime2datenum(datetime.datetime(1985,1,1)+datetime.timedelta(hours=h))
+                                                   for h in outp['time'].squeeze()]).reshape(outp['latc'].shape).squeeze(axis=2)
+            outp['latc'] = outp['latc'].squeeze(axis=2)
+            outp['lonc'] = outp['lonc'].squeeze(axis=2)
+            f4 = outp['latc'] >= south
+            f5 = outp['latc'] <= north
+            tmplon = outp['lonc']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            validmask = f4 & f5 & f6 & f7 & f8 & f9
+            self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            l2g_data0 = {}
+            if np.sum(validmask) == 0:
+                continue
+            # yep it's indeed messed up
+            Lat_lowerleft = outp['latitude_bounds'][:,:,1][validmask]
+            Lat_upperleft = outp['latitude_bounds'][:,:,3][validmask]
+            Lat_lowerright = outp['latitude_bounds'][:,:,0][validmask]
+            Lat_upperright = outp['latitude_bounds'][:,:,2][validmask]
+            Lon_lowerleft = outp['longitude_bounds'][:,:,1][validmask]
+            Lon_upperleft = outp['longitude_bounds'][:,:,3][validmask]
+            Lon_lowerright = outp['longitude_bounds'][:,:,0][validmask]
+            Lon_upperright = outp['longitude_bounds'][:,:,2][validmask]
+            l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
+            l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+            for key in outp.keys():
+                if key not in {'latitude_bounds','longitude_bounds','time'}:
+                    l2g_data0[key] = outp[key][validmask].squeeze()
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        self.logger.warning('adding ones as column_uncertainty for MethaneSAT!')
+        l2g_data['column_uncertainty'] = np.ones_like(l2g_data['latc'])
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
+
     def F_subset_S5PCH4(self,path,if_trop_xch4=False,s5p_product='*',
                         merra2_interp_variables=['TROPPT','PS','U50M','V50M'],
                         merra2_dir='./',
