@@ -1216,7 +1216,7 @@ class popy(object):
             k2 = 2
             k3 = 1
             error_model = "linear"
-            oversampling_list = ['XCH4','XCO2']
+            oversampling_list = ['XCH4','XCO2','terrain_height']
             xmargin = 1.5
             ymargin = 1.5
             maxsza = 60
@@ -2466,11 +2466,12 @@ class popy(object):
                            'Level1/CornerLongitudes',
                            'Level1/CornerLatitudes',
                            'Level1/Time',
+                           'Level1/SurfaceAltitude',
                            'Posteriori_Profile/CO2_ProxyMixingRatio',
                            'Posteriori_Profile/CH4_ProxyMixingRatio']
             data_fields_l2g = ['SolarZenithAngle','lonc','latc',
                                'longitude_bounds','latitude_bounds',
-                               'time','XCO2','XCH4']
+                               'time','TerrainHeight','XCO2','XCH4']
         self.logger.info('Read, subset, and store level 2 data to l2g_data')
         self.logger.info('Level 2 data are located at '+l2_dir)
         l2g_data = {}
