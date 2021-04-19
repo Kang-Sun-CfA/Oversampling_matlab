@@ -268,7 +268,89 @@ def F_interp_gcrs(sounding_lon,sounding_lat,sounding_datenum,sounding_ps,
                 sounding_profile[rowIndex,:] = f((layer_interp[rowIndex,:],\
                                 lat_interp[rowIndex,:],lon_interp[rowIndex,:]))
     return sounding_profile, sounding_pEdge
-        
+
+def F_interp_merra2_global(sounding_lon,sounding_lat,sounding_datenum,\
+                  merra2_dir='/mnt/Data2/MERRA2_2x2.5/',\
+                  interp_fields=['TROPPT'],\
+                  fn_suffix='.A1.2x25'):
+    """
+    sample a field from geos chem merra2 data
+    see /mnt/Data2/MERRA2_2x2.5/test_download_cris.py for downloading
+    sounding_lon:
+        longitude for interpolation
+    sounding_lat:
+        latitude for interpolation
+    sounding_datenum:
+        time for interpolation in matlab datenum double format
+    merra2_dir:
+        directory where merra2 data are saved
+    interp_fields:
+        variables to interpolate from merra2, only 2d fields are supported
+    fn_suffix:
+        only A1 2d data are supported
+    created on 2021/04/18
+    """
+    import glob
+    from scipy.interpolate import RegularGridInterpolator
+    start_datenum = np.amin(sounding_datenum)
+    end_datenum = np.amax(sounding_datenum)
+    start_date = datedev_py(start_datenum).date()
+    
+    end_date = datedev_py(end_datenum).date()
+    days = (end_date-start_date).days+1
+    DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+    merra2_data = {}
+    iday = 0
+    for DATE in DATES:
+        merra_filedir = os.path.join(merra2_dir,DATE.strftime('Y%Y'),\
+                                      DATE.strftime('M%m'),DATE.strftime('D%d'))
+        merra_flist = glob.glob(merra_filedir+'/*'+fn_suffix+'.nc4')
+        if len(merra_flist) > 1:
+            print('Careful! More than one nc file in MERRA daily folder!')
+        elif len(merra_flist) == 0:
+            print('No merra file')
+            continue
+        fn = merra_flist[0]
+        if not merra2_data:
+            nc_out = F_ncread_selective(fn,np.concatenate(
+                    (interp_fields,['lat','lon','time'])))
+            merra2_data['lon'] = np.append(nc_out['lon'],180.)
+            merra2_data['lat'] = nc_out['lat']
+            # how many hours are there in each daily file? have to be the same 
+            nhour = len(nc_out['time'])
+            merra2_data['datenum'] = np.zeros((nhour*(days)),dtype=np.float64)
+            # merra2 time is defined as minutes since 00:30:00 on that day
+            merra2_data['datenum'][iday*nhour:((iday+1)*nhour)] = DATE.toordinal()+366.+(nc_out['time']+30)/1440
+            for field in interp_fields:
+                merra2_data[field] = np.zeros((len(merra2_data['lon']),len(merra2_data['lat']),nhour*(days)))
+                # was read in as 3-d array in time, lat, lon; transpose to lon, lat, time
+                tmp = nc_out[field].transpose((2,1,0))
+                # add 180 longitude dummy
+                merra2_data[field][...,iday*nhour:((iday+1)*nhour)] = np.append(tmp,tmp[[0],:,:],axis=0)
+        else:
+            nc_out = F_ncread_selective(fn,np.concatenate(
+                    (interp_fields,['time'])))
+            # merra2 time is defined as minutes since 00:30:00 on that day
+            merra2_data['datenum'][iday*nhour:((iday+1)*nhour)] = DATE.toordinal()+366.+(nc_out['time']+30)/1440
+            for field in interp_fields:
+                # was read in as 3-d array in time, lat, lon; transpose to lon, lat, time
+                tmp = nc_out[field].transpose((2,1,0))
+                merra2_data[field][...,iday*nhour:((iday+1)*nhour)] = np.append(tmp,tmp[[0],:,:],axis=0)
+        # forgot to increment iday
+        iday = iday+1
+    
+    sounding_interp = {}
+    if not merra2_data:
+        for fn in interp_fields:
+            sounding_interp[fn] = sounding_lon*np.nan
+        return sounding_interp
+    # interpolate
+    for fn in interp_fields:
+        my_interpolating_function = \
+        RegularGridInterpolator((merra2_data['lon'],merra2_data['lat'],merra2_data['datenum']),\
+                                merra2_data[fn],bounds_error=False,fill_value=np.nan)
+        sounding_interp[fn] = my_interpolating_function((sounding_lon,sounding_lat,sounding_datenum))
+    return sounding_interp     
 def F_interp_merra2(sounding_lon,sounding_lat,sounding_datenum,\
                   merra2_dir='/mnt/Data2/MERRA/',\
                   interp_fields=['PBLTOP','PS','TROPPT'],\
