@@ -2471,7 +2471,7 @@ class popy(object):
                            'Posteriori_Profile/CH4_ProxyMixingRatio']
             data_fields_l2g = ['SolarZenithAngle','lonc','latc',
                                'longitude_bounds','latitude_bounds',
-                               'time','TerrainHeight','XCO2','XCH4']
+                               'time','terrain_height','XCO2','XCH4']
         self.logger.info('Read, subset, and store level 2 data to l2g_data')
         self.logger.info('Level 2 data are located at '+l2_dir)
         l2g_data = {}
