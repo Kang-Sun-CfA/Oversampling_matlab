@@ -3593,7 +3593,9 @@ class popy(object):
             f7 = tmplon <= east-west
             f8 = outp['UTC_matlab_datenum'] >= self.start_matlab_datenum
             f9 = outp['UTC_matlab_datenum'] <= self.end_matlab_datenum
-            validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+            # the -999.5 fill value is annoying
+            f10 = (outp['tot_col'] > 0) & (outp['tot_col_total_error'] > 0)
+            validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9 & f10
             self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
             l2g_data0 = {}
             if np.sum(validmask) == 0:
@@ -3780,7 +3782,7 @@ class popy(object):
     
     def F_plot_l3_cartopy(self,plot_field='column_amount',l3_data=None,
                           existing_ax=None,draw_admin_level=1,
-                          layer_threshold=0.5,**kwargs):
+                          layer_threshold=0.5,draw_colorbar=True,**kwargs):
         '''
         l3 plotting utility using cartopy
         plot_field:
@@ -3843,7 +3845,10 @@ class popy(object):
             plotdata[l3_data['num_samples']<layer_threshold] = np.nan
         pc = ax.pcolormesh(xgrid,ygrid,plotdata,transform=ccrs.PlateCarree(),
                            alpha=kwargs['alpha'],cmap=kwargs['cmap'],vmin=kwargs['vmin'],vmax=kwargs['vmax'],shading='auto')
-        cb = plt.colorbar(pc,ax=ax,label=plot_field,shrink=kwargs['shrink'])
+        if draw_colorbar:
+            cb = plt.colorbar(pc,ax=ax,label=plot_field,shrink=kwargs['shrink'])
+        else:
+            cb = None
         fig_output = {}
         fig_output['fig'] = fig
         fig_output['ax'] = ax
