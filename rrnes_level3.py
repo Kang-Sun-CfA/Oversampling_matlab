@@ -135,6 +135,10 @@ for year in range(start_year,end_year+1):
             logging.warning('Nothing left in this month!')
             continue
         l2g_data = p.l2g_data
+        #kludge for CrIS
+        if control['which sensor'] == 'CrIS':
+            pmask = (l2g_data['column_amount'] > 0) & (l2g_data['column_uncertainty'] > 0)
+            l2g_data = {k:v[pmask,] for (k,v) in l2g_data.items()}
         # keep only rows 5-23 for OMI if excluding row anomaly
         if control['which sensor'] == 'OMI' and control['if exclude row anomaly']:
             mask = np.isin(l2g_data['across_track_position'],np.arange(5,24))

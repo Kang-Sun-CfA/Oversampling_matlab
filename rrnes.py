@@ -206,6 +206,9 @@ class RRNES(object):
         yy = np.array([])
         nx_per_month = np.full((nmonth),np.nan)
         for (i,mergedDict) in enumerate(monthlyDictArray):
+            if not mergedDict:
+                nx_per_month[i] = 0
+                continue
             mask = (~np.isnan(mergedDict[self.moleculeList[0]]['ime_ws'])) & (~np.isnan(mergedDict[self.moleculeList[0]]['ime_C'])) \
             & (mergedDict[self.moleculeList[0]]['ime_ws'] >= wsRange[0]) & (mergedDict[self.moleculeList[0]]['ime_ws'] <= wsRange[1])
             xx = np.append(xx,mergedDict[self.moleculeList[0]]['ime_ws'][mask])
@@ -518,7 +521,7 @@ class RRNES(object):
         mergedDict = {}
         for idict,d in enumerate(monthlyDictArray):
             if not d:
-                self.logger.warning('%02d'%d[self.moleculeList[0]]['month_vec']+'/%04d'%d[self.moleculeList[0]]['year_vec']+' gives empty data!')
+                self.logger.warning('empty month')#'%02d'%d[self.moleculeList[0]]['month_vec']+'/%04d'%d[self.moleculeList[0]]['year_vec']+' gives empty data!')
                 continue
             if not mergedDict:
                 self.logger.info('initiate merge with data in '+'%02d'%d[self.moleculeList[0]]['month_vec']+'/%04d'%d[self.moleculeList[0]]['year_vec'])

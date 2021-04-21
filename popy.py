@@ -23,62 +23,90 @@ import os
 import logging
 
 def F_wrapper_l3(instrum,product,grid_size,l2_dir,
-                 start_year,start_month,end_year,end_month,
+                 start_year=2005,start_month=7,end_year=2005,end_month=7,
                  start_day=1,end_day=None,
                  west=-80,east=-69,south=40,north=46,
-                 column_unit='mol/m2',
+                 column_unit='umol/m2',
                  subset_function=None,l2_path_structure='%Y/%m/%d/',
                  if_use_presaved_l2g=True,l2g_header='CONUS',
                  if_plot_l3=True,existing_ax=None,
                  ncores=0,block_length=100,
-                 subset_kw={},plot_kw={}):
+                 subset_kw={},plot_kw={},
+                 start_date_array=None,
+                 end_date_array=None):
+    from calendar import monthrange
     if end_day is None:
-        from calendar import monthrange
         end_day = monthrange(end_year,end_month)[-1]
-    o = popy(instrum=instrum,product=product,grid_size=grid_size,
-             start_year=start_year,start_month=start_month,start_day=start_day,
-             end_year=end_year,end_month=end_month,end_day=end_day,
-             west=west,east=east,south=south,north=north)
-    if not if_use_presaved_l2g:
-        if subset_function is None:
-            subset_function = o.default_subset_function
-        getattr(o, subset_function)(path=l2_dir,l2_path_structure=l2_path_structure,**subset_kw)
-        if 'column_amount' in o.oversampling_list:
-            if o.default_column_unit == 'molec/cm2' and column_unit == 'mol/m2':
-                o.l2g_data['column_amount'] = o.l2g_data['column_amount']/6.02214e19
-            elif o.default_column_unit == 'mol/m2' and column_unit == 'molec/cm2':
-                o.l2g_data['column_amount'] = o.l2g_data['column_amount']*6.02214e19
-        l3_data = o.F_parallel_regrid(ncores=ncores,block_length=block_length)
-        if if_plot_l3:
-            figout = o.F_plot_l3_cartopy(l3_data=l3_data,existing_ax=existing_ax,**plot_kw)
-        else:
-            figout = None
+    if start_date_array is not None:
+        logging.info('Array of date provided, superseding start/end_year/month/day')
+        if end_date_array is None:
+            logging.info('end dates not provided, assuming end of months')
+            end_date_array = np.array([datetime.date(d.year,d.month,monthrange(d.year,d.month)[-1]) for d in start_date_array])
     else:
-        l3_data = {}
-        import os
-        for year in range(start_year,end_year+1):
-            for month in range(1,13):
-                if year == start_year and month < start_month:
-                    continue
-                elif year == end_year and month > end_month:
-                    continue
-                l2g_path = os.path.join(l2_dir,l2g_header+'_{:04d}_{:02d}.mat'.format(year,month))
-                if not os.path.exists(l2g_path):
-                    import logging
-                    logging.warning(l2g_path+' does not exist!')
-                    continue
-                o.F_mat_reader(l2g_path)
-                if 'column_amount' in o.oversampling_list:
-                    if o.default_column_unit == 'molec/cm2' and column_unit == 'mol/m2':
-                        o.l2g_data['column_amount'] = o.l2g_data['column_amount']/6.02214e19
-                    elif o.default_column_unit == 'mol/m2' and column_unit == 'molec/cm2':
-                        o.l2g_data['column_amount'] = o.l2g_data['column_amount']*6.02214e19
-                monthly_l3_data = o.F_parallel_regrid(ncores=ncores,block_length=block_length)
-                l3_data = o.F_merge_l3_data(l3_data,monthly_l3_data)
-        if if_plot_l3:
-            figout = o.F_plot_l3_cartopy(l3_data=l3_data,existing_ax=existing_ax,**plot_kw)
+        start_date_array = np.array([datetime.date(start_year,start_month,start_day)])
+        end_date_array = np.array([datetime.date(end_year,end_month,end_day)])
+    l3_data = {}
+    for idate in range(len(start_date_array)):
+        start_date = start_date_array[idate]
+        end_date = end_date_array[idate]
+        
+        o = popy(instrum=instrum,product=product,grid_size=grid_size,
+                 start_year=start_date.year,start_month=start_date.month,start_day=start_date.day,
+                 end_year=end_date.year,end_month=end_date.month,end_day=end_date.day,
+                 west=west,east=east,south=south,north=north)
+        if not if_use_presaved_l2g:
+            if subset_function is None:
+                subset_function = o.default_subset_function
+            getattr(o, subset_function)(path=l2_dir,l2_path_structure=l2_path_structure,**subset_kw)
+            if 'column_amount' in o.oversampling_list:
+                if o.default_column_unit == 'molec/cm2' and column_unit == 'mol/m2':
+                    o.l2g_data['column_amount'] = o.l2g_data['column_amount']/6.02214e19
+                elif o.default_column_unit == 'mol/m2' and column_unit == 'molec/cm2':
+                    o.l2g_data['column_amount'] = o.l2g_data['column_amount']*6.02214e19
+                if column_unit == 'umol/m2':
+                    if o.default_column_unit == 'molec/cm2':
+                        o.l2g_data['column_amount'] = o.l2g_data['column_amount']/6.02214e19*1e6
+                    if o.default_column_unit == 'mol/m2':
+                        o.l2g_data['column_amount'] = o.l2g_data['column_amount']*1e6
+            #kludge for CrIS
+            if instrum == 'CrIS':
+                mask = (o.l2g_data['column_amount'] > 0) & (o.l2g_data['column_uncertainty'] > 0)
+                o.l2g_data = {k:v[mask,] for (k,v) in o.l2g_data.items()}
+            l3_data0 = o.F_parallel_regrid(ncores=ncores,block_length=block_length)
         else:
-            figout = None
+            l3_data0 = {}
+            for year in range(start_date.year,end_date.year+1):
+                for month in range(1,13):
+                    if year == start_date.year and month < start_date.month:
+                        continue
+                    elif year == end_date.year and month > end_date.month:
+                        continue
+                    l2g_path = os.path.join(l2_dir,l2g_header+'_{:04d}_{:02d}.mat'.format(year,month))
+                    if not os.path.exists(l2g_path):
+                        logging.warning(l2g_path+' does not exist!')
+                        continue
+                    o.F_mat_reader(l2g_path)
+                    #kludge for CrIS
+                    if instrum == 'CrIS':
+                        mask = (o.l2g_data['column_amount'] > 0) & (o.l2g_data['column_uncertainty'] > 0)
+                        o.l2g_data = {k:v[mask,] for (k,v) in o.l2g_data.items()}
+                    if 'column_amount' in o.oversampling_list:
+                        if o.default_column_unit == 'molec/cm2' and column_unit == 'mol/m2':
+                            o.l2g_data['column_amount'] = o.l2g_data['column_amount']/6.02214e19
+                        elif o.default_column_unit == 'mol/m2' and column_unit == 'molec/cm2':
+                            o.l2g_data['column_amount'] = o.l2g_data['column_amount']*6.02214e19
+                        if column_unit == 'umol/m2':
+                            if o.default_column_unit == 'molec/cm2':
+                                o.l2g_data['column_amount'] = o.l2g_data['column_amount']/6.02214e19*1e6
+                            if o.default_column_unit == 'mol/m2':
+                                o.l2g_data['column_amount'] = o.l2g_data['column_amount']*1e6
+                    monthly_l3_data = o.F_parallel_regrid(ncores=ncores,block_length=block_length)
+                    l3_data0 = o.F_merge_l3_data(l3_data0,monthly_l3_data)
+        l3_data = o.F_merge_l3_data(l3_data,l3_data0)
+    if if_plot_l3:
+        figout = o.F_plot_l3_cartopy(l3_data=l3_data,existing_ax=existing_ax,**plot_kw)
+    else:
+        figout = None
     return {'l3_data':l3_data,'figout':figout}
 
 def datedev_py(matlab_datenum):
@@ -1477,6 +1505,8 @@ class popy(object):
     def F_merge_l2g_data(self,l2g_data0,l2g_data1):
         if not l2g_data0:
             return l2g_data1
+        if not l2g_data1:
+            return l2g_data0
         common_keys = set(l2g_data0).intersection(set(l2g_data1))
         for key in common_keys:
             l2g_data0[key] = np.concatenate((l2g_data0[key],l2g_data1[key]),0)
@@ -1486,6 +1516,8 @@ class popy(object):
         if not l3_data0:
             l3_data = l3_data1
             return l3_data
+        if not l3_data1:
+            return l3_data0
         common_keys = set(l3_data0).intersection(set(l3_data1))
         l3_data = {}
         for key in common_keys:
@@ -2471,7 +2503,7 @@ class popy(object):
                            'Posteriori_Profile/CH4_ProxyMixingRatio']
             data_fields_l2g = ['SolarZenithAngle','lonc','latc',
                                'longitude_bounds','latitude_bounds',
-                               'time','terrain_height','XCO2','XCH4']
+                               'time','TerrainHeight','XCO2','XCH4']
         self.logger.info('Read, subset, and store level 2 data to l2g_data')
         self.logger.info('Level 2 data are located at '+l2_dir)
         l2g_data = {}
@@ -3747,7 +3779,8 @@ class popy(object):
             self.nl2 = len(l2g_data['latc'])
     
     def F_plot_l3_cartopy(self,plot_field='column_amount',l3_data=None,
-                          existing_ax=None,draw_admin_level=1,**kwargs):
+                          existing_ax=None,draw_admin_level=1,
+                          layer_threshold=0.5,**kwargs):
         '''
         l3 plotting utility using cartopy
         plot_field:
@@ -3776,6 +3809,9 @@ class popy(object):
         if 'xgrid' in l3_data.keys():
             xgrid = l3_data['xgrid'];ygrid = l3_data['ygrid']
         
+        if plot_field not in l3_data.keys():
+            self.logger.warning(plot_field+' doesn''t exist in l3_data!')
+            return {}
         if self.error_model == 'log' and plot_field == 'column_amount':
             plotdata = np.power(10,l3_data[plot_field])
         else:
@@ -3803,6 +3839,8 @@ class popy(object):
         elif draw_admin_level == 1:
             ax.add_feature(cfeature.BORDERS)
             ax.add_feature(cfeature.STATES,edgecolor='gray')
+        if 'num_samples' in l3_data.keys():
+            plotdata[l3_data['num_samples']<layer_threshold] = np.nan
         pc = ax.pcolormesh(xgrid,ygrid,plotdata,transform=ccrs.PlateCarree(),
                            alpha=kwargs['alpha'],cmap=kwargs['cmap'],vmin=kwargs['vmin'],vmax=kwargs['vmax'],shading='auto')
         cb = plt.colorbar(pc,ax=ax,label=plot_field,shrink=kwargs['shrink'])
@@ -3810,6 +3848,7 @@ class popy(object):
         fig_output['fig'] = fig
         fig_output['ax'] = ax
         fig_output['cb'] = cb
+        fig_output['pc'] = pc
         return fig_output
     
     def F_plot_l3(self,plot_field='column_amount',l3_data=None,
