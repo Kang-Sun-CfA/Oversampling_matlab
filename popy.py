@@ -45,7 +45,7 @@ def F_wrapper_l3(instrum,product,grid_size,l2_dir,
     else:
         start_date_array = np.array([datetime.date(start_year,start_month,start_day)])
         end_date_array = np.array([datetime.date(end_year,end_month,end_day)])
-    l3_data = {}
+    l3_data = Level3_Data()
     for idate in range(len(start_date_array)):
         start_date = start_date_array[idate]
         end_date = end_date_array[idate]
@@ -74,7 +74,7 @@ def F_wrapper_l3(instrum,product,grid_size,l2_dir,
                 o.l2g_data = {k:v[mask,] for (k,v) in o.l2g_data.items()}
             l3_data0 = o.F_parallel_regrid(ncores=ncores,block_length=block_length)
         else:
-            l3_data0 = {}
+            l3_data0 = Level3_Data()
             for year in range(start_date.year,end_date.year+1):
                 for month in range(1,13):
                     if year == start_date.year and month < start_date.month:
@@ -101,10 +101,10 @@ def F_wrapper_l3(instrum,product,grid_size,l2_dir,
                             if o.default_column_unit == 'mol/m2':
                                 o.l2g_data['column_amount'] = o.l2g_data['column_amount']*1e6
                     monthly_l3_data = o.F_parallel_regrid(ncores=ncores,block_length=block_length)
-                    l3_data0 = o.F_merge_l3_data(l3_data0,monthly_l3_data)
-        l3_data = o.F_merge_l3_data(l3_data,l3_data0)
+                    l3_data0 = l3_data0.merge(monthly_l3_data)
+        l3_data = l3_data.merge(l3_data0)
     if if_plot_l3:
-        figout = o.F_plot_l3_cartopy(l3_data=l3_data,existing_ax=existing_ax,**plot_kw)
+        figout = l3_data.plot(existing_ax=existing_ax,**plot_kw)
     else:
         figout = None
     return {'l3_data':l3_data,'figout':figout}
@@ -1120,6 +1120,318 @@ def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
         l3_data['pres_num_samples'] = pres_num_samples
     return l3_data
 
+# In this "robust" version of arange the grid doesn't suffer 
+# from the shift of the nodes due to error accumulation.
+# This effect is pronounced only if the step is sufficiently small.
+def arange_(lower,upper,step,dtype=None):
+    npnt = np.floor((upper-lower)/step)+1
+    upper_new = lower + step*(npnt-1)
+    if np.abs((upper-upper_new)-step) < 1e-10:
+        upper_new += step
+        npnt += 1    
+    return np.linspace(lower,upper_new,int(npnt),dtype=dtype)
+
+class Level3_Data(dict):
+    '''
+    rewrite l3_data into a class based on python dict. include functions
+    started on 2021/04/24
+    '''
+    def __init__(self,grid_size=None,
+                 start_python_datetime=None,
+                 end_python_datetime=None,
+                 instrum='unknown',product='unknown'):
+        self.logger = logging.getLogger(__name__)
+        self.logger.info('creating an instance of Level3_Data')
+        self.grid_size = grid_size
+        if start_python_datetime is not None:
+            self.start_python_datetime = start_python_datetime
+        else:
+            self.start_python_datetime = datetime.datetime(1900,1,1)
+        if end_python_datetime is not None:
+            self.end_python_datetime = end_python_datetime
+        else:
+            self.end_python_datetime = datetime.datetime(2100,1,1)
+        self.instrum = instrum
+        self.product = product
+    
+    def add(self,key,value):
+        self.__setitem__(key,value)
+        
+    def assimilate(self,dictionary):
+        for (key,value) in dictionary.items():
+            self.add(key,value)
+    
+    def check(self):
+        from math import isclose
+        self.nrows = len(self['ygrid'])
+        self.ncols = len(self['xgrid'])
+        xgrid_size = np.median(np.diff(self['xgrid']))
+        ygrid_size = np.median(np.diff(self['ygrid']))
+        if not isclose(xgrid_size,ygrid_size):
+            self.logger.info('x/y grid size''s inconsistency may need attention, {} vs {}'.format(xgrid_size,ygrid_size))
+        if self.grid_size is None:
+            self.grid_size = np.mean([xgrid_size,ygrid_size])
+            self.logger.debug('xgrid size is {}; ygrid size is {}; grid size is {}'.format(xgrid_size,ygrid_size,self.grid_size))
+        else:
+            if not isclose(self.grid_size,np.mean([xgrid_size,ygrid_size])):
+                self.logger.info('grid_size''s inconsistency with x/y grid may need attention, {} vs {}'\
+                                    .format(self.grid_size,np.mean([xgrid_size,ygrid_size])))
+                self.grid_size = np.mean([xgrid_size,ygrid_size])
+    
+    def merge(self,l3_data1):
+        if len(self.keys()) == 0:
+            self.logger.info('orignial level 3 is empty. returning the added level 3.')
+            return l3_data1
+        if len(l3_data1.keys()) == 0:
+            self.logger.info('added level 3 is empty. returning the orignial level 3.')
+            return self
+        common_keys = set(self).intersection(set(l3_data1))
+        merged_grid_size = np.mean([self.grid_size,l3_data1.grid_size])
+        self.logger.info('orginal grid size is {}, added grid size is {}, merged grid size is {}'\
+                         .format(self.grid_size,l3_data1.grid_size,merged_grid_size))
+        if self.start_python_datetime == datetime.datetime(1900, 1, 1):
+            merged_start_datetime = l3_data1.start_python_datetime
+        else:
+            merged_start_datetime = np.min([self.start_python_datetime,l3_data1.start_python_datetime])
+        self.logger.info('orginal start time is {}, added start time is {}, merged start time is {}'\
+                         .format(self.start_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                                 l3_data1.start_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                                 merged_start_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')))
+        if self.end_python_datetime == datetime.datetime(2100, 1, 1):
+            merged_end_datetime = l3_data1.end_python_datetime
+        else:
+            merged_end_datetime = np.max([self.end_python_datetime,l3_data1.end_python_datetime])
+        self.logger.info('orginal end time is {}, added end time is {}, merged end time is {}'\
+                         .format(self.end_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                                 l3_data1.end_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                                 merged_end_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')))
+        
+        l3_data = Level3_Data(grid_size=merged_grid_size,
+                             start_python_datetime=merged_start_datetime,
+                             end_python_datetime=merged_end_datetime,
+                             instrum=self.instrum,
+                             product=self.product)
+        for key in common_keys:
+            v0 = self[key]
+            v1 = l3_data1[key]
+            v0[np.isnan(v0)] = 0.
+            v1[np.isnan(v1)] = 0.
+            if key in ['total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
+                l3_data[key] = v0+v1
+            elif key in ['xgrid','ygrid','nrows','nrow','ncols','ncol','xmesh','ymesh']:
+                l3_data[key] = v0
+            elif key == 'cloud_pressure':
+                l3_data[key] = (v0*self['pres_total_sample_weight']
+                +v1*l3_data1['pres_total_sample_weight'])\
+                /(self['pres_total_sample_weight']
+                +l3_data1['pres_total_sample_weight'])
+            else:
+                l3_data[key] = (v0*self['total_sample_weight']
+                +v1*l3_data1['total_sample_weight'])\
+                /(self['total_sample_weight']
+                +l3_data1['total_sample_weight'])
+        return l3_data
+    
+    def read_mat(self,l3_filename,
+                 boundary_polygon=None,
+                 start_python_datetime=None,
+                 end_python_datetime=None):
+        from scipy.io import loadmat
+        if start_python_datetime is not None:
+            self.start_python_datetime = start_python_datetime
+        if end_python_datetime is not None:
+            self.end_python_datetime = end_python_datetime
+        d = loadmat(l3_filename,squeeze_me=True)
+        d.pop('__globals__')
+        d.pop('__header__')
+        d.pop('__version__')
+        
+        self.assimilate(d)
+        if boundary_polygon is not None:
+            self.logger.info('boundary polygon provided, masking out-of-boundary grid cells...')
+            [xmesh,ymesh] = np.meshgrid(self['xgrid'],self['ygrid'])
+            xlin = xmesh.reshape(-1)
+            ylin = ymesh.reshape(-1)
+            mask=~boundary_polygon.contains_points(np.hstack((xlin[:,np.newaxis],ylin[:,np.newaxis]))).reshape(xmesh.shape)
+            for (k,v) in self.items():
+                if len(v.shape) == 2:
+                    self[k][mask] = np.nan
+        self.check()
+    
+    def read_nc(self,l3_filename,
+                fields_name=[]):
+        from netCDF4 import Dataset
+        if 'xgrid' not in fields_name:
+            fields_name.append('xgrid')
+        if 'ygrid' not in fields_name:
+            fields_name.append('ygrid')
+        if 'num_samples' not in fields_name:
+            fields_name.append('num_samples')
+        if 'total_sample_weight' not in fields_name:
+            fields_name.append('total_sample_weight')
+        nc = Dataset(l3_filename,'r')
+        self.grid_size = np.float(nc.getncattr('grid_size'))
+        self.start_python_datetime = datetime.datetime.strptime(nc.getncattr('time_coverage_start'),'%Y-%m-%dT%H:%M:%SZ')
+        self.end_python_datetime = datetime.datetime.strptime(nc.getncattr('time_coverage_end'),'%Y-%m-%dT%H:%M:%SZ')
+        for (i,varname) in enumerate(fields_name):
+            try:
+                self[varname] = nc[varname][:].filled(np.nan)
+            except:
+                self.logger.debug('{} cannot be filled by nan or is not a masked array'.format(varname))
+                self[varname] = np.array(nc[varname][:])
+        self.check()
+        nc.close()
+        
+    def save_nc(self,l3_filename,
+                fields_name=[],
+                fields_rename=None,
+                fields_comment=None,
+                fields_unit=None,
+                ncattr_dict={}):
+        from netCDF4 import Dataset
+        if 'xgrid' not in fields_name:
+            fields_name.append('xgrid')
+        if 'ygrid' not in fields_name:
+            fields_name.append('ygrid')
+        if 'num_samples' not in fields_name:
+            fields_name.append('num_samples')
+        if 'total_sample_weight' not in fields_name:
+            fields_name.append('total_sample_weight')
+        if fields_rename is None:
+            fields_rename = fields_name
+        if fields_comment is None:
+            fields_comment = ['' for i in range(len(fields_name))]
+        if fields_unit is None:
+            fields_unit = ['' for i in range(len(fields_name))]
+        nc = Dataset(l3_filename,'w',format='NETCDF4')
+        if not ncattr_dict:
+            ncattr_dict = {'description':'Level 3 data created using physical oversampling (https://doi.org/10.5194/amt-11-6679-2018)',
+                           'institution':'University at Buffalo',
+                           'contact':'Kang Sun, kangsun@buffalo.edu'}
+        if 'history' not in ncattr_dict.keys():
+            ncattr_dict['history'] = 'Created '+datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ')
+        if 'time_coverage_start' not in ncattr_dict.keys():
+            ncattr_dict['time_coverage_start'] = self.start_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+        if 'time_coverage_end' not in ncattr_dict.keys():
+            ncattr_dict['time_coverage_end'] = self.end_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+        if 'grid_size' not in ncattr_dict.keys():
+            ncattr_dict['grid_size'] = '{}'.format(self.grid_size)
+        nc.setncatts(ncattr_dict)
+        nc.createDimension('nrows',self.nrows)
+        nc.createDimension('ncols',self.ncols)
+        for (i,fn) in enumerate(fields_name):
+            if fn in ['xgrid']:
+                vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('ncols'))
+            elif fn in ['ygrid']:
+                vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('nrows'))
+            else:
+                vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('nrows','ncols'))
+            vid.comment = fields_comment[i]
+            vid.units = fields_unit[i]
+            vid[:] = np.ma.masked_invalid(np.float32(self[fn]))
+        nc.close()
+    
+    def block_reduce(self,new_grid_size):
+        self.check()
+        if new_grid_size <= self.grid_size:
+            self.logger.warning('provide a grid size larger than {}!'.format(self.grid_size))
+            return
+        from skimage.measure import block_reduce
+        reduce_factor = np.int(np.rint(new_grid_size/self.grid_size))
+        if reduce_factor == 1:
+            self.warning('no need to reduce')
+            return
+        self.logger.info('level 3 grid will be coarsened by a factor of {}'.format(reduce_factor))
+        self.logger.info('new grid size is specified as {}, rounded to {}'.format(new_grid_size,self.grid_size*reduce_factor))
+        new_l3 = Level3_Data(grid_size=self.grid_size*reduce_factor,
+                             start_python_datetime=self.start_python_datetime,
+                             end_python_datetime=self.end_python_datetime,
+                             instrum=self.instrum,
+                             product=self.product)
+        for (k,v) in self.items():
+            if k in ['total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
+                new_l3.add(k,block_reduce(self[k],(reduce_factor,reduce_factor),func=np.nansum))
+            elif k in ['xmesh','ymesh']:
+                new_l3.add(k,block_reduce(self[k],(reduce_factor,reduce_factor),func=np.nanmean))
+            elif k in ['xgrid','ygrid']:
+                new_l3.add(k,block_reduce(self[k],(reduce_factor,),func=np.nanmean))
+        for (k,v) in self.items():
+            if k in ['ncol','ncols']:
+                new_l3.add(k,len(new_l3['xgrid']))
+            elif k in ['nrow','nrows']:
+                new_l3.add(k,len(new_l3['ygrid']))
+            elif k == 'cloud_pressure':
+                new_l3.add(k,block_reduce(self[k]*self['pres_total_sample_weight'],
+                                          (reduce_factor,reduce_factor),func=np.nansum)\
+                           /new_l3['pres_total_sample_weight'])
+            elif self[k].shape == (self.nrows,self.ncols) and \
+                k not in ['xmesh','ymesh','total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
+                self.logger.info('block reducing field {}'.format(k))
+                new_l3.add(k,block_reduce(self[k]*self['total_sample_weight'],
+                                          (reduce_factor,reduce_factor),func=np.nansum)\
+                           /new_l3['total_sample_weight'])
+        new_l3.check()
+        return new_l3
+        
+    def plot(self,plot_field='column_amount',
+             existing_ax=None,draw_admin_level=1,
+             layer_threshold=0.5,draw_colorbar=True,
+             func=None,**kwargs):
+        import matplotlib.pyplot as plt
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+        # workaround for cartopy 0.16
+        from matplotlib.axes import Axes
+        from cartopy.mpl.geoaxes import GeoAxes
+        GeoAxes._pcolormesh_patched = Axes.pcolormesh
+        
+        xgrid = self['xgrid'];ygrid = self['ygrid']
+        
+        if plot_field not in self.keys():
+            self.logger.warning(plot_field+' doesn''t exist in l3_data!')
+            return {}
+        if func is not None:
+            plotdata = func(self[plot_field])
+        else:
+            plotdata = self[plot_field]
+        if 'cmap' not in kwargs.keys():
+            kwargs['cmap'] = 'rainbow'
+        if 'alpha' not in kwargs.keys():
+            kwargs['alpha'] = 1.
+        if 'shrink' not in kwargs.keys():
+            kwargs['shrink'] = 0.75
+        if 'vmin' not in kwargs.keys():
+            kwargs['vmin'] = np.nanmin(plotdata)
+            kwargs['vmax'] = np.nanmax(plotdata)
+        if existing_ax is None:
+            self.logger.info('axes not supplied, creating one')
+            fig,ax = plt.subplots(1,1,figsize=(10,5),
+                                  subplot_kw={"projection": ccrs.PlateCarree()})
+        else:
+            fig = None
+            ax = existing_ax
+        ax.set_extent([self['xgrid'].min(), self['xgrid'].max(), self['ygrid'].min(), self['ygrid'].max()], ccrs.Geodetic())
+        ax.add_feature(cfeature.COASTLINE)
+        if draw_admin_level == 0:
+            ax.add_feature(cfeature.BORDERS, edgecolor='gray')
+        elif draw_admin_level == 1:
+            ax.add_feature(cfeature.BORDERS)
+            ax.add_feature(cfeature.STATES,edgecolor='gray')
+        if 'num_samples' in self.keys():
+            plotdata[self['num_samples']<layer_threshold] = np.nan
+        pc = ax.pcolormesh(xgrid,ygrid,plotdata,transform=ccrs.PlateCarree(),
+                           alpha=kwargs['alpha'],cmap=kwargs['cmap'],vmin=kwargs['vmin'],vmax=kwargs['vmax'],shading='auto')
+        if draw_colorbar:
+            cb = plt.colorbar(pc,ax=ax,label=plot_field,shrink=kwargs['shrink'])
+        else:
+            cb = None
+        fig_output = {}
+        fig_output['fig'] = fig
+        fig_output['ax'] = ax
+        fig_output['cb'] = cb
+        fig_output['pc'] = pc
+        return fig_output
+
 class popy(object):
     
     def __init__(self,instrum,product,\
@@ -1356,8 +1668,8 @@ class popy(object):
         self.south = south
         self.north = north
         
-        xgrid = np.arange(west,east,grid_size,dtype=np.float64)+grid_size/2
-        ygrid = np.arange(south,north,grid_size,dtype=np.float64)+grid_size/2
+        xgrid = arange_(west,east,grid_size,dtype=np.float64)+grid_size/2
+        ygrid = arange_(south,north,grid_size,dtype=np.float64)+grid_size/2
         [xmesh,ymesh] = np.meshgrid(xgrid,ygrid)
         
         xgridr = np.hstack((np.arange(west,east,grid_size),east))
@@ -2503,7 +2815,7 @@ class popy(object):
                            'Posteriori_Profile/CH4_ProxyMixingRatio']
             data_fields_l2g = ['SolarZenithAngle','lonc','latc',
                                'longitude_bounds','latitude_bounds',
-                               'time','TerrainHeight','XCO2','XCH4']
+                               'time','terrain_height','XCO2','XCH4']
         self.logger.info('Read, subset, and store level 2 data to l2g_data')
         self.logger.info('Level 2 data are located at '+l2_dir)
         l2g_data = {}
@@ -4369,7 +4681,14 @@ class popy(object):
                        oversampling_list,self.pixel_shape,self.error_model,
                        self.k1,self.k2,self.k3,xmargin,ymargin,
                        iblock=1)
-            return l3_data
+            l3_data['xgrid'] = self.xgrid
+            l3_data['ygrid'] = self.ygrid
+            l3_object = Level3_Data(grid_size=self.grid_size,
+                                    start_python_datetime=self.start_python_datetime,
+                                    end_python_datetime=self.end_python_datetime,
+                                    instrum=self.instrum,product=self.product)
+            l3_object.assimilate(l3_data)
+            return l3_object
         
         import multiprocessing
         
@@ -4464,8 +4783,14 @@ class popy(object):
         l3_data = {}
         for key in l3_data0.keys():
             l3_data[key] = np.block([dict_of_lists[key][i:i+nblock_col] for i in range(0,nblock,nblock_col)])
-        
-        return l3_data
+        l3_data['xgrid'] = self.xgrid
+        l3_data['ygrid'] = self.ygrid
+        l3_object = Level3_Data(grid_size=self.grid_size,
+                                start_python_datetime=self.start_python_datetime,
+                                end_python_datetime=self.end_python_datetime,
+                                instrum=self.instrum,product=self.product)
+        l3_object.assimilate(l3_data)
+        return l3_object
         
     def F_regrid_ccm(self):
         """
