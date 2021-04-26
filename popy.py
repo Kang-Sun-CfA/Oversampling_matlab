@@ -1341,7 +1341,7 @@ class Level3_Data(dict):
         reduce_factor = np.int(np.rint(new_grid_size/self.grid_size))
         if reduce_factor == 1:
             self.warning('no need to reduce')
-            return
+            return self
         self.logger.info('level 3 grid will be coarsened by a factor of {}'.format(reduce_factor))
         self.logger.info('new grid size is specified as {}, rounded to {}'.format(new_grid_size,self.grid_size*reduce_factor))
         new_l3 = Level3_Data(grid_size=self.grid_size*reduce_factor,
@@ -1349,26 +1349,31 @@ class Level3_Data(dict):
                              end_python_datetime=self.end_python_datetime,
                              instrum=self.instrum,
                              product=self.product)
+        # otherwise block_reduce will pad zeros, ruining the end elements
+        ncols_trim = self.ncols-self.ncols%reduce_factor
+        nrows_trim = self.nrows-self.nrows%reduce_factor
         for (k,v) in self.items():
             if k in ['total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
-                new_l3.add(k,block_reduce(self[k],(reduce_factor,reduce_factor),func=np.nansum))
+                new_l3.add(k,block_reduce(self[k][:nrows_trim,:ncols_trim],(reduce_factor,reduce_factor),func=np.nansum))
             elif k in ['xmesh','ymesh']:
-                new_l3.add(k,block_reduce(self[k],(reduce_factor,reduce_factor),func=np.nanmean))
-            elif k in ['xgrid','ygrid']:
-                new_l3.add(k,block_reduce(self[k],(reduce_factor,),func=np.nanmean))
+                new_l3.add(k,block_reduce(self[k][:nrows_trim,:ncols_trim],(reduce_factor,reduce_factor),func=np.nanmean))
+            elif k in ['xgrid']:
+                new_l3.add(k,block_reduce(self[k][:ncols_trim],(reduce_factor,),func=np.nanmean))
+            elif k in ['ygrid']:
+                new_l3.add(k,block_reduce(self[k][:nrows_trim],(reduce_factor,),func=np.nanmean))
         for (k,v) in self.items():
             if k in ['ncol','ncols']:
                 new_l3.add(k,len(new_l3['xgrid']))
             elif k in ['nrow','nrows']:
                 new_l3.add(k,len(new_l3['ygrid']))
             elif k == 'cloud_pressure':
-                new_l3.add(k,block_reduce(self[k]*self['pres_total_sample_weight'],
+                new_l3.add(k,block_reduce(self[k][:nrows_trim,:ncols_trim]*self['pres_total_sample_weight'][:nrows_trim,:ncols_trim],
                                           (reduce_factor,reduce_factor),func=np.nansum)\
                            /new_l3['pres_total_sample_weight'])
             elif self[k].shape == (self.nrows,self.ncols) and \
                 k not in ['xmesh','ymesh','total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
                 self.logger.info('block reducing field {}'.format(k))
-                new_l3.add(k,block_reduce(self[k]*self['total_sample_weight'],
+                new_l3.add(k,block_reduce(self[k][:nrows_trim,:ncols_trim]*self['total_sample_weight'][:nrows_trim,:ncols_trim],
                                           (reduce_factor,reduce_factor),func=np.nansum)\
                            /new_l3['total_sample_weight'])
         new_l3.check()
