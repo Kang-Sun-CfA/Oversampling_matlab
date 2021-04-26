@@ -15,6 +15,7 @@ Created on Sat Jan 26 15:50:30 2019
 2020/05/19: add subsetting fields option as input
 2020/07/20: parallel regrid function done
 2021/04/11: OMPS-NM to OMPS-NPP; MEaSUREs, IASI, CrIS subsetting
+2021/04/26: l3 wrapper, MethaneSAT, l3 data object
 """
 
 import numpy as np
