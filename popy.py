@@ -104,6 +104,7 @@ def F_wrapper_l3(instrum,product,grid_size,l2_dir,
                     monthly_l3_data = o.F_parallel_regrid(ncores=ncores,block_length=block_length)
                     l3_data0 = l3_data0.merge(monthly_l3_data)
         l3_data = l3_data.merge(l3_data0)
+    l3_data.check()
     if if_plot_l3:
         figout = l3_data.plot(existing_ax=existing_ax,**plot_kw)
     else:
@@ -1299,8 +1300,12 @@ class Level3_Data(dict):
             fields_name.append('total_sample_weight')
         nc = Dataset(l3_filename,'r')
         self.grid_size = np.float(nc.getncattr('grid_size'))
+        self.instrum = nc.getncattr('instrument')
+        self.product = nc.getncattr('product')
         self.start_python_datetime = datetime.datetime.strptime(nc.getncattr('time_coverage_start'),'%Y-%m-%dT%H:%M:%SZ')
         self.end_python_datetime = datetime.datetime.strptime(nc.getncattr('time_coverage_end'),'%Y-%m-%dT%H:%M:%SZ')
+        self.logger.info('Loading level 3 data for instrument {}, product {}, and grid size {:02f}'\
+                         .format(self.instrum,self.product,self.grid_size))
         for (i,varname) in enumerate(fields_name):
             try:
                 self[varname] = nc[varname][:].filled(np.nan)
@@ -1317,20 +1322,32 @@ class Level3_Data(dict):
                 fields_unit=None,
                 ncattr_dict={}):
         from netCDF4 import Dataset
-        if 'xgrid' not in fields_name:
-            fields_name.append('xgrid')
-        if 'ygrid' not in fields_name:
-            fields_name.append('ygrid')
-        if 'num_samples' not in fields_name:
-            fields_name.append('num_samples')
-        if 'total_sample_weight' not in fields_name:
-            fields_name.append('total_sample_weight')
         if fields_rename is None:
-            fields_rename = fields_name
+            fields_rename = fields_name.copy()
         if fields_comment is None:
             fields_comment = ['' for i in range(len(fields_name))]
         if fields_unit is None:
             fields_unit = ['' for i in range(len(fields_name))]
+        if 'xgrid' not in fields_name:
+            fields_name.append('xgrid')
+            fields_rename.append('xgrid')
+            fields_comment.append('horizontal grid')
+            fields_unit.append('degree')
+        if 'ygrid' not in fields_name:
+            fields_name.append('ygrid')
+            fields_rename.append('ygrid')
+            fields_comment.append('vertical grid')
+            fields_unit.append('degree')
+        if 'num_samples' not in fields_name:
+            fields_name.append('num_samples')
+            fields_rename.append('num_samples')
+            fields_comment.append('layers of coverage by level 2 pixels')
+            fields_unit.append('')
+        if 'total_sample_weight' not in fields_name:
+            fields_name.append('total_sample_weight')
+            fields_rename.append('total_sample_weight')
+            fields_comment.append('spatial weight for the current level 3 map')
+            fields_unit.append('vary')
         nc = Dataset(l3_filename,'w',format='NETCDF4')
         if not ncattr_dict:
             ncattr_dict = {'description':'Level 3 data created using physical oversampling (https://doi.org/10.5194/amt-11-6679-2018)',
@@ -1344,6 +1361,10 @@ class Level3_Data(dict):
             ncattr_dict['time_coverage_end'] = self.end_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
         if 'grid_size' not in ncattr_dict.keys():
             ncattr_dict['grid_size'] = '{}'.format(self.grid_size)
+        if 'instrument' not in ncattr_dict.keys():
+            ncattr_dict['instrument'] = '{}'.format(self.instrum)
+        if 'product' not in ncattr_dict.keys():
+            ncattr_dict['product'] = '{}'.format(self.product)
         nc.setncatts(ncattr_dict)
         nc.createDimension('nrows',self.nrows)
         nc.createDimension('ncols',self.ncols)
