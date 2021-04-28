@@ -856,6 +856,33 @@ def F_ncread_selective(fn,varnames,varnames_short=None):
     ncid.close()
     return outp
 
+def F_find_files(root_dir,start_date,end_date,
+                 fn_date_identifier='hms_smoke%Y%m%d*.shp'):
+    '''
+    Find out files between two dates
+    Parameters
+    ----------
+    root_dir : string
+        root data directory.
+    start/end_date: datetime.date
+        bounds of dates
+    fn_date_identifier : TYPE, optional
+        structure of daily files. The default is 'hms_smoke_%Y%m%d'. Can accomodate
+        files structures such as '%Y/%m/hms_smoke_%Y%m%d*.shp'
+    return:
+        a list of file paths
+    created on 2021/04/28
+    '''
+    import glob
+    days = (end_date-start_date).days+1
+    DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+    flist = []
+    for DATE in DATES:
+        # print(os.path.join(root_dir,DATE.strftime(fn_date_identifier)))
+        date_flist = glob.glob(os.path.join(root_dir,DATE.strftime(fn_date_identifier)))
+        flist = flist+date_flist
+    return flist
+
 # Utilities for F_block_regrid_ccm
 def bound_arr(i1,i2,mx,ncols):
     arr = np.arange(i1,i2,dtype=int)
@@ -1442,9 +1469,9 @@ class popy(object):
     
     def __init__(self,instrum,product,\
                  grid_size=0.1,west=-180,east=180,south=-90,north=90,\
-                 start_year=1995,start_month=1,start_day=1,\
+                 start_year=1900,start_month=1,start_day=1,\
                  start_hour=0,start_minute=0,start_second=0,\
-                 end_year=2025,end_month=12,end_day=31,\
+                 end_year=2100,end_month=12,end_day=31,\
                  end_hour=23,end_minute=59,end_second=59,verbose=False):
         
         self.instrum = instrum
@@ -4271,7 +4298,8 @@ class popy(object):
         else:
             fig = None
             ax = existing_ax
-        ax.set_extent([self.west, self.east, self.south, self.north], ccrs.Geodetic())
+        if [self.west, self.east, self.south, self.north] != [-180,180,-90,90]:
+            ax.set_extent([self.west, self.east, self.south, self.north], ccrs.Geodetic())
         ax.add_feature(cfeature.COASTLINE)
         ax.add_feature(cfeature.COASTLINE)
         if draw_admin_level == 0:
@@ -5570,6 +5598,71 @@ class popy(object):
             for key in sounding_interp.keys():
                 self.logger.info(key+' from MERRA2 is sampled to L2g coordinate/time')
                 self.l2g_data['merra2_'+key] = np.float32(sounding_interp[key])
+    
+    def F_label_HMS(self,HMS_dir,fn_date_identifier='hms_smoke%Y%m%d*.shp'):
+        '''
+        Label level 2 pixels that intersect with fire smoke polygons given by HMS:
+            https://satepsanone.nesdis.noaa.gov/pub/FIRE/web/HMS/Smoke_Polygons/Shapefile/
+        HMS_dir:
+            root directory of HMS shapefiles
+        fn_date_identifier: 
+            structure of HMS daily files. The default is 'hms_smoke_%Y%m%d'. Can accomodate
+            files structures such as '%Y/%m/hms_smoke_%Y%m%d*.shp'
+        return:
+            a gpd dataframe of smoke polygons that intersect satellite pixels
+        created on 2021/04/28, protyping by Nima Masoudvaziri is greatly acknowledged
+        '''
+        import pandas as pd
+        import geopandas as gpd
+        from shapely.geometry import Polygon, Point
+        # find a list of files paths within date interval
+        shp_list = F_find_files(root_dir=HMS_dir,
+                                start_date=self.start_python_datetime.date(),
+                                end_date=self.end_python_datetime.date(),
+                                fn_date_identifier=fn_date_identifier)
+        smoke_list = []
+        for shp in shp_list:
+            smoke_d = gpd.read_file(shp)
+            date_str = os.path.splitext(shp)[0][-8:]
+            smoke_d['s_datenum']=[datetime2datenum(datetime.datetime.strptime(date_str+start,'%Y%m%d%H%M')) for start in smoke_d.loc[:,'Start']]
+            smoke_d['e_datenum']=[datetime2datenum(datetime.datetime.strptime(date_str+end,'%Y%m%d%H%M')) for end in smoke_d.loc[:,'End']]
+            smoke_list.append(smoke_d)
+        # combine all smoke polygons into a dataframe
+        smoke_df = pd.concat(smoke_list,axis=0)
+        smoke_df.Density = smoke_df.Density.astype(float).astype(int)
+        smoke_density = np.zeros(self.nl2,dtype=np.int)
+        overlapping_smoke_mask = np.zeros(smoke_df.shape[0],dtype=np.bool)
+        if 'latr' in self.l2g_data.keys():
+            latr = self.l2g_data['latr']
+            lonr = self.l2g_data['lonr']
+            use_polygon = True
+        else:
+            self.logger.info('level 2 pixel corners are unavailable, using pixel centroids only')
+            latc = self.l2g_data['latc']
+            lonc = self.l2g_data['lonc']
+            use_polygon = False
+        # loop over each smoke plume polygon
+        for ifire in range(smoke_df.shape[0]):
+            sat_mask = (self.l2g_data['UTC_matlab_datenum'] >= smoke_df['s_datenum'].iloc[ifire])\
+                & (self.l2g_data['UTC_matlab_datenum'] <= smoke_df['e_datenum'].iloc[ifire])
+            if np.sum(sat_mask) == 0:
+                continue
+            if use_polygon:
+                latr_local = latr[sat_mask,]
+                lonr_local = lonr[sat_mask,]
+                if_overlap = np.array([Polygon(np.vstack((lonr_local[il2,],latr_local[il2,])).T).intersects(smoke_df['geometry'].iloc[ifire])
+                                       for il2 in range(np.sum(sat_mask))])
+            else:
+                latc_local = latc[sat_mask]
+                lonc_local = lonc[sat_mask]
+                if_overlap = np.array([smoke_df['geometry'].iloc[ifire].contains(Point(lonc_local[il2],latc_local[il2]))
+                                       for il2 in range(np.sum(sat_mask))])
+            smoke_density[sat_mask] = smoke_density[sat_mask]+if_overlap*smoke_df['Density'].iloc[ifire].astype(np.int)
+            if np.sum(if_overlap) > 0:
+                overlapping_smoke_mask[ifire] = True
+                self.logger.info('found {} pixels overlapping with a plume starting at {}'.format(np.sum(if_overlap),datedev_py(smoke_df['s_datenum'].iloc[ifire]).strftime('%Y%m%dT%H:%M')))
+        self.l2g_data['smoke_density'] = smoke_density
+        return smoke_df.loc[overlapping_smoke_mask]
     
     def F_derive_model_subcolumn(self,pressure_boundaries=['ps','pbl',600,'tropopause',0],
                                  pbl_multiplier=[2.5],
