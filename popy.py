@@ -1766,7 +1766,10 @@ class popy(object):
         self.end_matlab_datenum = end_matlab_datenum
         self.show_progress = True
     
-    def F_mat_reader(self,mat_filename,boundary_polygon=None):
+    def F_mat_reader(self,mat_filename,boundary_polygon=None,if_conserve=False):
+        '''
+        if_conserve = True, none filtering will be applied, so level 2 pixels are conserved
+        '''
         import scipy.io
         
         mat_data = scipy.io.loadmat(mat_filename)
@@ -1795,7 +1798,24 @@ class popy(object):
                 l2g_data[key_name] = mat_data['output_subset'][key_name][0][0].squeeze()
 #                #exec(key_name + " =  mat_data['output_subset'][key_name][0][0].flatten()")
                 #exec('l2g_data[key_name]=' + key_name)
-        
+        nl20 = len(l2g_data['latc'])
+        min_time = datedev_py(
+                l2g_data['UTC_matlab_datenum'].min()).strftime(
+                        "%d-%b-%Y %H:%M:%S")
+        max_time = datedev_py(
+                l2g_data['UTC_matlab_datenum'].max()).strftime(
+                        "%d-%b-%Y %H:%M:%S")
+        if if_conserve:
+            self.logger.info('Loading and subsetting file '+mat_filename+'...')
+            self.logger.info('containing %d pixels...' %nl20)
+            self.logger.info('min observation time at '+min_time)
+            self.logger.info('max observation time at '+max_time)
+            self.logger.info('if_conserve is on. No filter (boundary/time/space) will be applied, returning with full l2g')
+            del mat_data    
+            self.l2g_data = l2g_data
+            self.nl2 = nl20
+            return
+            
         west = self.west
         east = self.east
         south = self.south
@@ -1822,13 +1842,8 @@ class popy(object):
             validmask = validmask & (l2g_data['qa_value'] >=self.min_qa_value)
             self.logger.info('qa value filter is applied')
         
-        nl20 = len(l2g_data['latc'])
-        min_time = datedev_py(
-                l2g_data['UTC_matlab_datenum'].min()).strftime(
-                        "%d-%b-%Y %H:%M:%S")
-        max_time = datedev_py(
-                l2g_data['UTC_matlab_datenum'].max()).strftime(
-                        "%d-%b-%Y %H:%M:%S")
+        
+        
         l2g_data = {k:v[validmask,] for (k,v) in l2g_data.items()}
         nl2 = len(l2g_data['latc'])
         
@@ -1925,7 +1940,7 @@ class popy(object):
                 varname = tmp.name
             else:
                 varname = data_fields_l2g[i]
-            if tmpdtype is "str":
+            if tmpdtype == "str":
                 outp[varname] = tmp[:]
             else:
                 outp[varname] = np.squeeze(tmp[:],axis=0)
@@ -4264,7 +4279,7 @@ class popy(object):
     
     def F_plot_l2g_cartopy(self,plot_field='column_amount',
                            max_day=1,l2g_data=None,
-                           x_wind_field='era5_u100',y_wind_field='era5_v100',
+                           x_wind_field=None,y_wind_field=None,
                            existing_ax=None,draw_admin_level=1,
                            **kwargs):
         '''
@@ -5620,7 +5635,7 @@ class popy(object):
                 self.logger.info(key+' from MERRA2 is sampled to L2g coordinate/time')
                 self.l2g_data['merra2_'+key] = np.float32(sounding_interp[key])
     
-    def F_label_HMS(self,HMS_dir,fn_date_identifier='hms_smoke%Y%m%d*.shp'):
+    def F_label_HMS(self,HMS_dir,fn_date_identifier='%Y/%m/%d/hms_smoke%Y%m%d.shp'):
         '''
         Label level 2 pixels that intersect with fire smoke polygons given by HMS:
             https://satepsanone.nesdis.noaa.gov/pub/FIRE/web/HMS/Smoke_Polygons/Shapefile/
@@ -5643,15 +5658,27 @@ class popy(object):
                                 fn_date_identifier=fn_date_identifier)
         smoke_list = []
         for shp in shp_list:
-            smoke_d = gpd.read_file(shp)
+            try:
+                smoke_d = gpd.read_file(shp)
+            except:
+                # self.logger.info('{} cannot be read'.format(shp))
+                continue
+            if ('Start' not in smoke_d.keys()) or ('End' not in smoke_d.keys()):
+                # self.logger.info('{} time information is incomplete! skipping'.format(shp))
+                continue
+            # Density is only availabel after 2008/07
+            if 'Density' not in smoke_d.keys():
+                # self.logger.info('No Density available, adding Density of 1 to {}'.format(shp))
+                smoke_d.insert(3,'Density',np.ones(smoke_d.shape[0]))
+            smoke_d['Density'] = smoke_d['Density'].fillna(1)#some density is nan
             date_str = os.path.splitext(shp)[0][-8:]
-            smoke_d['s_datenum']=[datetime2datenum(datetime.datetime.strptime(date_str+start,'%Y%m%d%H%M')) for start in smoke_d.loc[:,'Start']]
-            smoke_d['e_datenum']=[datetime2datenum(datetime.datetime.strptime(date_str+end,'%Y%m%d%H%M')) for end in smoke_d.loc[:,'End']]
+            smoke_d['s_datenum']=[datetime2datenum(datetime.datetime.strptime(date_str+start[-4:],'%Y%m%d%H%M')) for start in smoke_d.loc[:,'Start']]
+            smoke_d['e_datenum']=[datetime2datenum(datetime.datetime.strptime(date_str+end[-4:],'%Y%m%d%H%M')) for end in smoke_d.loc[:,'End']]
             smoke_list.append(smoke_d)
         # combine all smoke polygons into a dataframe
         smoke_df = pd.concat(smoke_list,axis=0)
         smoke_df.Density = smoke_df.Density.astype(float).astype(int)
-        smoke_density = np.zeros(self.nl2,dtype=np.int)
+        smoke_density = np.zeros(self.nl2,dtype=np.int16)
         overlapping_smoke_mask = np.zeros(smoke_df.shape[0],dtype=np.bool)
         if 'latr' in self.l2g_data.keys():
             latr = self.l2g_data['latr']
@@ -5678,7 +5705,7 @@ class popy(object):
                 lonc_local = lonc[sat_mask]
                 if_overlap = np.array([smoke_df['geometry'].iloc[ifire].contains(Point(lonc_local[il2],latc_local[il2]))
                                        for il2 in range(np.sum(sat_mask))])
-            smoke_density[sat_mask] = smoke_density[sat_mask]+if_overlap*smoke_df['Density'].iloc[ifire].astype(np.int)
+            smoke_density[sat_mask] = np.max(np.vstack((smoke_density[sat_mask],if_overlap*smoke_df['Density'].iloc[ifire].astype(np.int))),axis=0)
             if np.sum(if_overlap) > 0:
                 overlapping_smoke_mask[ifire] = True
                 self.logger.info('found {} pixels overlapping with a plume starting at {}'.format(np.sum(if_overlap),datedev_py(smoke_df['s_datenum'].iloc[ifire]).strftime('%Y%m%dT%H:%M')))

@@ -18,6 +18,8 @@ import matplotlib.pyplot as plt
 sys.path.append(control['popy directory'])
 from popy import popy, F_collocate_l2g
 if 'if verbose' not in control.keys(): control['if verbose']=False
+if 'smoke density threshold' not in control.keys():
+    control['smoke density threshold'] = np.inf
 if control['if verbose']:
     logging.basicConfig(level=logging.INFO)
 else:
@@ -143,6 +145,13 @@ for year in range(start_year,end_year+1):
         if control['which sensor'] == 'OMI' and control['if exclude row anomaly']:
             mask = np.isin(l2g_data['across_track_position'],np.arange(5,24))
             l2g_data = {k:v[mask,] for (k,v) in l2g_data.items()}
+        # remove smoke contamination
+        if control['smoke density threshold'] != np.inf and 'smoke_density' in l2g_data.keys():
+            nbefore = len(l2g_data['smoke_density'])
+            mask = l2g_data['smoke_density'] <= control['smoke density threshold']
+            nafter = np.sum(mask)
+            l2g_data = {k:v[mask,] for (k,v) in l2g_data.items()}
+            logging.info('pixel number reduced from {} to {} after smoke filtering'.format(nbefore,nafter))
         # additional filter for CO
         if control['which molecule'] == 'CO':
             mask = (l2g_data['scattering_height'] < 2000.) &\
