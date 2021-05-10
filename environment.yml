@@ -1,0 +1,15 @@
+name: level3
+channels:
+  - defaults
+dependencies:
+  - opencv=3.4.2
+  - netcdf4=1.4.2
+  - matplotlib=3.3.4
+  - h5py=2.8.0
+  - pyyaml=5.4.1
+  - pylint=2.7.4
+  - scipy=1.6.2
+  - python=3.7.10
+  - numpy=1.20.1
+  - cartopy=0.18.0
+prefix: /root/miniconda3/envs/level3
