@@ -16,10 +16,14 @@ import os
 import logging
 import matplotlib.pyplot as plt
 sys.path.append(control['popy directory'])
-from popy import popy, F_collocate_l2g
+from popy import popy, F_collocate_l2g, datedev_py
 if 'if verbose' not in control.keys(): control['if verbose']=False
 if 'smoke density threshold' not in control.keys():
     control['smoke density threshold'] = np.inf
+if 'days of week' not in control.keys():
+    do_week_filter=False#control['days of week'] = [0,1,2,3,4,5,6]
+else:
+    do_week_filter=True
 if control['if verbose']:
     logging.basicConfig(level=logging.INFO)
 else:
@@ -144,6 +148,10 @@ for year in range(start_year,end_year+1):
         # keep only rows 5-23 for OMI if excluding row anomaly
         if control['which sensor'] == 'OMI' and control['if exclude row anomaly']:
             mask = np.isin(l2g_data['across_track_position'],np.arange(5,24))
+            l2g_data = {k:v[mask,] for (k,v) in l2g_data.items()}
+        # filter days of week
+        if do_week_filter:
+            mask = np.array([datedev_py(dn).weekday() in control['days of week'] for dn in l2g_data['UTC_matlab_datenum']])
             l2g_data = {k:v[mask,] for (k,v) in l2g_data.items()}
         # remove smoke contamination
         if control['smoke density threshold'] != np.inf and 'smoke_density' in l2g_data.keys():
