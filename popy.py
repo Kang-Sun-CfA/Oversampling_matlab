@@ -104,8 +104,9 @@ def F_wrapper_l3(instrum,product,grid_size,l2_dir,
                     monthly_l3_data = o.F_parallel_regrid(ncores=ncores,block_length=block_length)
                     l3_data0 = l3_data0.merge(monthly_l3_data)
         l3_data = l3_data.merge(l3_data0)
-    l3_data.check()
-    if if_plot_l3:
+    if hasattr(l3_data,'check'):
+        l3_data.check()
+    if if_plot_l3 and hasattr(l3_data,'plot'):
         figout = l3_data.plot(existing_ax=existing_ax,**plot_kw)
     else:
         figout = None
@@ -1286,6 +1287,7 @@ class Level3_Data(dict):
                 if len(v.shape) == 2:
                     self[k][mask] = np.nan
         self.check()
+        return self
     
     def read_nc(self,l3_filename,
                 fields_name=[]):
@@ -1314,6 +1316,7 @@ class Level3_Data(dict):
                 self[varname] = np.array(nc[varname][:])
         self.check()
         nc.close()
+        return self
         
     def save_nc(self,l3_filename,
                 fields_name=[],
@@ -1401,9 +1404,9 @@ class Level3_Data(dict):
         ncols_trim = self.ncols-self.ncols%reduce_factor
         nrows_trim = self.nrows-self.nrows%reduce_factor
         for (k,v) in self.items():
-            if k in ['total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
+            if k in ['total_sample_weight','pres_total_sample_weight']:
                 new_l3.add(k,block_reduce(self[k][:nrows_trim,:ncols_trim],(reduce_factor,reduce_factor),func=np.nansum))
-            elif k in ['xmesh','ymesh']:
+            elif k in ['xmesh','ymesh','num_samples','pres_num_samples']:
                 new_l3.add(k,block_reduce(self[k][:nrows_trim,:ncols_trim],(reduce_factor,reduce_factor),func=np.nanmean))
             elif k in ['xgrid']:
                 new_l3.add(k,block_reduce(self[k][:ncols_trim],(reduce_factor,),func=np.nanmean))
@@ -4779,7 +4782,7 @@ class popy(object):
             self.logger.info('%d pixels to be regridded...' %nl2)
         else:
             self.logger.info('No pixel to be regridded, returning...')
-            return None
+            return {}
         nblock_row = np.max([np.floor(nrows/block_length),1]).astype(np.int)
         nblock_col = np.max([np.floor(ncols/block_length),1]).astype(np.int)
         self.nblock_row = nblock_row
