@@ -4021,7 +4021,161 @@ class popy(object):
             self.nl2 = 0
         else:
             self.nl2 = len(l2g_data['latc'])
+    
+    def F_subset_CrISNH3_JPL(self,path,
+                             l2_path_structure='%Y/%m/%d/',
+                             ellipse_lut_path='CrIS_footprint.mat',
+                             varnames=None,varnames_short=None):
+        """ 
+        function to subset JPL CrIS NH3 level2 files
+        path:
+            l2 data root directory, only flat l2 file structure is supported
+        l2_path_structure:
+            None indicates that individual files are directly under path;
+            '%Y/' if files are like l2_dir/2017/*.nc;
+            '%Y/%m/%d/' if files are like l2_dir/2017/05/01/*.nc
+        ellipse_lut_path:
+            path to a look up table storing u, v, and t data to reconstruct CrIS pixel ellipsis
+        varnames:
+            path of netcdf fields to be extracted
+        varnames_short:
+            short names of varnames
+        created on 2021/05/26
+        """      
+        # find out list of l2 files to subset
+        import glob
+        from scipy.io import loadmat
+        from scipy.interpolate import RegularGridInterpolator
+        l2_dir = path
+        l2_list = []
+        cwd = os.getcwd()
+        os.chdir(l2_dir)
+        start_date = self.start_python_datetime.date()
+        end_date = self.end_python_datetime.date()
+        days = (end_date-start_date).days+1
+        DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+        for DATE in DATES:
+            if l2_path_structure == None:
+                flist = glob.glob('Combined_NH3_*'+DATE.strftime("%Y%m%d")+'.nc')
+            else:
+                flist = glob.glob(DATE.strftime(l2_path_structure)+\
+                                  'Combined_NH3_*'+DATE.strftime("%Y%m%d")+'.nc')
+            l2_list = l2_list+flist
         
+        os.chdir(cwd)
+        self.l2_dir = l2_dir
+        self.l2_list = l2_list
+        
+        if varnames is None:
+            varnames = ['DOFs', 'DayNightFlag', 'Latitude', 'Longitude', 'Quality', 'YYYYMMDD','UT_Hour',
+                    'Pressure', 'AveragingKernel', 'ConstraintVector', 'Species', 'ObservationErrorCovariance',
+                    'Retrieval/Column', 'Geolocation/CrIS_Pixel_Index', 'Geolocation/CrIS_Xtrack_Index',
+                    'Characterization/Column_Error']
+            varnames_short = [v.split('/')[-1] for v in varnames]
+        
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        l2g_data = {}
+        pixel_lut = loadmat(ellipse_lut_path)
+        f_uuu = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,271)),pixel_lut['uuu4']) 
+        f_vvv = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,271)),pixel_lut['vvv4']) 
+        f_ttt = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,271)),pixel_lut['ttt4']) 
+        for fn in l2_list:
+            file_path = os.path.join(l2_dir,fn)
+            self.logger.info('loading '+fn)
+            try:
+                outp = F_ncread_selective(file_path,varnames,varnames_short)
+            except:
+                self.logger.warning(fn+' cannot be read!')
+                continue
+            python_dt = [datetime.datetime.strptime('{:.0f}'.format(d),'%Y%m%d')\
+             +datetime.timedelta(seconds=3600*h) for d,h in zip(outp['YYYYMMDD'],outp['UT_Hour'])]
+            outp['UTC_matlab_datenum'] = np.array([datetime2datenum(pdt) for pdt in python_dt])
+
+            f2 = outp['DOFs'] >= self.mindofs
+            f3 = (outp['Quality'] == 1) & \
+            (outp['DayNightFlag'] == 1) & (~np.isnan(outp['Column_Error'][:,0]))
+            f4 = outp['Latitude'] >= south
+            f5 = outp['Latitude'] <= north
+            tmplon = outp['Longitude']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            validmask = f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+            self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            l2g_data0 = {}
+            if np.sum(validmask) == 0:
+                continue
+            
+            nobs = np.sum(validmask)
+            # work out footprint number
+            # convert field of view and field of regard indices from 0-based to 1-based
+            tmpfov = outp['CrIS_Pixel_Index'][validmask]+1
+            tmpfor = outp['CrIS_Xtrack_Index'][validmask]+1
+            pressure0 = outp['Pressure'][validmask,]
+            xretv0 = outp['Species'][validmask,]
+            noise_error0 = outp['ObservationErrorCovariance'][validmask,]
+            ak0 = outp['AveragingKernel'][validmask,]
+            ak_colm = 0*xretv0;
+            tot_col_test = np.zeros((nobs))
+            sfcvmr = np.zeros((nobs))
+            ps = np.zeros((nobs))
+            noise_error_colm = np.zeros((nobs))
+            latc = outp['Latitude'][validmask]
+            lonc = outp['Longitude'][validmask]
+            
+            # loop over observations
+            for io in range(nobs):
+                index = (pressure0[io,] > 0)
+                pressure = pressure0[io,index]
+                nlev = len(pressure)
+                dp = np.zeros((nlev))
+                dp[0] = (pressure[0]-pressure[1])/2
+                for ip in range(1,nlev-1):
+                    dp[ip] = (pressure[ip-1]-pressure[ip])/2+(pressure[ip]-pressure[ip+1])/2
+                dp[nlev-1] = pressure[nlev-2]-pressure[nlev-1]
+                trans = 2.12e16*dp
+                # calculate column AK
+                xretv = xretv0[io,index]
+                ak = ak0[io,][np.ix_(index,index)]
+                noise_error = noise_error0[io,][np.ix_(index,index)]
+                ak_colm[io,index] = (trans*xretv).transpose().dot(ak)
+                # calculate errors
+                xarr = np.diag(xretv)
+                sx = (xarr.dot(noise_error)).dot(xarr)
+                noise_error_colm[io] = np.sqrt((trans.transpose().dot(sx)).dot(trans))
+                tot_col_test[io] = np.sum(trans*xretv)
+                sfcvmr[io] = xretv[0]
+                ps[io] = pressure[0]
+            
+            l2g_data0['ifov'] = (tmpfor-1)*9+tmpfov
+            l2g_data0['latc'] = latc
+            l2g_data0['lonc'] = lonc
+            # find out elliptical parameters using lookup table            
+            l2g_data0['u'] = f_uuu((latc,l2g_data0['ifov']))
+            l2g_data0['v'] = f_vvv((latc,l2g_data0['ifov']))
+            l2g_data0['t'] = f_ttt((latc,l2g_data0['ifov']))
+            l2g_data0['colnh3_simple'] = tot_col_test
+            l2g_data0['column_amount'] = outp['Column'][validmask,0]
+            l2g_data0['column_uncertainty'] = outp['Column_Error'][validmask,0]
+            l2g_data0['surface_pressure'] = ps
+            l2g_data0['sfcvmr'] = sfcvmr
+            l2g_data0['UTC_matlab_datenum'] = outp['UTC_matlab_datenum'][validmask]
+            l2g_data0['dofs'] = outp['DOFs'][validmask]
+            # a priori type in string format might slow down the whole thing
+            #l2g_data0['xa_type'] = outp['xa_Type'][validmask]
+            
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
+    
     def F_subset_CrISNH3(self,path,l2_path_structure='%Y/%m/%d/',ellipse_lut_path='CrIS_footprint.mat'):
         """ 
         function to subset CrIS NH3 level2 files
