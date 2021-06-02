@@ -624,7 +624,12 @@ class RRNES(object):
             mergedDict = monthlyDictArray[0]
             return mergedDict
         mergedDict = {}
-        for idict,d in enumerate(monthlyDictArray):
+        for idict,d0 in enumerate(monthlyDictArray):
+            d = deepcopy(d0)
+            for k in d[self.moleculeList[0]].keys():
+                if 'ime' in k:
+                    # clean fields
+                    d[self.moleculeList[0]][k][np.isnan(d[self.moleculeList[0]][k])] = 0
             if not d:
                 self.logger.warning('empty month')#'%02d'%d[self.moleculeList[0]]['month_vec']+'/%04d'%d[self.moleculeList[0]]['year_vec']+' gives empty data!')
                 continue
@@ -643,6 +648,7 @@ class RRNES(object):
                     ime_B1[np.isnan(ime_B1)] = 0.
                     ime_B1[np.isnan(ime_B2)] = 0.
                     ime_B1[np.isnan(ime_B3)] = 0.
+                    
                     for k in d[key].keys():
                         if k in ['ime_D','ime_B']:
                             # layers of pixels and weights are simply additive
@@ -653,7 +659,7 @@ class RRNES(object):
                         elif 'ime' in k:
                             # ime fields (ime_ws, ime_C, etc.) should be weight-averaged
                             mergedDict[key][k][np.isnan(mergedDict[key][k])] = 0
-                            d[key][k][np.isnan(d[key][k])] = 0
+                            # d[key][k][np.isnan(d[key][k])] = 0
                             mergedDict[key][k] = (mergedDict[key][k]*ime_B1+\
                             d[key][k]*ime_B2)/ime_B3
                         elif k == 'A_vec':
