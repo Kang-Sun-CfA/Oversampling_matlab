@@ -4915,6 +4915,7 @@ class popy(object):
                                     end_python_datetime=self.end_python_datetime,
                                     instrum=self.instrum,product=self.product)
             l3_object.assimilate(l3_data)
+            l3_object.check()
             return l3_object
         
         import multiprocessing
@@ -5017,6 +5018,7 @@ class popy(object):
                                 end_python_datetime=self.end_python_datetime,
                                 instrum=self.instrum,product=self.product)
         l3_object.assimilate(l3_data)
+        l3_object.check()
         return l3_object
         
     def F_regrid_ccm(self):
