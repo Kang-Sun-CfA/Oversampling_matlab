@@ -16,6 +16,7 @@ Created on Sat Jan 26 15:50:30 2019
 2020/07/20: parallel regrid function done
 2021/04/11: OMPS-NM to OMPS-NPP; MEaSUREs, IASI, CrIS subsetting
 2021/04/26: l3 wrapper, MethaneSAT, l3 data object
+2021/06/15: S5PSO2, l2_path_pattern, basemap
 """
 
 import numpy as np
@@ -1169,7 +1170,8 @@ class Level3_Data(dict):
     def __init__(self,grid_size=None,
                  start_python_datetime=None,
                  end_python_datetime=None,
-                 instrum='unknown',product='unknown'):
+                 instrum='unknown',product='unknown',
+                 oversampling_list=[]):
         self.logger = logging.getLogger(__name__)
         self.logger.info('creating an instance of Level3_Data')
         self.grid_size = grid_size
@@ -1183,6 +1185,7 @@ class Level3_Data(dict):
             self.end_python_datetime = datetime.datetime(2100,1,1)
         self.instrum = instrum
         self.product = product
+        self.oversampling_list = oversampling_list
     
     def add(self,key,value):
         self.__setitem__(key,value)
@@ -1235,12 +1238,13 @@ class Level3_Data(dict):
                          .format(self.end_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
                                  l3_data1.end_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
                                  merged_end_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')))
-        
+        merged_oversampling_list = list(set(self.oversampling_list).union(set(l3_data1.oversampling_list)))
         l3_data = Level3_Data(grid_size=merged_grid_size,
                              start_python_datetime=merged_start_datetime,
                              end_python_datetime=merged_end_datetime,
                              instrum=self.instrum,
-                             product=self.product)
+                             product=self.product,
+                             oversampling_list=merged_oversampling_list)
         for key in common_keys:
             v0 = self[key]
             v1 = l3_data1[key]
@@ -1292,6 +1296,13 @@ class Level3_Data(dict):
     def read_nc(self,l3_filename,
                 fields_name=[]):
         from netCDF4 import Dataset
+        if len(fields_name) == 0:
+            if len(self.oversampling_list) == 0 and self.product == 'CH4':
+                guess = 'XCH4'
+            else:
+                guess = 'column_amount'
+            self.logger.info('no fields_name provided, adding '+guess)
+            fields_name.append(guess)
         if 'xgrid' not in fields_name:
             fields_name.append('xgrid')
         if 'ygrid' not in fields_name:
@@ -1318,6 +1329,38 @@ class Level3_Data(dict):
         nc.close()
         return self
         
+    def save_tif(self,l3_filename,
+                 fields_name=[]):
+        if len(fields_name) == 0:
+            if len(self.oversampling_list) == 0 and self.product == 'CH4':
+                guess = 'XCH4'
+            else:
+                guess = 'column_amount'
+            self.logger.info('no fields_name provided, adding '+guess)
+            fields_name.append(guess)
+        if len(fields_name) > 1:
+            self.logger.error('only one field is supported to save as GeoTIFF, usually column_amount. returning')
+            return
+        try:
+            import rasterio
+            from rasterio.transform import Affine
+        except:
+            self.logger.error('rasterio not available. returning')
+            return
+        transform = Affine.translation(self['xgrid'][0]-self.grid_size/2,self['ygrid'][0]-self.grid_size/2)\
+            *Affine.scale(self.grid_size,self.grid_size)
+        with rasterio.open(
+                l3_filename,'w',
+                driver='GTiff',
+                height=self.nrows,
+                width=self.ncols,
+                count=1,
+                transform=transform,
+                crs='+proj=latlong',
+                dtype=np.float32,
+                ) as dataset:
+            dataset.write(self[fields_name[0]], 1)
+    
     def save_nc(self,l3_filename,
                 fields_name=[],
                 fields_rename=None,
@@ -1325,6 +1368,13 @@ class Level3_Data(dict):
                 fields_unit=None,
                 ncattr_dict={}):
         from netCDF4 import Dataset
+        if len(fields_name) == 0:
+            if len(self.oversampling_list) == 0 and self.product == 'CH4':
+                guess = 'XCH4'
+            else:
+                guess = 'column_amount'
+            self.logger.info('no fields_name provided, adding '+guess)
+            fields_name.append(guess)
         if fields_rename is None:
             fields_rename = fields_name.copy()
         if fields_comment is None:
@@ -1429,7 +1479,72 @@ class Level3_Data(dict):
                            /new_l3['total_sample_weight'])
         new_l3.check()
         return new_l3
+    
+    def plot_basemap(self,plot_field='column_amount',
+             existing_ax=None,
+             layer_threshold=0.5,draw_colorbar=True,
+             func=None,zoom=5,basemap_source=None,**kwargs):
+        import matplotlib.pyplot as plt
+        try:
+            import contextily as cx
+        except:
+            self.logger.error('contextily not available. returning')
+            return
+        if 'PROJ_LIB' not in os.environ:
+            self.logger.warning('PROJ_LIB cannot be found. Trying to infer it')
+            os.environ['PROJ_LIB'] = os.path.join(os.environ['CONDA_PREFIX'],'Library','share','proj')
+            os.environ['GDAL_DATA'] = os.path.join(os.environ['CONDA_PREFIX'],'Library','share')
+        try:
+            from pyproj import CRS
+        except:
+            self.logger.error('pyproj.CRS not available. returning')
+            return
+        xgrid = self['xgrid'];ygrid = self['ygrid']
         
+        if plot_field not in self.keys():
+            self.logger.warning(plot_field+' doesn''t exist in l3_data!')
+            return {}
+        if func is not None:
+            plotdata = func(self[plot_field])
+        else:
+            plotdata = self[plot_field]
+        if 'cmap' not in kwargs.keys():
+            kwargs['cmap'] = 'rainbow'
+        if 'alpha' not in kwargs.keys():
+            kwargs['alpha'] = 0.06
+        if 'shrink' not in kwargs.keys():
+            kwargs['shrink'] = 0.75
+        if 'vmin' not in kwargs.keys():
+            kwargs['vmin'] = np.nanmin(plotdata)
+            kwargs['vmax'] = np.nanmax(plotdata)
+        if 'xlim' not in kwargs.keys():
+            xlim = (np.min(xgrid),np.max(xgrid))
+        if 'ylim' not in kwargs.keys():
+            ylim = (np.min(ygrid),np.max(ygrid))
+        if existing_ax is None:
+            self.logger.info('axes not supplied, creating one')
+            fig,ax = plt.subplots(1,1,figsize=(10,5))
+        else:
+            fig = None
+            ax = existing_ax
+        if 'num_samples' in self.keys():
+            plotdata[self['num_samples']<layer_threshold] = np.nan
+        pc = ax.pcolormesh(xgrid,ygrid,plotdata,
+                           alpha=kwargs['alpha'],cmap=kwargs['cmap'],
+                           vmin=kwargs['vmin'],vmax=kwargs['vmax'],shading='gouraud')
+        ax.set_xlim(xlim);
+        ax.set_ylim(ylim);
+        cx.add_basemap(ax=ax,zoom=zoom,crs=CRS("EPSG:4326"),source=basemap_source)
+        if draw_colorbar:
+            cb = plt.colorbar(pc,ax=ax,label=plot_field,shrink=kwargs['shrink'])
+        else:
+            cb = None
+        fig_output = {}
+        fig_output['fig'] = fig
+        fig_output['ax'] = ax
+        fig_output['cb'] = cb
+        fig_output['pc'] = pc
+        return fig_output
     def plot(self,plot_field='column_amount',
              existing_ax=None,draw_admin_level=1,
              layer_threshold=0.5,draw_colorbar=True,
@@ -1634,6 +1749,10 @@ class popy(object):
                 self.default_subset_function = 'F_subset_S5PAI'
             elif product in ['NO2']:
                 self.default_subset_function = 'F_subset_S5PNO2'
+                oversampling_list = ['column_amount','albedo',\
+                                     'cloud_fraction']
+            elif product in ['SO2']:
+                self.default_subset_function = 'F_subset_S5PSO2'
                 oversampling_list = ['column_amount','albedo',\
                                      'cloud_fraction']
             elif product in ['CO']:
@@ -2019,11 +2138,13 @@ class popy(object):
             (outp['latc'].shape[0],1)).astype(np.int16)
         return outp
     
-    def F_read_BEHR_h5(self,fn,data_fields,data_fields_l2g=[]):
+    def F_read_BEHR_h5(self,fn,data_fields,data_fields_l2g=None):
         
         import h5py
         outp = {}
         swath_count = 0
+        if data_fields_l2g is None:
+            data_fields_l2g = data_fields
         f = h5py.File(fn,mode='r')
         for swath in f['Data'].keys():
             try:
@@ -2038,8 +2159,8 @@ class popy(object):
         outp['Time'] = np.tile(outp['Time'],(outp['latc'].shape[0],1)).astype(np.float64)#BEHR Time is float32, not accurate
         outp['UTC_matlab_datenum'] = outp['Time']/86400.+727930.
         outp['across_track_position'] = np.tile(np.arange\
-                        (1.,outp['latc'].shape[1]+1),\
-                        (outp['latc'].shape[0],1)).astype(np.int16)
+                        (1.,outp['latc'].shape[0]+1),\
+                        (outp['latc'].shape[1],1)).astype(np.int16).T
         f.close()
         return outp        
     
@@ -2599,7 +2720,96 @@ class popy(object):
             self.nl2 = 0
         else:
             self.nl2 = len(l2g_data['latc'])
-            
+    
+    def F_subset_S5PSO2(self,
+                        l2_path_pattern='S5P*L2__SO2____%Y%m%dT*.nc',
+                        data_fields=[],
+                        data_fields_l2g=[]):
+        '''
+        l2_path_pattern=r'C:\research\S5PSO2\L2\S5P*L2__SO2____%Y%m%dT*.nc'
+        '''
+        import glob
+        l2_list = []
+        start_date = self.start_python_datetime.date()
+        end_date = self.end_python_datetime.date()
+        days = (end_date-start_date).days+1
+        DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+        for DATE in DATES:
+            flist = glob.glob(DATE.strftime(l2_path_pattern))
+            l2_list = l2_list+flist
+        self.l2_list = l2_list
+        maxsza = self.maxsza
+        maxcf = self.maxcf
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        min_qa_value = self.min_qa_value
+        if not data_fields:
+            # default, absolute path of useful variables in the nc file
+            data_fields = ['/PRODUCT/SUPPORT_DATA/INPUT_DATA/cloud_fraction_crb',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/solar_zenith_angle',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/viewing_zenith_angle',\
+                           '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_albedo_328nm',\
+                           '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_pressure',\
+                           '/PRODUCT/latitude',\
+                           '/PRODUCT/longitude',\
+                           '/PRODUCT/qa_value',\
+                           '/PRODUCT/time',\
+                           '/PRODUCT/delta_time',\
+                           '/PRODUCT/sulfurdioxide_total_vertical_column',\
+                           '/PRODUCT/sulfurdioxide_total_vertical_column_precision']    
+            # standardized variable names in l2g file. should map one-on-one to data_fields
+            data_fields_l2g = ['cloud_fraction','latitude_bounds','longitude_bounds','SolarZenithAngle',\
+                               'vza','albedo','surface_pressure','latc','lonc','qa_value','time','delta_time',\
+                               'column_amount','column_uncertainty']
+        self.logger.info('Read, subset, and store level 2 data to l2g_data')
+        l2g_data = {}
+        for fn in l2_list:
+            self.logger.info('Loading '+os.path.split(fn)[-1])
+            try:
+                outp_nc = self.F_read_S5P_nc(fn,data_fields,data_fields_l2g)
+            except Exception as e:
+                self.logger.warning(fn+' gives error:')
+                self.logger.warning(e)
+                # input("Press Enter to continue...")
+                continue
+            f1 = outp_nc['SolarZenithAngle'] <= maxsza
+            f2 = outp_nc['cloud_fraction'] <= maxcf
+            f3 = outp_nc['qa_value'] >= min_qa_value              
+            f4 = outp_nc['latc'] >= south
+            f5 = outp_nc['latc'] <= north
+            tmplon = outp_nc['lonc']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp_nc['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp_nc['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+            self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            l2g_data0 = {}
+            Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][:,:,0])[validmask]
+            Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][:,:,3])[validmask]
+            Lat_lowerright = np.squeeze(outp_nc['latitude_bounds'][:,:,1])[validmask]
+            Lat_upperright = np.squeeze(outp_nc['latitude_bounds'][:,:,2])[validmask]
+            Lon_lowerleft = np.squeeze(outp_nc['longitude_bounds'][:,:,0])[validmask]
+            Lon_upperleft = np.squeeze(outp_nc['longitude_bounds'][:,:,3])[validmask]
+            Lon_lowerright = np.squeeze(outp_nc['longitude_bounds'][:,:,1])[validmask]
+            Lon_upperright = np.squeeze(outp_nc['longitude_bounds'][:,:,2])[validmask]
+            l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
+            l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+            for key in outp_nc.keys():
+                if key not in {'latitude_bounds','longitude_bounds','time_utc','time','delta_time'}:
+                    l2g_data0[key] = outp_nc[key][validmask]
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
+    
     def F_subset_S5PNO2(self,path,data_fields=[],data_fields_l2g=[],
                         s5p_product='*',
                         geos_interp_variables=[],geos_time_collection=''):
@@ -4916,6 +5126,7 @@ class popy(object):
                                     instrum=self.instrum,product=self.product)
             l3_object.assimilate(l3_data)
             l3_object.check()
+            l3_object.oversampling_list = self.oversampling_list_final
             return l3_object
         
         import multiprocessing
@@ -5019,6 +5230,7 @@ class popy(object):
                                 instrum=self.instrum,product=self.product)
         l3_object.assimilate(l3_data)
         l3_object.check()
+        l3_object.oversampling_list = self.oversampling_list_final
         return l3_object
         
     def F_regrid_ccm(self):
