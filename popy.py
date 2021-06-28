@@ -1519,8 +1519,12 @@ class Level3_Data(dict):
             kwargs['vmax'] = np.nanmax(plotdata)
         if 'xlim' not in kwargs.keys():
             xlim = (np.min(xgrid),np.max(xgrid))
+        else:
+            xlim = kwargs['xlim']
         if 'ylim' not in kwargs.keys():
             ylim = (np.min(ygrid),np.max(ygrid))
+        else:
+            ylim = kwargs['ylim']
         if existing_ax is None:
             self.logger.info('axes not supplied, creating one')
             fig,ax = plt.subplots(1,1,figsize=(10,5))
