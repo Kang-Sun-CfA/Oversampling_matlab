@@ -72,6 +72,11 @@ if 'if exclude fire AI' in control.keys():
 else:
     if_ai = False
 
+if 'wind sector' in control.keys():
+    wind_sector = control['wind sector']
+else:
+    wind_sector = None
+
 if not os.path.exists(control['output directory']):
     os.makedirs(control['output directory'])
 basin_boundary_fn = os.path.join(control['auxiliary directory'],
@@ -152,6 +157,21 @@ for year in range(start_year,end_year+1):
         # filter days of week
         if do_week_filter:
             mask = np.array([datedev_py(dn).weekday() in control['days of week'] for dn in l2g_data['UTC_matlab_datenum']])
+            l2g_data = {k:v[mask,] for (k,v) in l2g_data.items()}
+        # filter wind direction
+        if wind_sector is not None:
+            if wind_sector.lower() == 'n':
+                mask = (np.abs(l2g_data[control['x wind']])<np.abs(l2g_data[control['y wind']])) &\
+                (l2g_data[control['y wind']]<0)
+            elif wind_sector.lower() == 's':
+                mask = (np.abs(l2g_data[control['x wind']])<np.abs(l2g_data[control['y wind']])) &\
+                (l2g_data[control['y wind']]>0)
+            elif wind_sector.lower() == 'w':
+                mask = (np.abs(l2g_data[control['x wind']])>np.abs(l2g_data[control['y wind']])) &\
+                (l2g_data[control['x wind']]>0)
+            elif wind_sector.lower() == 'e':
+                mask = (np.abs(l2g_data[control['x wind']])>np.abs(l2g_data[control['y wind']])) &\
+                (l2g_data[control['x wind']]<0)
             l2g_data = {k:v[mask,] for (k,v) in l2g_data.items()}
         # remove smoke contamination
         if control['smoke density threshold'] != np.inf and 'smoke_density' in l2g_data.keys():
