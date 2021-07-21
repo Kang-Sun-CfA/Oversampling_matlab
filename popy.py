@@ -15,6 +15,8 @@ Created on Sat Jan 26 15:50:30 2019
 2020/05/19: add subsetting fields option as input
 2020/07/20: parallel regrid function done
 2021/04/11: OMPS-NM to OMPS-NPP; MEaSUREs, IASI, CrIS subsetting
+2021/04/26: l3 wrapper, MethaneSAT, l3 data object
+2021/06/15: S5PSO2, l2_path_pattern, basemap
 """
 
 import numpy as np
@@ -23,62 +25,92 @@ import os
 import logging
 
 def F_wrapper_l3(instrum,product,grid_size,l2_dir,
-                 start_year,start_month,end_year,end_month,
+                 start_year=2005,start_month=7,end_year=2005,end_month=7,
                  start_day=1,end_day=None,
                  west=-80,east=-69,south=40,north=46,
-                 column_unit='mol/m2',
+                 column_unit='umol/m2',
                  subset_function=None,l2_path_structure='%Y/%m/%d/',
                  if_use_presaved_l2g=True,l2g_header='CONUS',
                  if_plot_l3=True,existing_ax=None,
                  ncores=0,block_length=100,
-                 subset_kw={},plot_kw={}):
+                 subset_kw={},plot_kw={},
+                 start_date_array=None,
+                 end_date_array=None):
+    from calendar import monthrange
     if end_day is None:
-        from calendar import monthrange
         end_day = monthrange(end_year,end_month)[-1]
-    o = popy(instrum=instrum,product=product,grid_size=grid_size,
-             start_year=start_year,start_month=start_month,start_day=start_day,
-             end_year=end_year,end_month=end_month,end_day=end_day,
-             west=west,east=east,south=south,north=north)
-    if not if_use_presaved_l2g:
-        if subset_function is None:
-            subset_function = o.default_subset_function
-        getattr(o, subset_function)(path=l2_dir,l2_path_structure=l2_path_structure,**subset_kw)
-        if 'column_amount' in o.oversampling_list:
-            if o.default_column_unit == 'molec/cm2' and column_unit == 'mol/m2':
-                o.l2g_data['column_amount'] = o.l2g_data['column_amount']/6.02214e19
-            elif o.default_column_unit == 'mol/m2' and column_unit == 'molec/cm2':
-                o.l2g_data['column_amount'] = o.l2g_data['column_amount']*6.02214e19
-        l3_data = o.F_parallel_regrid(ncores=ncores,block_length=block_length)
-        if if_plot_l3:
-            figout = o.F_plot_l3_cartopy(l3_data=l3_data,existing_ax=existing_ax,**plot_kw)
-        else:
-            figout = None
+    if start_date_array is not None:
+        logging.info('Array of date provided, superseding start/end_year/month/day')
+        if end_date_array is None:
+            logging.info('end dates not provided, assuming end of months')
+            end_date_array = np.array([datetime.date(d.year,d.month,monthrange(d.year,d.month)[-1]) for d in start_date_array])
     else:
-        l3_data = {}
-        import os
-        for year in range(start_year,end_year+1):
-            for month in range(1,13):
-                if year == start_year and month < start_month:
-                    continue
-                elif year == end_year and month > end_month:
-                    continue
-                l2g_path = os.path.join(l2_dir,l2g_header+'_{:04d}_{:02d}.mat'.format(year,month))
-                if not os.path.exists(l2g_path):
-                    import logging
-                    logging.warning(l2g_path+' does not exist!')
-                    continue
-                o.F_mat_reader(l2g_path)
-                if 'column_amount' in o.oversampling_list:
-                    if o.default_column_unit == 'molec/cm2' and column_unit == 'mol/m2':
-                        o.l2g_data['column_amount'] = o.l2g_data['column_amount']/6.02214e19
-                    elif o.default_column_unit == 'mol/m2' and column_unit == 'molec/cm2':
-                        o.l2g_data['column_amount'] = o.l2g_data['column_amount']*6.02214e19
-                monthly_l3_data = o.F_parallel_regrid(ncores=ncores,block_length=block_length)
-                l3_data = o.F_merge_l3_data(l3_data,monthly_l3_data)
-        if if_plot_l3:
-            figout = o.F_plot_l3_cartopy(l3_data=l3_data,existing_ax=existing_ax,**plot_kw)
+        start_date_array = np.array([datetime.date(start_year,start_month,start_day)])
+        end_date_array = np.array([datetime.date(end_year,end_month,end_day)])
+    l3_data = Level3_Data()
+    for idate in range(len(start_date_array)):
+        start_date = start_date_array[idate]
+        end_date = end_date_array[idate]
+        
+        o = popy(instrum=instrum,product=product,grid_size=grid_size,
+                 start_year=start_date.year,start_month=start_date.month,start_day=start_date.day,
+                 end_year=end_date.year,end_month=end_date.month,end_day=end_date.day,
+                 west=west,east=east,south=south,north=north)
+        if not if_use_presaved_l2g:
+            if subset_function is None:
+                subset_function = o.default_subset_function
+            getattr(o, subset_function)(path=l2_dir,l2_path_structure=l2_path_structure,**subset_kw)
+            if 'column_amount' in o.oversampling_list:
+                if o.default_column_unit == 'molec/cm2' and column_unit == 'mol/m2':
+                    o.l2g_data['column_amount'] = o.l2g_data['column_amount']/6.02214e19
+                elif o.default_column_unit == 'mol/m2' and column_unit == 'molec/cm2':
+                    o.l2g_data['column_amount'] = o.l2g_data['column_amount']*6.02214e19
+                if column_unit == 'umol/m2':
+                    if o.default_column_unit == 'molec/cm2':
+                        o.l2g_data['column_amount'] = o.l2g_data['column_amount']/6.02214e19*1e6
+                    if o.default_column_unit == 'mol/m2':
+                        o.l2g_data['column_amount'] = o.l2g_data['column_amount']*1e6
+            #kludge for CrIS
+            if instrum == 'CrIS':
+                mask = (o.l2g_data['column_amount'] > 0) & (o.l2g_data['column_uncertainty'] > 0)
+                o.l2g_data = {k:v[mask,] for (k,v) in o.l2g_data.items()}
+            l3_data0 = o.F_parallel_regrid(ncores=ncores,block_length=block_length)
         else:
-            figout = None
+            l3_data0 = Level3_Data()
+            for year in range(start_date.year,end_date.year+1):
+                for month in range(1,13):
+                    if year == start_date.year and month < start_date.month:
+                        continue
+                    elif year == end_date.year and month > end_date.month:
+                        continue
+                    l2g_path = os.path.join(l2_dir,l2g_header+'_{:04d}_{:02d}.mat'.format(year,month))
+                    if not os.path.exists(l2g_path):
+                        logging.warning(l2g_path+' does not exist!')
+                        continue
+                    o.F_mat_reader(l2g_path)
+                    #kludge for CrIS
+                    if instrum == 'CrIS':
+                        mask = (o.l2g_data['column_amount'] > 0) & (o.l2g_data['column_uncertainty'] > 0)
+                        o.l2g_data = {k:v[mask,] for (k,v) in o.l2g_data.items()}
+                    if 'column_amount' in o.oversampling_list:
+                        if o.default_column_unit == 'molec/cm2' and column_unit == 'mol/m2':
+                            o.l2g_data['column_amount'] = o.l2g_data['column_amount']/6.02214e19
+                        elif o.default_column_unit == 'mol/m2' and column_unit == 'molec/cm2':
+                            o.l2g_data['column_amount'] = o.l2g_data['column_amount']*6.02214e19
+                        if column_unit == 'umol/m2':
+                            if o.default_column_unit == 'molec/cm2':
+                                o.l2g_data['column_amount'] = o.l2g_data['column_amount']/6.02214e19*1e6
+                            if o.default_column_unit == 'mol/m2':
+                                o.l2g_data['column_amount'] = o.l2g_data['column_amount']*1e6
+                    monthly_l3_data = o.F_parallel_regrid(ncores=ncores,block_length=block_length)
+                    l3_data0 = l3_data0.merge(monthly_l3_data)
+        l3_data = l3_data.merge(l3_data0)
+    if hasattr(l3_data,'check'):
+        l3_data.check()
+    if if_plot_l3 and hasattr(l3_data,'plot'):
+        figout = l3_data.plot(existing_ax=existing_ax,**plot_kw)
+    else:
+        figout = None
     return {'l3_data':l3_data,'figout':figout}
 
 def datedev_py(matlab_datenum):
@@ -827,6 +859,33 @@ def F_ncread_selective(fn,varnames,varnames_short=None):
     ncid.close()
     return outp
 
+def F_find_files(root_dir,start_date,end_date,
+                 fn_date_identifier='hms_smoke%Y%m%d*.shp'):
+    '''
+    Find out files between two dates
+    Parameters
+    ----------
+    root_dir : string
+        root data directory.
+    start/end_date: datetime.date
+        bounds of dates
+    fn_date_identifier : TYPE, optional
+        structure of daily files. The default is 'hms_smoke_%Y%m%d'. Can accomodate
+        files structures such as '%Y/%m/hms_smoke_%Y%m%d*.shp'
+    return:
+        a list of file paths
+    created on 2021/04/28
+    '''
+    import glob
+    days = (end_date-start_date).days+1
+    DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+    flist = []
+    for DATE in DATES:
+        # print(os.path.join(root_dir,DATE.strftime(fn_date_identifier)))
+        date_flist = glob.glob(os.path.join(root_dir,DATE.strftime(fn_date_identifier)))
+        flist = flist+date_flist
+    return flist
+
 # Utilities for F_block_regrid_ccm
 def bound_arr(i1,i2,mx,ncols):
     arr = np.arange(i1,i2,dtype=int)
@@ -1092,13 +1151,470 @@ def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
         l3_data['pres_num_samples'] = pres_num_samples
     return l3_data
 
+# In this "robust" version of arange the grid doesn't suffer 
+# from the shift of the nodes due to error accumulation.
+# This effect is pronounced only if the step is sufficiently small.
+def arange_(lower,upper,step,dtype=None):
+    npnt = np.floor((upper-lower)/step)+1
+    upper_new = lower + step*(npnt-1)
+    if np.abs((upper-upper_new)-step) < 1e-10:
+        upper_new += step
+        npnt += 1    
+    return np.linspace(lower,upper_new,int(npnt),dtype=dtype)
+
+class Level3_Data(dict):
+    '''
+    rewrite l3_data into a class based on python dict. include functions
+    started on 2021/04/24
+    '''
+    def __init__(self,grid_size=None,
+                 start_python_datetime=None,
+                 end_python_datetime=None,
+                 instrum='unknown',product='unknown',
+                 oversampling_list=[]):
+        self.logger = logging.getLogger(__name__)
+        self.logger.info('creating an instance of Level3_Data')
+        self.grid_size = grid_size
+        if start_python_datetime is not None:
+            self.start_python_datetime = start_python_datetime
+        else:
+            self.start_python_datetime = datetime.datetime(1900,1,1)
+        if end_python_datetime is not None:
+            self.end_python_datetime = end_python_datetime
+        else:
+            self.end_python_datetime = datetime.datetime(2100,1,1)
+        self.instrum = instrum
+        self.product = product
+        self.oversampling_list = oversampling_list
+    
+    def add(self,key,value):
+        self.__setitem__(key,value)
+        
+    def assimilate(self,dictionary):
+        for (key,value) in dictionary.items():
+            self.add(key,value)
+    
+    def check(self):
+        from math import isclose
+        self.nrows = len(self['ygrid'])
+        self.ncols = len(self['xgrid'])
+        xgrid_size = np.median(np.diff(self['xgrid']))
+        ygrid_size = np.median(np.diff(self['ygrid']))
+        if not isclose(xgrid_size,ygrid_size):
+            self.logger.info('x/y grid size''s inconsistency may need attention, {} vs {}'.format(xgrid_size,ygrid_size))
+        if self.grid_size is None:
+            self.grid_size = np.mean([xgrid_size,ygrid_size])
+            self.logger.debug('xgrid size is {}; ygrid size is {}; grid size is {}'.format(xgrid_size,ygrid_size,self.grid_size))
+        else:
+            if not isclose(self.grid_size,np.mean([xgrid_size,ygrid_size])):
+                self.logger.info('grid_size''s inconsistency with x/y grid may need attention, {} vs {}'\
+                                    .format(self.grid_size,np.mean([xgrid_size,ygrid_size])))
+                self.grid_size = np.mean([xgrid_size,ygrid_size])
+    
+    def merge(self,l3_data1):
+        if len(self.keys()) == 0:
+            self.logger.info('orignial level 3 is empty. returning the added level 3.')
+            return l3_data1
+        if len(l3_data1.keys()) == 0:
+            self.logger.info('added level 3 is empty. returning the orignial level 3.')
+            return self
+        common_keys = set(self).intersection(set(l3_data1))
+        merged_grid_size = np.mean([self.grid_size,l3_data1.grid_size])
+        self.logger.info('orginal grid size is {}, added grid size is {}, merged grid size is {}'\
+                         .format(self.grid_size,l3_data1.grid_size,merged_grid_size))
+        if self.start_python_datetime == datetime.datetime(1900, 1, 1):
+            merged_start_datetime = l3_data1.start_python_datetime
+        else:
+            merged_start_datetime = np.min([self.start_python_datetime,l3_data1.start_python_datetime])
+        self.logger.info('orginal start time is {}, added start time is {}, merged start time is {}'\
+                         .format(self.start_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                                 l3_data1.start_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                                 merged_start_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')))
+        if self.end_python_datetime == datetime.datetime(2100, 1, 1):
+            merged_end_datetime = l3_data1.end_python_datetime
+        else:
+            merged_end_datetime = np.max([self.end_python_datetime,l3_data1.end_python_datetime])
+        self.logger.info('orginal end time is {}, added end time is {}, merged end time is {}'\
+                         .format(self.end_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                                 l3_data1.end_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                                 merged_end_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')))
+        merged_oversampling_list = list(set(self.oversampling_list).union(set(l3_data1.oversampling_list)))
+        l3_data = Level3_Data(grid_size=merged_grid_size,
+                             start_python_datetime=merged_start_datetime,
+                             end_python_datetime=merged_end_datetime,
+                             instrum=self.instrum,
+                             product=self.product,
+                             oversampling_list=merged_oversampling_list)
+        for key in common_keys:
+            v0 = self[key]
+            v1 = l3_data1[key]
+            v0[np.isnan(v0)] = 0.
+            v1[np.isnan(v1)] = 0.
+            if key in ['total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
+                l3_data[key] = v0+v1
+            elif key in ['xgrid','ygrid','nrows','nrow','ncols','ncol','xmesh','ymesh']:
+                l3_data[key] = v0
+            elif key == 'cloud_pressure':
+                l3_data[key] = (v0*self['pres_total_sample_weight']
+                +v1*l3_data1['pres_total_sample_weight'])\
+                /(self['pres_total_sample_weight']
+                +l3_data1['pres_total_sample_weight'])
+            else:
+                l3_data[key] = (v0*self['total_sample_weight']
+                +v1*l3_data1['total_sample_weight'])\
+                /(self['total_sample_weight']
+                +l3_data1['total_sample_weight'])
+        return l3_data
+    
+    def read_mat(self,l3_filename,
+                 boundary_polygon=None,
+                 start_python_datetime=None,
+                 end_python_datetime=None):
+        from scipy.io import loadmat
+        if start_python_datetime is not None:
+            self.start_python_datetime = start_python_datetime
+        if end_python_datetime is not None:
+            self.end_python_datetime = end_python_datetime
+        d = loadmat(l3_filename,squeeze_me=True)
+        d.pop('__globals__')
+        d.pop('__header__')
+        d.pop('__version__')
+        
+        self.assimilate(d)
+        if boundary_polygon is not None:
+            self.logger.info('boundary polygon provided, masking out-of-boundary grid cells...')
+            [xmesh,ymesh] = np.meshgrid(self['xgrid'],self['ygrid'])
+            xlin = xmesh.reshape(-1)
+            ylin = ymesh.reshape(-1)
+            mask=~boundary_polygon.contains_points(np.hstack((xlin[:,np.newaxis],ylin[:,np.newaxis]))).reshape(xmesh.shape)
+            for (k,v) in self.items():
+                if len(v.shape) == 2:
+                    self[k][mask] = np.nan
+        self.check()
+        return self
+    
+    def read_nc(self,l3_filename,
+                fields_name=[]):
+        from netCDF4 import Dataset
+        if len(fields_name) == 0:
+            if len(self.oversampling_list) == 0 and self.product == 'CH4':
+                guess = 'XCH4'
+            else:
+                guess = 'column_amount'
+            self.logger.info('no fields_name provided, adding '+guess)
+            fields_name.append(guess)
+        if 'xgrid' not in fields_name:
+            fields_name.append('xgrid')
+        if 'ygrid' not in fields_name:
+            fields_name.append('ygrid')
+        if 'num_samples' not in fields_name:
+            fields_name.append('num_samples')
+        if 'total_sample_weight' not in fields_name:
+            fields_name.append('total_sample_weight')
+        nc = Dataset(l3_filename,'r')
+        self.grid_size = np.float(nc.getncattr('grid_size'))
+        self.instrum = nc.getncattr('instrument')
+        self.product = nc.getncattr('product')
+        self.start_python_datetime = datetime.datetime.strptime(nc.getncattr('time_coverage_start'),'%Y-%m-%dT%H:%M:%SZ')
+        self.end_python_datetime = datetime.datetime.strptime(nc.getncattr('time_coverage_end'),'%Y-%m-%dT%H:%M:%SZ')
+        self.logger.info('Loading level 3 data for instrument {}, product {}, and grid size {:02f}'\
+                         .format(self.instrum,self.product,self.grid_size))
+        for (i,varname) in enumerate(fields_name):
+            try:
+                self[varname] = nc[varname][:].filled(np.nan)
+            except:
+                self.logger.debug('{} cannot be filled by nan or is not a masked array'.format(varname))
+                self[varname] = np.array(nc[varname][:])
+        self.check()
+        nc.close()
+        return self
+        
+    def save_tif(self,l3_filename,
+                 fields_name=[]):
+        if len(fields_name) == 0:
+            if len(self.oversampling_list) == 0 and self.product == 'CH4':
+                guess = 'XCH4'
+            else:
+                guess = 'column_amount'
+            self.logger.info('no fields_name provided, adding '+guess)
+            fields_name.append(guess)
+        if len(fields_name) > 1:
+            self.logger.error('only one field is supported to save as GeoTIFF, usually column_amount. returning')
+            return
+        try:
+            import rasterio
+            from rasterio.transform import Affine
+        except:
+            self.logger.error('rasterio not available. returning')
+            return
+        transform = Affine.translation(self['xgrid'][0]-self.grid_size/2,self['ygrid'][0]-self.grid_size/2)\
+            *Affine.scale(self.grid_size,self.grid_size)
+        with rasterio.open(
+                l3_filename,'w',
+                driver='GTiff',
+                height=self.nrows,
+                width=self.ncols,
+                count=1,
+                transform=transform,
+                crs='+proj=latlong',
+                dtype=np.float32,
+                ) as dataset:
+            dataset.write(self[fields_name[0]], 1)
+    
+    def save_nc(self,l3_filename,
+                fields_name=[],
+                fields_rename=None,
+                fields_comment=None,
+                fields_unit=None,
+                ncattr_dict={}):
+        from netCDF4 import Dataset
+        if len(fields_name) == 0:
+            if len(self.oversampling_list) == 0 and self.product == 'CH4':
+                guess = 'XCH4'
+            else:
+                guess = 'column_amount'
+            self.logger.info('no fields_name provided, adding '+guess)
+            fields_name.append(guess)
+        if fields_rename is None:
+            fields_rename = fields_name.copy()
+        if fields_comment is None:
+            fields_comment = ['' for i in range(len(fields_name))]
+        if fields_unit is None:
+            fields_unit = ['' for i in range(len(fields_name))]
+        if 'xgrid' not in fields_name:
+            fields_name.append('xgrid')
+            fields_rename.append('xgrid')
+            fields_comment.append('horizontal grid')
+            fields_unit.append('degree')
+        if 'ygrid' not in fields_name:
+            fields_name.append('ygrid')
+            fields_rename.append('ygrid')
+            fields_comment.append('vertical grid')
+            fields_unit.append('degree')
+        if 'num_samples' not in fields_name:
+            fields_name.append('num_samples')
+            fields_rename.append('num_samples')
+            fields_comment.append('layers of coverage by level 2 pixels')
+            fields_unit.append('')
+        if 'total_sample_weight' not in fields_name:
+            fields_name.append('total_sample_weight')
+            fields_rename.append('total_sample_weight')
+            fields_comment.append('spatial weight for the current level 3 map')
+            fields_unit.append('vary')
+        nc = Dataset(l3_filename,'w',format='NETCDF4')
+        if not ncattr_dict:
+            ncattr_dict = {'description':'Level 3 data created using physical oversampling (https://doi.org/10.5194/amt-11-6679-2018)',
+                           'institution':'University at Buffalo',
+                           'contact':'Kang Sun, kangsun@buffalo.edu'}
+        if 'history' not in ncattr_dict.keys():
+            ncattr_dict['history'] = 'Created '+datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ')
+        if 'time_coverage_start' not in ncattr_dict.keys():
+            ncattr_dict['time_coverage_start'] = self.start_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+        if 'time_coverage_end' not in ncattr_dict.keys():
+            ncattr_dict['time_coverage_end'] = self.end_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+        if 'grid_size' not in ncattr_dict.keys():
+            ncattr_dict['grid_size'] = '{}'.format(self.grid_size)
+        if 'instrument' not in ncattr_dict.keys():
+            ncattr_dict['instrument'] = '{}'.format(self.instrum)
+        if 'product' not in ncattr_dict.keys():
+            ncattr_dict['product'] = '{}'.format(self.product)
+        nc.setncatts(ncattr_dict)
+        nc.createDimension('nrows',self.nrows)
+        nc.createDimension('ncols',self.ncols)
+        for (i,fn) in enumerate(fields_name):
+            if fn in ['xgrid']:
+                vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('ncols'))
+            elif fn in ['ygrid']:
+                vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('nrows'))
+            else:
+                vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('nrows','ncols'))
+            vid.comment = fields_comment[i]
+            vid.units = fields_unit[i]
+            vid[:] = np.ma.masked_invalid(np.float32(self[fn]))
+        nc.close()
+    
+    def block_reduce(self,new_grid_size):
+        self.check()
+        if new_grid_size <= self.grid_size:
+            self.logger.warning('provide a grid size larger than {}!'.format(self.grid_size))
+            return
+        from skimage.measure import block_reduce
+        reduce_factor = np.int(np.rint(new_grid_size/self.grid_size))
+        if reduce_factor == 1:
+            self.warning('no need to reduce')
+            return self
+        self.logger.info('level 3 grid will be coarsened by a factor of {}'.format(reduce_factor))
+        self.logger.info('new grid size is specified as {}, rounded to {}'.format(new_grid_size,self.grid_size*reduce_factor))
+        new_l3 = Level3_Data(grid_size=self.grid_size*reduce_factor,
+                             start_python_datetime=self.start_python_datetime,
+                             end_python_datetime=self.end_python_datetime,
+                             instrum=self.instrum,
+                             product=self.product)
+        # otherwise block_reduce will pad zeros, ruining the end elements
+        ncols_trim = self.ncols-self.ncols%reduce_factor
+        nrows_trim = self.nrows-self.nrows%reduce_factor
+        for (k,v) in self.items():
+            if k in ['total_sample_weight','pres_total_sample_weight']:
+                new_l3.add(k,block_reduce(self[k][:nrows_trim,:ncols_trim],(reduce_factor,reduce_factor),func=np.nansum))
+            elif k in ['xmesh','ymesh','num_samples','pres_num_samples']:
+                new_l3.add(k,block_reduce(self[k][:nrows_trim,:ncols_trim],(reduce_factor,reduce_factor),func=np.nanmean))
+            elif k in ['xgrid']:
+                new_l3.add(k,block_reduce(self[k][:ncols_trim],(reduce_factor,),func=np.nanmean))
+            elif k in ['ygrid']:
+                new_l3.add(k,block_reduce(self[k][:nrows_trim],(reduce_factor,),func=np.nanmean))
+        for (k,v) in self.items():
+            if k in ['ncol','ncols']:
+                new_l3.add(k,len(new_l3['xgrid']))
+            elif k in ['nrow','nrows']:
+                new_l3.add(k,len(new_l3['ygrid']))
+            elif k == 'cloud_pressure':
+                new_l3.add(k,block_reduce(self[k][:nrows_trim,:ncols_trim]*self['pres_total_sample_weight'][:nrows_trim,:ncols_trim],
+                                          (reduce_factor,reduce_factor),func=np.nansum)\
+                           /new_l3['pres_total_sample_weight'])
+            elif self[k].shape == (self.nrows,self.ncols) and \
+                k not in ['xmesh','ymesh','total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
+                self.logger.info('block reducing field {}'.format(k))
+                new_l3.add(k,block_reduce(self[k][:nrows_trim,:ncols_trim]*self['total_sample_weight'][:nrows_trim,:ncols_trim],
+                                          (reduce_factor,reduce_factor),func=np.nansum)\
+                           /new_l3['total_sample_weight'])
+        new_l3.check()
+        return new_l3
+    
+    def plot_basemap(self,plot_field='column_amount',
+             existing_ax=None,
+             layer_threshold=0.5,draw_colorbar=True,
+             func=None,zoom=5,basemap_source=None,**kwargs):
+        import matplotlib.pyplot as plt
+        try:
+            import contextily as cx
+        except:
+            self.logger.error('contextily not available. returning')
+            return
+        if 'PROJ_LIB' not in os.environ:
+            self.logger.warning('PROJ_LIB cannot be found. Trying to infer it')
+            os.environ['PROJ_LIB'] = os.path.join(os.environ['CONDA_PREFIX'],'Library','share','proj')
+            os.environ['GDAL_DATA'] = os.path.join(os.environ['CONDA_PREFIX'],'Library','share')
+        try:
+            from pyproj import CRS
+        except:
+            self.logger.error('pyproj.CRS not available. returning')
+            return
+        xgrid = self['xgrid'];ygrid = self['ygrid']
+        
+        if plot_field not in self.keys():
+            self.logger.warning(plot_field+' doesn''t exist in l3_data!')
+            return {}
+        if func is not None:
+            plotdata = func(self[plot_field])
+        else:
+            plotdata = self[plot_field]
+        if 'cmap' not in kwargs.keys():
+            kwargs['cmap'] = 'rainbow'
+        if 'alpha' not in kwargs.keys():
+            kwargs['alpha'] = 0.06
+        if 'shrink' not in kwargs.keys():
+            kwargs['shrink'] = 0.75
+        if 'vmin' not in kwargs.keys():
+            kwargs['vmin'] = np.nanmin(plotdata)
+            kwargs['vmax'] = np.nanmax(plotdata)
+        if 'xlim' not in kwargs.keys():
+            xlim = (np.min(xgrid),np.max(xgrid))
+        else:
+            xlim = kwargs['xlim']
+        if 'ylim' not in kwargs.keys():
+            ylim = (np.min(ygrid),np.max(ygrid))
+        else:
+            ylim = kwargs['ylim']
+        if existing_ax is None:
+            self.logger.info('axes not supplied, creating one')
+            fig,ax = plt.subplots(1,1,figsize=(10,5))
+        else:
+            fig = None
+            ax = existing_ax
+        if 'num_samples' in self.keys():
+            plotdata[self['num_samples']<layer_threshold] = np.nan
+        pc = ax.pcolormesh(xgrid,ygrid,plotdata,
+                           alpha=kwargs['alpha'],cmap=kwargs['cmap'],
+                           vmin=kwargs['vmin'],vmax=kwargs['vmax'],shading='gouraud')
+        ax.set_xlim(xlim);
+        ax.set_ylim(ylim);
+        cx.add_basemap(ax=ax,zoom=zoom,crs=CRS("EPSG:4326"),source=basemap_source)
+        if draw_colorbar:
+            cb = plt.colorbar(pc,ax=ax,label=plot_field,shrink=kwargs['shrink'])
+        else:
+            cb = None
+        fig_output = {}
+        fig_output['fig'] = fig
+        fig_output['ax'] = ax
+        fig_output['cb'] = cb
+        fig_output['pc'] = pc
+        return fig_output
+    def plot(self,plot_field='column_amount',
+             existing_ax=None,draw_admin_level=1,
+             layer_threshold=0.5,draw_colorbar=True,
+             func=None,**kwargs):
+        import matplotlib.pyplot as plt
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+        # workaround for cartopy 0.16
+        from matplotlib.axes import Axes
+        from cartopy.mpl.geoaxes import GeoAxes
+        GeoAxes._pcolormesh_patched = Axes.pcolormesh
+        
+        xgrid = self['xgrid'];ygrid = self['ygrid']
+        
+        if plot_field not in self.keys():
+            self.logger.warning(plot_field+' doesn''t exist in l3_data!')
+            return {}
+        if func is not None:
+            plotdata = func(self[plot_field])
+        else:
+            plotdata = self[plot_field]
+        if 'cmap' not in kwargs.keys():
+            kwargs['cmap'] = 'rainbow'
+        if 'alpha' not in kwargs.keys():
+            kwargs['alpha'] = 1.
+        if 'shrink' not in kwargs.keys():
+            kwargs['shrink'] = 0.75
+        if 'vmin' not in kwargs.keys():
+            kwargs['vmin'] = np.nanmin(plotdata)
+            kwargs['vmax'] = np.nanmax(plotdata)
+        if existing_ax is None:
+            self.logger.info('axes not supplied, creating one')
+            fig,ax = plt.subplots(1,1,figsize=(10,5),
+                                  subplot_kw={"projection": ccrs.PlateCarree()})
+        else:
+            fig = None
+            ax = existing_ax
+        ax.set_extent([self['xgrid'].min(), self['xgrid'].max(), self['ygrid'].min(), self['ygrid'].max()], ccrs.Geodetic())
+        ax.add_feature(cfeature.COASTLINE)
+        if draw_admin_level == 0:
+            ax.add_feature(cfeature.BORDERS, edgecolor='gray')
+        elif draw_admin_level == 1:
+            ax.add_feature(cfeature.BORDERS)
+            ax.add_feature(cfeature.STATES,edgecolor='gray')
+        if 'num_samples' in self.keys():
+            plotdata[self['num_samples']<layer_threshold] = np.nan
+        pc = ax.pcolormesh(xgrid,ygrid,plotdata,transform=ccrs.PlateCarree(),
+                           alpha=kwargs['alpha'],cmap=kwargs['cmap'],vmin=kwargs['vmin'],vmax=kwargs['vmax'],shading='auto')
+        if draw_colorbar:
+            cb = plt.colorbar(pc,ax=ax,label=plot_field,shrink=kwargs['shrink'])
+        else:
+            cb = None
+        fig_output = {}
+        fig_output['fig'] = fig
+        fig_output['ax'] = ax
+        fig_output['cb'] = cb
+        fig_output['pc'] = pc
+        return fig_output
+
 class popy(object):
     
     def __init__(self,instrum,product,\
                  grid_size=0.1,west=-180,east=180,south=-90,north=90,\
-                 start_year=1995,start_month=1,start_day=1,\
+                 start_year=1900,start_month=1,start_day=1,\
                  start_hour=0,start_minute=0,start_second=0,\
-                 end_year=2025,end_month=12,end_day=31,\
+                 end_year=2100,end_month=12,end_day=31,\
                  end_hour=23,end_minute=59,end_second=59,verbose=False):
         
         self.instrum = instrum
@@ -1239,6 +1755,10 @@ class popy(object):
                 self.default_subset_function = 'F_subset_S5PNO2'
                 oversampling_list = ['column_amount','albedo',\
                                      'cloud_fraction']
+            elif product in ['SO2']:
+                self.default_subset_function = 'F_subset_S5PSO2'
+                oversampling_list = ['column_amount','albedo',\
+                                     'cloud_fraction']
             elif product in ['CO']:
                 self.default_subset_function = 'F_subset_S5PCO'
                 oversampling_list = ['column_amount','albedo',\
@@ -1328,8 +1848,8 @@ class popy(object):
         self.south = south
         self.north = north
         
-        xgrid = np.arange(west,east,grid_size,dtype=np.float64)+grid_size/2
-        ygrid = np.arange(south,north,grid_size,dtype=np.float64)+grid_size/2
+        xgrid = arange_(west,east,grid_size,dtype=np.float64)+grid_size/2
+        ygrid = arange_(south,north,grid_size,dtype=np.float64)+grid_size/2
         [xmesh,ymesh] = np.meshgrid(xgrid,ygrid)
         
         xgridr = np.hstack((np.arange(west,east,grid_size),east))
@@ -1372,7 +1892,10 @@ class popy(object):
         self.end_matlab_datenum = end_matlab_datenum
         self.show_progress = True
     
-    def F_mat_reader(self,mat_filename,boundary_polygon=None):
+    def F_mat_reader(self,mat_filename,boundary_polygon=None,if_conserve=False):
+        '''
+        if_conserve = True, none filtering will be applied, so level 2 pixels are conserved
+        '''
         import scipy.io
         
         mat_data = scipy.io.loadmat(mat_filename)
@@ -1401,7 +1924,24 @@ class popy(object):
                 l2g_data[key_name] = mat_data['output_subset'][key_name][0][0].squeeze()
 #                #exec(key_name + " =  mat_data['output_subset'][key_name][0][0].flatten()")
                 #exec('l2g_data[key_name]=' + key_name)
-        
+        nl20 = len(l2g_data['latc'])
+        min_time = datedev_py(
+                l2g_data['UTC_matlab_datenum'].min()).strftime(
+                        "%d-%b-%Y %H:%M:%S")
+        max_time = datedev_py(
+                l2g_data['UTC_matlab_datenum'].max()).strftime(
+                        "%d-%b-%Y %H:%M:%S")
+        if if_conserve:
+            self.logger.info('Loading and subsetting file '+mat_filename+'...')
+            self.logger.info('containing %d pixels...' %nl20)
+            self.logger.info('min observation time at '+min_time)
+            self.logger.info('max observation time at '+max_time)
+            self.logger.info('if_conserve is on. No filter (boundary/time/space) will be applied, returning with full l2g')
+            del mat_data    
+            self.l2g_data = l2g_data
+            self.nl2 = nl20
+            return
+            
         west = self.west
         east = self.east
         south = self.south
@@ -1428,13 +1968,8 @@ class popy(object):
             validmask = validmask & (l2g_data['qa_value'] >=self.min_qa_value)
             self.logger.info('qa value filter is applied')
         
-        nl20 = len(l2g_data['latc'])
-        min_time = datedev_py(
-                l2g_data['UTC_matlab_datenum'].min()).strftime(
-                        "%d-%b-%Y %H:%M:%S")
-        max_time = datedev_py(
-                l2g_data['UTC_matlab_datenum'].max()).strftime(
-                        "%d-%b-%Y %H:%M:%S")
+        
+        
         l2g_data = {k:v[validmask,] for (k,v) in l2g_data.items()}
         nl2 = len(l2g_data['latc'])
         
@@ -1477,6 +2012,8 @@ class popy(object):
     def F_merge_l2g_data(self,l2g_data0,l2g_data1):
         if not l2g_data0:
             return l2g_data1
+        if not l2g_data1:
+            return l2g_data0
         common_keys = set(l2g_data0).intersection(set(l2g_data1))
         for key in common_keys:
             l2g_data0[key] = np.concatenate((l2g_data0[key],l2g_data1[key]),0)
@@ -1486,6 +2023,8 @@ class popy(object):
         if not l3_data0:
             l3_data = l3_data1
             return l3_data
+        if not l3_data1:
+            return l3_data0
         common_keys = set(l3_data0).intersection(set(l3_data1))
         l3_data = {}
         for key in common_keys:
@@ -1527,7 +2066,7 @@ class popy(object):
                 varname = tmp.name
             else:
                 varname = data_fields_l2g[i]
-            if tmpdtype is "str":
+            if tmpdtype == "str":
                 outp[varname] = tmp[:]
             else:
                 outp[varname] = np.squeeze(tmp[:],axis=0)
@@ -1603,11 +2142,13 @@ class popy(object):
             (outp['latc'].shape[0],1)).astype(np.int16)
         return outp
     
-    def F_read_BEHR_h5(self,fn,data_fields,data_fields_l2g=[]):
+    def F_read_BEHR_h5(self,fn,data_fields,data_fields_l2g=None):
         
         import h5py
         outp = {}
         swath_count = 0
+        if data_fields_l2g is None:
+            data_fields_l2g = data_fields
         f = h5py.File(fn,mode='r')
         for swath in f['Data'].keys():
             try:
@@ -1622,8 +2163,8 @@ class popy(object):
         outp['Time'] = np.tile(outp['Time'],(outp['latc'].shape[0],1)).astype(np.float64)#BEHR Time is float32, not accurate
         outp['UTC_matlab_datenum'] = outp['Time']/86400.+727930.
         outp['across_track_position'] = np.tile(np.arange\
-                        (1.,outp['latc'].shape[1]+1),\
-                        (outp['latc'].shape[0],1)).astype(np.int16)
+                        (1.,outp['latc'].shape[0]+1),\
+                        (outp['latc'].shape[1],1)).astype(np.int16).T
         f.close()
         return outp        
     
@@ -2183,7 +2724,96 @@ class popy(object):
             self.nl2 = 0
         else:
             self.nl2 = len(l2g_data['latc'])
-            
+    
+    def F_subset_S5PSO2(self,
+                        l2_path_pattern='S5P*L2__SO2____%Y%m%dT*.nc',
+                        data_fields=[],
+                        data_fields_l2g=[]):
+        '''
+        l2_path_pattern=r'C:\research\S5PSO2\L2\S5P*L2__SO2____%Y%m%dT*.nc'
+        '''
+        import glob
+        l2_list = []
+        start_date = self.start_python_datetime.date()
+        end_date = self.end_python_datetime.date()
+        days = (end_date-start_date).days+1
+        DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+        for DATE in DATES:
+            flist = glob.glob(DATE.strftime(l2_path_pattern))
+            l2_list = l2_list+flist
+        self.l2_list = l2_list
+        maxsza = self.maxsza
+        maxcf = self.maxcf
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        min_qa_value = self.min_qa_value
+        if not data_fields:
+            # default, absolute path of useful variables in the nc file
+            data_fields = ['/PRODUCT/SUPPORT_DATA/INPUT_DATA/cloud_fraction_crb',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/solar_zenith_angle',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/viewing_zenith_angle',\
+                           '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_albedo_328nm',\
+                           '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_pressure',\
+                           '/PRODUCT/latitude',\
+                           '/PRODUCT/longitude',\
+                           '/PRODUCT/qa_value',\
+                           '/PRODUCT/time',\
+                           '/PRODUCT/delta_time',\
+                           '/PRODUCT/sulfurdioxide_total_vertical_column',\
+                           '/PRODUCT/sulfurdioxide_total_vertical_column_precision']    
+            # standardized variable names in l2g file. should map one-on-one to data_fields
+            data_fields_l2g = ['cloud_fraction','latitude_bounds','longitude_bounds','SolarZenithAngle',\
+                               'vza','albedo','surface_pressure','latc','lonc','qa_value','time','delta_time',\
+                               'column_amount','column_uncertainty']
+        self.logger.info('Read, subset, and store level 2 data to l2g_data')
+        l2g_data = {}
+        for fn in l2_list:
+            self.logger.info('Loading '+os.path.split(fn)[-1])
+            try:
+                outp_nc = self.F_read_S5P_nc(fn,data_fields,data_fields_l2g)
+            except Exception as e:
+                self.logger.warning(fn+' gives error:')
+                self.logger.warning(e)
+                # input("Press Enter to continue...")
+                continue
+            f1 = outp_nc['SolarZenithAngle'] <= maxsza
+            f2 = outp_nc['cloud_fraction'] <= maxcf
+            f3 = outp_nc['qa_value'] >= min_qa_value              
+            f4 = outp_nc['latc'] >= south
+            f5 = outp_nc['latc'] <= north
+            tmplon = outp_nc['lonc']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp_nc['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp_nc['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+            self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            l2g_data0 = {}
+            Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][:,:,0])[validmask]
+            Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][:,:,3])[validmask]
+            Lat_lowerright = np.squeeze(outp_nc['latitude_bounds'][:,:,1])[validmask]
+            Lat_upperright = np.squeeze(outp_nc['latitude_bounds'][:,:,2])[validmask]
+            Lon_lowerleft = np.squeeze(outp_nc['longitude_bounds'][:,:,0])[validmask]
+            Lon_upperleft = np.squeeze(outp_nc['longitude_bounds'][:,:,3])[validmask]
+            Lon_lowerright = np.squeeze(outp_nc['longitude_bounds'][:,:,1])[validmask]
+            Lon_upperright = np.squeeze(outp_nc['longitude_bounds'][:,:,2])[validmask]
+            l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
+            l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+            for key in outp_nc.keys():
+                if key not in {'latitude_bounds','longitude_bounds','time_utc','time','delta_time'}:
+                    l2g_data0[key] = outp_nc[key][validmask]
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
+    
     def F_subset_S5PNO2(self,path,data_fields=[],data_fields_l2g=[],
                         s5p_product='*',
                         geos_interp_variables=[],geos_time_collection=''):
@@ -3561,7 +4191,9 @@ class popy(object):
             f7 = tmplon <= east-west
             f8 = outp['UTC_matlab_datenum'] >= self.start_matlab_datenum
             f9 = outp['UTC_matlab_datenum'] <= self.end_matlab_datenum
-            validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+            # the -999.5 fill value is annoying
+            f10 = (outp['tot_col'] > 0) & (outp['tot_col_total_error'] > 0)
+            validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9 & f10
             self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
             l2g_data0 = {}
             if np.sum(validmask) == 0:
@@ -3603,7 +4235,161 @@ class popy(object):
             self.nl2 = 0
         else:
             self.nl2 = len(l2g_data['latc'])
+    
+    def F_subset_CrISNH3_JPL(self,path,
+                             l2_path_structure='%Y/%m/%d/',
+                             ellipse_lut_path='CrIS_footprint.mat',
+                             varnames=None,varnames_short=None):
+        """ 
+        function to subset JPL CrIS NH3 level2 files
+        path:
+            l2 data root directory, only flat l2 file structure is supported
+        l2_path_structure:
+            None indicates that individual files are directly under path;
+            '%Y/' if files are like l2_dir/2017/*.nc;
+            '%Y/%m/%d/' if files are like l2_dir/2017/05/01/*.nc
+        ellipse_lut_path:
+            path to a look up table storing u, v, and t data to reconstruct CrIS pixel ellipsis
+        varnames:
+            path of netcdf fields to be extracted
+        varnames_short:
+            short names of varnames
+        created on 2021/05/26
+        """      
+        # find out list of l2 files to subset
+        import glob
+        from scipy.io import loadmat
+        from scipy.interpolate import RegularGridInterpolator
+        l2_dir = path
+        l2_list = []
+        cwd = os.getcwd()
+        os.chdir(l2_dir)
+        start_date = self.start_python_datetime.date()
+        end_date = self.end_python_datetime.date()
+        days = (end_date-start_date).days+1
+        DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+        for DATE in DATES:
+            if l2_path_structure == None:
+                flist = glob.glob('Combined_NH3_*'+DATE.strftime("%Y%m%d")+'.nc')
+            else:
+                flist = glob.glob(DATE.strftime(l2_path_structure)+\
+                                  'Combined_NH3_*'+DATE.strftime("%Y%m%d")+'.nc')
+            l2_list = l2_list+flist
         
+        os.chdir(cwd)
+        self.l2_dir = l2_dir
+        self.l2_list = l2_list
+        
+        if varnames is None:
+            varnames = ['DOFs', 'DayNightFlag', 'Latitude', 'Longitude', 'Quality', 'YYYYMMDD','UT_Hour',
+                    'Pressure', 'AveragingKernel', 'ConstraintVector', 'Species', 'ObservationErrorCovariance',
+                    'Retrieval/Column', 'Geolocation/CrIS_Pixel_Index', 'Geolocation/CrIS_Xtrack_Index',
+                    'Characterization/Column_Error']
+            varnames_short = [v.split('/')[-1] for v in varnames]
+        
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        l2g_data = {}
+        pixel_lut = loadmat(ellipse_lut_path)
+        f_uuu = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,271)),pixel_lut['uuu4']) 
+        f_vvv = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,271)),pixel_lut['vvv4']) 
+        f_ttt = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,271)),pixel_lut['ttt4']) 
+        for fn in l2_list:
+            file_path = os.path.join(l2_dir,fn)
+            self.logger.info('loading '+fn)
+            try:
+                outp = F_ncread_selective(file_path,varnames,varnames_short)
+            except:
+                self.logger.warning(fn+' cannot be read!')
+                continue
+            python_dt = [datetime.datetime.strptime('{:.0f}'.format(d),'%Y%m%d')\
+             +datetime.timedelta(seconds=3600*h) for d,h in zip(outp['YYYYMMDD'],outp['UT_Hour'])]
+            outp['UTC_matlab_datenum'] = np.array([datetime2datenum(pdt) for pdt in python_dt])
+
+            f2 = outp['DOFs'] >= self.mindofs
+            f3 = (outp['Quality'] == 1) & \
+            (outp['DayNightFlag'] == 1) & (~np.isnan(outp['Column_Error'][:,0]))
+            f4 = outp['Latitude'] >= south
+            f5 = outp['Latitude'] <= north
+            tmplon = outp['Longitude']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            validmask = f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+            self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            l2g_data0 = {}
+            if np.sum(validmask) == 0:
+                continue
+            
+            nobs = np.sum(validmask)
+            # work out footprint number
+            # convert field of view and field of regard indices from 0-based to 1-based
+            tmpfov = outp['CrIS_Pixel_Index'][validmask]+1
+            tmpfor = outp['CrIS_Xtrack_Index'][validmask]+1
+            pressure0 = outp['Pressure'][validmask,]
+            xretv0 = outp['Species'][validmask,]
+            noise_error0 = outp['ObservationErrorCovariance'][validmask,]
+            ak0 = outp['AveragingKernel'][validmask,]
+            ak_colm = 0*xretv0;
+            tot_col_test = np.zeros((nobs))
+            sfcvmr = np.zeros((nobs))
+            ps = np.zeros((nobs))
+            noise_error_colm = np.zeros((nobs))
+            latc = outp['Latitude'][validmask]
+            lonc = outp['Longitude'][validmask]
+            
+            # loop over observations
+            for io in range(nobs):
+                index = (pressure0[io,] > 0)
+                pressure = pressure0[io,index]
+                nlev = len(pressure)
+                dp = np.zeros((nlev))
+                dp[0] = (pressure[0]-pressure[1])/2
+                for ip in range(1,nlev-1):
+                    dp[ip] = (pressure[ip-1]-pressure[ip])/2+(pressure[ip]-pressure[ip+1])/2
+                dp[nlev-1] = pressure[nlev-2]-pressure[nlev-1]
+                trans = 2.12e16*dp
+                # calculate column AK
+                xretv = xretv0[io,index]
+                ak = ak0[io,][np.ix_(index,index)]
+                noise_error = noise_error0[io,][np.ix_(index,index)]
+                ak_colm[io,index] = (trans*xretv).transpose().dot(ak)
+                # calculate errors
+                xarr = np.diag(xretv)
+                sx = (xarr.dot(noise_error)).dot(xarr)
+                noise_error_colm[io] = np.sqrt((trans.transpose().dot(sx)).dot(trans))
+                tot_col_test[io] = np.sum(trans*xretv)
+                sfcvmr[io] = xretv[0]
+                ps[io] = pressure[0]
+            
+            l2g_data0['ifov'] = (tmpfor-1)*9+tmpfov
+            l2g_data0['latc'] = latc
+            l2g_data0['lonc'] = lonc
+            # find out elliptical parameters using lookup table            
+            l2g_data0['u'] = f_uuu((latc,l2g_data0['ifov']))
+            l2g_data0['v'] = f_vvv((latc,l2g_data0['ifov']))
+            l2g_data0['t'] = f_ttt((latc,l2g_data0['ifov']))
+            l2g_data0['colnh3_simple'] = tot_col_test
+            l2g_data0['column_amount'] = outp['Column'][validmask,0]
+            l2g_data0['column_uncertainty'] = outp['Column_Error'][validmask,0]
+            l2g_data0['surface_pressure'] = ps
+            l2g_data0['sfcvmr'] = sfcvmr
+            l2g_data0['UTC_matlab_datenum'] = outp['UTC_matlab_datenum'][validmask]
+            l2g_data0['dofs'] = outp['DOFs'][validmask]
+            # a priori type in string format might slow down the whole thing
+            #l2g_data0['xa_type'] = outp['xa_Type'][validmask]
+            
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
+    
     def F_subset_CrISNH3(self,path,l2_path_structure='%Y/%m/%d/',ellipse_lut_path='CrIS_footprint.mat'):
         """ 
         function to subset CrIS NH3 level2 files
@@ -3747,7 +4533,8 @@ class popy(object):
             self.nl2 = len(l2g_data['latc'])
     
     def F_plot_l3_cartopy(self,plot_field='column_amount',l3_data=None,
-                          existing_ax=None,draw_admin_level=1,**kwargs):
+                          existing_ax=None,draw_admin_level=1,
+                          layer_threshold=0.5,draw_colorbar=True,**kwargs):
         '''
         l3 plotting utility using cartopy
         plot_field:
@@ -3776,6 +4563,9 @@ class popy(object):
         if 'xgrid' in l3_data.keys():
             xgrid = l3_data['xgrid'];ygrid = l3_data['ygrid']
         
+        if plot_field not in l3_data.keys():
+            self.logger.warning(plot_field+' doesn''t exist in l3_data!')
+            return {}
         if self.error_model == 'log' and plot_field == 'column_amount':
             plotdata = np.power(10,l3_data[plot_field])
         else:
@@ -3803,13 +4593,19 @@ class popy(object):
         elif draw_admin_level == 1:
             ax.add_feature(cfeature.BORDERS)
             ax.add_feature(cfeature.STATES,edgecolor='gray')
+        if 'num_samples' in l3_data.keys():
+            plotdata[l3_data['num_samples']<layer_threshold] = np.nan
         pc = ax.pcolormesh(xgrid,ygrid,plotdata,transform=ccrs.PlateCarree(),
                            alpha=kwargs['alpha'],cmap=kwargs['cmap'],vmin=kwargs['vmin'],vmax=kwargs['vmax'],shading='auto')
-        cb = plt.colorbar(pc,ax=ax,label=plot_field,shrink=kwargs['shrink'])
+        if draw_colorbar:
+            cb = plt.colorbar(pc,ax=ax,label=plot_field,shrink=kwargs['shrink'])
+        else:
+            cb = None
         fig_output = {}
         fig_output['fig'] = fig
         fig_output['ax'] = ax
         fig_output['cb'] = cb
+        fig_output['pc'] = pc
         return fig_output
     
     def F_plot_l3(self,plot_field='column_amount',l3_data=None,
@@ -3854,7 +4650,7 @@ class popy(object):
     
     def F_plot_l2g_cartopy(self,plot_field='column_amount',
                            max_day=1,l2g_data=None,
-                           x_wind_field='era5_u100',y_wind_field='era5_v100',
+                           x_wind_field=None,y_wind_field=None,
                            existing_ax=None,draw_admin_level=1,
                            **kwargs):
         '''
@@ -3909,7 +4705,8 @@ class popy(object):
         else:
             fig = None
             ax = existing_ax
-        ax.set_extent([self.west, self.east, self.south, self.north], ccrs.Geodetic())
+        if [self.west, self.east, self.south, self.north] != [-180,180,-90,90]:
+            ax.set_extent([self.west, self.east, self.south, self.north], ccrs.Geodetic())
         ax.add_feature(cfeature.COASTLINE)
         ax.add_feature(cfeature.COASTLINE)
         if draw_admin_level == 0:
@@ -4325,7 +5122,16 @@ class popy(object):
                        oversampling_list,self.pixel_shape,self.error_model,
                        self.k1,self.k2,self.k3,xmargin,ymargin,
                        iblock=1)
-            return l3_data
+            l3_data['xgrid'] = self.xgrid
+            l3_data['ygrid'] = self.ygrid
+            l3_object = Level3_Data(grid_size=self.grid_size,
+                                    start_python_datetime=self.start_python_datetime,
+                                    end_python_datetime=self.end_python_datetime,
+                                    instrum=self.instrum,product=self.product)
+            l3_object.assimilate(l3_data)
+            l3_object.check()
+            l3_object.oversampling_list = self.oversampling_list_final
+            return l3_object
         
         import multiprocessing
         
@@ -4346,7 +5152,7 @@ class popy(object):
             self.logger.info('%d pixels to be regridded...' %nl2)
         else:
             self.logger.info('No pixel to be regridded, returning...')
-            return None
+            return {}
         nblock_row = np.max([np.floor(nrows/block_length),1]).astype(np.int)
         nblock_col = np.max([np.floor(ncols/block_length),1]).astype(np.int)
         self.nblock_row = nblock_row
@@ -4420,8 +5226,16 @@ class popy(object):
         l3_data = {}
         for key in l3_data0.keys():
             l3_data[key] = np.block([dict_of_lists[key][i:i+nblock_col] for i in range(0,nblock,nblock_col)])
-        
-        return l3_data
+        l3_data['xgrid'] = self.xgrid
+        l3_data['ygrid'] = self.ygrid
+        l3_object = Level3_Data(grid_size=self.grid_size,
+                                start_python_datetime=self.start_python_datetime,
+                                end_python_datetime=self.end_python_datetime,
+                                instrum=self.instrum,product=self.product)
+        l3_object.assimilate(l3_data)
+        l3_object.check()
+        l3_object.oversampling_list = self.oversampling_list_final
+        return l3_object
         
     def F_regrid_ccm(self):
         """
@@ -5195,6 +6009,83 @@ class popy(object):
             for key in sounding_interp.keys():
                 self.logger.info(key+' from MERRA2 is sampled to L2g coordinate/time')
                 self.l2g_data['merra2_'+key] = np.float32(sounding_interp[key])
+    
+    def F_label_HMS(self,HMS_dir,fn_date_identifier='%Y/%m/%d/hms_smoke%Y%m%d.shp'):
+        '''
+        Label level 2 pixels that intersect with fire smoke polygons given by HMS:
+            https://satepsanone.nesdis.noaa.gov/pub/FIRE/web/HMS/Smoke_Polygons/Shapefile/
+        HMS_dir:
+            root directory of HMS shapefiles
+        fn_date_identifier: 
+            structure of HMS daily files. The default is 'hms_smoke_%Y%m%d'. Can accomodate
+            files structures such as '%Y/%m/hms_smoke_%Y%m%d*.shp'
+        return:
+            a gpd dataframe of smoke polygons that intersect satellite pixels
+        created on 2021/04/28, protyping by Nima Masoudvaziri is greatly acknowledged
+        '''
+        import pandas as pd
+        import geopandas as gpd
+        from shapely.geometry import Polygon, Point
+        # find a list of files paths within date interval
+        shp_list = F_find_files(root_dir=HMS_dir,
+                                start_date=self.start_python_datetime.date(),
+                                end_date=self.end_python_datetime.date(),
+                                fn_date_identifier=fn_date_identifier)
+        smoke_list = []
+        for shp in shp_list:
+            try:
+                smoke_d = gpd.read_file(shp)
+            except:
+                # self.logger.info('{} cannot be read'.format(shp))
+                continue
+            if ('Start' not in smoke_d.keys()) or ('End' not in smoke_d.keys()):
+                # self.logger.info('{} time information is incomplete! skipping'.format(shp))
+                continue
+            # Density is only availabel after 2008/07
+            if 'Density' not in smoke_d.keys():
+                # self.logger.info('No Density available, adding Density of 1 to {}'.format(shp))
+                smoke_d.insert(3,'Density',np.ones(smoke_d.shape[0]))
+            smoke_d['Density'] = smoke_d['Density'].fillna(1)#some density is nan
+            date_str = os.path.splitext(shp)[0][-8:]
+            smoke_d['s_datenum']=[datetime2datenum(datetime.datetime.strptime(date_str+start[-4:],'%Y%m%d%H%M')) for start in smoke_d.loc[:,'Start']]
+            smoke_d['e_datenum']=[datetime2datenum(datetime.datetime.strptime(date_str+end[-4:],'%Y%m%d%H%M')) for end in smoke_d.loc[:,'End']]
+            smoke_list.append(smoke_d)
+        # combine all smoke polygons into a dataframe
+        smoke_df = pd.concat(smoke_list,axis=0)
+        smoke_df.Density = smoke_df.Density.astype(float).astype(int)
+        smoke_density = np.zeros(self.nl2,dtype=np.int16)
+        overlapping_smoke_mask = np.zeros(smoke_df.shape[0],dtype=np.bool)
+        if 'latr' in self.l2g_data.keys():
+            latr = self.l2g_data['latr']
+            lonr = self.l2g_data['lonr']
+            use_polygon = True
+        else:
+            self.logger.info('level 2 pixel corners are unavailable, using pixel centroids only')
+            latc = self.l2g_data['latc']
+            lonc = self.l2g_data['lonc']
+            use_polygon = False
+        # loop over each smoke plume polygon
+        for ifire in range(smoke_df.shape[0]):
+            sat_mask = (self.l2g_data['UTC_matlab_datenum'] >= smoke_df['s_datenum'].iloc[ifire])\
+                & (self.l2g_data['UTC_matlab_datenum'] <= smoke_df['e_datenum'].iloc[ifire])
+            if np.sum(sat_mask) == 0:
+                continue
+            if use_polygon:
+                latr_local = latr[sat_mask,]
+                lonr_local = lonr[sat_mask,]
+                if_overlap = np.array([Polygon(np.vstack((lonr_local[il2,],latr_local[il2,])).T).intersects(smoke_df['geometry'].iloc[ifire])
+                                       for il2 in range(np.sum(sat_mask))])
+            else:
+                latc_local = latc[sat_mask]
+                lonc_local = lonc[sat_mask]
+                if_overlap = np.array([smoke_df['geometry'].iloc[ifire].contains(Point(lonc_local[il2],latc_local[il2]))
+                                       for il2 in range(np.sum(sat_mask))])
+            smoke_density[sat_mask] = np.max(np.vstack((smoke_density[sat_mask],if_overlap*smoke_df['Density'].iloc[ifire].astype(np.int))),axis=0)
+            if np.sum(if_overlap) > 0:
+                overlapping_smoke_mask[ifire] = True
+                self.logger.info('found {} pixels overlapping with a plume starting at {}'.format(np.sum(if_overlap),datedev_py(smoke_df['s_datenum'].iloc[ifire]).strftime('%Y%m%dT%H:%M')))
+        self.l2g_data['smoke_density'] = smoke_density
+        return smoke_df.loc[overlapping_smoke_mask]
     
     def F_derive_model_subcolumn(self,pressure_boundaries=['ps','pbl',600,'tropopause',0],
                                  pbl_multiplier=[2.5],

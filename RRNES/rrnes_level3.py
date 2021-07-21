@@ -16,8 +16,14 @@ import os
 import logging
 import matplotlib.pyplot as plt
 sys.path.append(control['popy directory'])
-from popy import popy, F_collocate_l2g
+from popy import popy, F_collocate_l2g, datedev_py
 if 'if verbose' not in control.keys(): control['if verbose']=False
+if 'smoke density threshold' not in control.keys():
+    control['smoke density threshold'] = np.inf
+if 'days of week' not in control.keys():
+    do_week_filter=False#control['days of week'] = [0,1,2,3,4,5,6]
+else:
+    do_week_filter=True
 if control['if verbose']:
     logging.basicConfig(level=logging.INFO)
 else:
@@ -65,6 +71,11 @@ if 'if exclude fire AI' in control.keys():
     if_ai = control['if exclude fire AI']
 else:
     if_ai = False
+
+if 'wind sector' in control.keys():
+    wind_sector = control['wind sector']
+else:
+    wind_sector = None
 
 if not os.path.exists(control['output directory']):
     os.makedirs(control['output directory'])
@@ -135,10 +146,40 @@ for year in range(start_year,end_year+1):
             logging.warning('Nothing left in this month!')
             continue
         l2g_data = p.l2g_data
+        #kludge for CrIS
+        if control['which sensor'] == 'CrIS':
+            pmask = (l2g_data['column_amount'] > 0) & (l2g_data['column_uncertainty'] > 0)
+            l2g_data = {k:v[pmask,] for (k,v) in l2g_data.items()}
         # keep only rows 5-23 for OMI if excluding row anomaly
         if control['which sensor'] == 'OMI' and control['if exclude row anomaly']:
             mask = np.isin(l2g_data['across_track_position'],np.arange(5,24))
             l2g_data = {k:v[mask,] for (k,v) in l2g_data.items()}
+        # filter days of week
+        if do_week_filter:
+            mask = np.array([datedev_py(dn).weekday() in control['days of week'] for dn in l2g_data['UTC_matlab_datenum']])
+            l2g_data = {k:v[mask,] for (k,v) in l2g_data.items()}
+        # filter wind direction
+        if wind_sector is not None:
+            if wind_sector.lower() == 'n':
+                mask = (np.abs(l2g_data[control['x wind']])<np.abs(l2g_data[control['y wind']])) &\
+                (l2g_data[control['y wind']]<0)
+            elif wind_sector.lower() == 's':
+                mask = (np.abs(l2g_data[control['x wind']])<np.abs(l2g_data[control['y wind']])) &\
+                (l2g_data[control['y wind']]>0)
+            elif wind_sector.lower() == 'w':
+                mask = (np.abs(l2g_data[control['x wind']])>np.abs(l2g_data[control['y wind']])) &\
+                (l2g_data[control['x wind']]>0)
+            elif wind_sector.lower() == 'e':
+                mask = (np.abs(l2g_data[control['x wind']])>np.abs(l2g_data[control['y wind']])) &\
+                (l2g_data[control['x wind']]<0)
+            l2g_data = {k:v[mask,] for (k,v) in l2g_data.items()}
+        # remove smoke contamination
+        if control['smoke density threshold'] != np.inf and 'smoke_density' in l2g_data.keys():
+            nbefore = len(l2g_data['smoke_density'])
+            mask = l2g_data['smoke_density'] <= control['smoke density threshold']
+            nafter = np.sum(mask)
+            l2g_data = {k:v[mask,] for (k,v) in l2g_data.items()}
+            logging.info('pixel number reduced from {} to {} after smoke filtering'.format(nbefore,nafter))
         # additional filter for CO
         if control['which molecule'] == 'CO':
             mask = (l2g_data['scattering_height'] < 2000.) &\

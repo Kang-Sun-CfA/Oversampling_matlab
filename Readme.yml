@@ -1,0 +1,28 @@
+# This is the yml file that creates the conda environment for Physical Oversampling in python
+# First, it is recommended to update your conda with "conda update -n base -c defaults conda"
+# Read through this file, modifiy the prefix, and add/remove dependencies as needed
+# Install the environment by "conda env create -f Readme.yml"
+
+name: popy # Feel free to change the environment name
+channels:
+  - defaults
+dependencies:
+  - pyyaml
+  - netcdf4 # necessary for input/output netcdf data, which is very commonly used
+  - h5py # necessary for reading level 2 data in he5/h5 format
+  - cartopy # necessary for geospatial plotting
+  - opencv # necessary for oversampling instruments with quadrilateral level 2 pixels
+  - matplotlib
+  - scipy
+  - scikit-image # necessary for Level3_Data.block_reduce()
+  # optional for shapefile handling (popy.F_label_HMS() so far). Avoid geopandas if you won't use it.
+  #- geopandas 
+  # optional graphical interface
+  #- spyder
+# Change prefix to your conda env path  
+prefix: C:\Code\anaconda3\envs\popy #my PC
+#prefix: /home/ksun/miniconda3/envs/popy #hydra
+#prefix: /projects/academic/kangsun/anaconda3/envs/popy #CCR
+
+# if need to download ERA5 data, run "conda install -c conda-forge cdsapi" after the env is created
+
