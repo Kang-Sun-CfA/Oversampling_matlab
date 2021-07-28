@@ -17,6 +17,7 @@ Created on Sat Jan 26 15:50:30 2019
 2021/04/11: OMPS-NM to OMPS-NPP; MEaSUREs, IASI, CrIS subsetting
 2021/04/26: l3 wrapper, MethaneSAT, l3 data object
 2021/06/15: S5PSO2, l2_path_pattern, basemap
+2021/07/27: breaking change for F_wrapper_l3. l2_path_pattern prevails
 """
 
 import numpy as np
@@ -24,18 +25,55 @@ import datetime
 import os
 import logging
 
-def F_wrapper_l3(instrum,product,grid_size,l2_dir,
+def F_wrapper_l3(instrum,product,grid_size,
                  start_year=2005,start_month=7,end_year=2005,end_month=7,
                  start_day=1,end_day=None,
                  west=-80,east=-69,south=40,north=46,
                  column_unit='umol/m2',
-                 subset_function=None,l2_path_structure='%Y/%m/%d/',
-                 if_use_presaved_l2g=True,l2g_header='CONUS',
-                 if_plot_l3=True,existing_ax=None,
+                 if_use_presaved_l2g=True,
+                 subset_function=None,
+                 l2_path_pattern=None,
+                 if_plot_l3=False,existing_ax=None,
                  ncores=0,block_length=100,
                  subset_kw={},plot_kw={},
                  start_date_array=None,
                  end_date_array=None):
+    '''
+    instrum:
+        instrument name
+    product:
+        product name, usually the name of molecule (NO2, CH4, NH3, HCHO, etc.)
+    grid_size:
+        grid size in degree
+    start/end_year/month/day:
+        recommend to use start/end_date_array instead
+    west/east/south/north:
+        spatial boundaries
+    column_unit:
+        umol/m2, mol/m2, or molec/cm2. only works when column_amount is there
+    if_use_presaved_l2g:
+        if True, use presaved .mat files, otherwise read/subset raw level 2 files
+    subset_function:
+        function name in popy object to subset level 2 data. should be string like "F_subset_S5PNO2"
+    l2_path_pattern:
+        a format string indicating the path structure of level 2 (or level 2g if if_use_presaved_l2g is True). e.g.,
+        r'C:/data/*O2-CH4_%Y%m%dT*CO2proxy.nc' for level 2 or r'C:/data/CONUS_%Y_%m.mat' for level 2g
+    ncores:
+        0 means serial, None uses half, > max cpu uses max cpu
+    block_length:
+        granularity to divide level 3 mesh. each block is sent to a core in parallel regrid. 100-300 work fine.
+    subset_kw:
+        arguments input to the subset function
+    plot_kw:
+        arguments input to Level3_Data.plot function
+    start/end_date_array:
+        each element should be the start/end datetime.date. e.g., to average all July data in 2005-2021,
+        start_date_array = [datetime.date(y,7,1) for y in range(2005,2022)],
+        end_date_array = [datetime.date(y,7,31) for y in range(2005,2022)],
+    output:
+        if if_plot_l3 is False, return a Level3_Data object. otherwise return a dictionary containing the 
+        Level3_Data object and the figout dictionary
+    '''
     from calendar import monthrange
     if end_day is None:
         end_day = monthrange(end_year,end_month)[-1]
@@ -59,7 +97,12 @@ def F_wrapper_l3(instrum,product,grid_size,l2_dir,
         if not if_use_presaved_l2g:
             if subset_function is None:
                 subset_function = o.default_subset_function
-            getattr(o, subset_function)(path=l2_dir,l2_path_structure=l2_path_structure,**subset_kw)
+            try:
+                getattr(o, subset_function)(l2_path_pattern=l2_path_pattern,**subset_kw)
+            except Exception as e:
+                logging.warning(e)
+                logging.info('subset function is not updated yet to take l2_path_pattern input')
+                getattr(o, subset_function)(**subset_kw)
             if 'column_amount' in o.oversampling_list:
                 if o.default_column_unit == 'molec/cm2' and column_unit == 'mol/m2':
                     o.l2g_data['column_amount'] = o.l2g_data['column_amount']/6.02214e19
@@ -83,7 +126,7 @@ def F_wrapper_l3(instrum,product,grid_size,l2_dir,
                         continue
                     elif year == end_date.year and month > end_date.month:
                         continue
-                    l2g_path = os.path.join(l2_dir,l2g_header+'_{:04d}_{:02d}.mat'.format(year,month))
+                    l2g_path = datetime.date(year,month,1).strftime(l2_path_pattern)
                     if not os.path.exists(l2g_path):
                         logging.warning(l2g_path+' does not exist!')
                         continue
@@ -111,7 +154,10 @@ def F_wrapper_l3(instrum,product,grid_size,l2_dir,
         figout = l3_data.plot(existing_ax=existing_ax,**plot_kw)
     else:
         figout = None
-    return {'l3_data':l3_data,'figout':figout}
+    if if_plot_l3:
+        return {'l3_data':l3_data,'figout':figout}
+    else:
+        return l3_data
 
 def datedev_py(matlab_datenum):
     """
@@ -1213,8 +1259,11 @@ class Level3_Data(dict):
     
     def merge(self,l3_data1):
         if len(self.keys()) == 0:
-            self.logger.info('orignial level 3 is empty. returning the added level 3.')
-            return l3_data1
+            self.logger.info('orignial level 3 is empty. adopting attributes of the added level 3.')
+            self.__dict__.update(l3_data1.__dict__)
+            for (k,v) in l3_data1.items():
+                self.add(k,v)
+            return self
         if len(l3_data1.keys()) == 0:
             self.logger.info('added level 3 is empty. returning the orignial level 3.')
             return self
@@ -1441,7 +1490,7 @@ class Level3_Data(dict):
         from skimage.measure import block_reduce
         reduce_factor = np.int(np.rint(new_grid_size/self.grid_size))
         if reduce_factor == 1:
-            self.warning('no need to reduce')
+            self.logger.warning('no need to reduce')
             return self
         self.logger.info('level 3 grid will be coarsened by a factor of {}'.format(reduce_factor))
         self.logger.info('new grid size is specified as {}, rounded to {}'.format(new_grid_size,self.grid_size*reduce_factor))
@@ -1560,6 +1609,10 @@ class Level3_Data(dict):
         from matplotlib.axes import Axes
         from cartopy.mpl.geoaxes import GeoAxes
         GeoAxes._pcolormesh_patched = Axes.pcolormesh
+        if 'PROJ_LIB' not in os.environ:
+            self.logger.warning('PROJ_LIB cannot be found. Trying to infer it')
+            os.environ['PROJ_LIB'] = os.path.join(os.environ['CONDA_PREFIX'],'Library','share','proj')
+            os.environ['GDAL_DATA'] = os.path.join(os.environ['CONDA_PREFIX'],'Library','share')
         
         xgrid = self['xgrid'];ygrid = self['ygrid']
         
@@ -2406,10 +2459,12 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
-    def F_subset_MEaSUREs(self,path,l2_path_structure='%Y/%m/%d/',
+    def F_subset_MEaSUREs(self,l2_path_pattern=None,path=None,l2_path_structure='%Y/%m/%d/',
                           min_MDQF=0,max_MDQF=1):
         """ 
         function to subset MEaSUREs level 2 data, calling self.F_read_MEaSUREs_nc
+        l2_path_pattern:
+            path of level 2 files recoganizable by glob.glob and datetime.date.strftime
         path:
             l2 data directory
         l2_path_structure:
@@ -2422,22 +2477,31 @@ class popy(object):
         import glob
         instrum = self.instrum
         product = self.product
-        l2_dir = path
-        l2_list = []
-        cwd = os.getcwd()
-        os.chdir(l2_dir)
         start_date = self.start_python_datetime.date()
         end_date = self.end_python_datetime.date()
         days = (end_date-start_date).days+1
         DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
-        for DATE in DATES:
-            if l2_path_structure == None:
-                flist = glob.glob(str(instrum)+'-'+str(product)+'-L2_'+DATE.strftime("%Ym%m%d")+'t*.nc')
-            else:
-                flist = glob.glob(DATE.strftime(l2_path_structure)+\
-                                  str(instrum)+'-'+str(product)+'-L2_'+DATE.strftime("%Ym%m%d")+'t*.nc')
-            l2_list = l2_list+flist
-        os.chdir(cwd)
+        if l2_path_pattern is None:
+            self.logger.info('It is suggested to use l2_path_pattern for level 2 paths structure')
+            l2_dir = path
+            l2_list = []
+            cwd = os.getcwd()
+            os.chdir(l2_dir)
+            for DATE in DATES:
+                if l2_path_structure == None:
+                    flist = glob.glob(str(instrum)+'-'+str(product)+'-L2_'+DATE.strftime("%Ym%m%d")+'t*.nc')
+                else:
+                    flist = glob.glob(DATE.strftime(l2_path_structure)+\
+                                        str(instrum)+'-'+str(product)+'-L2_'+DATE.strftime("%Ym%m%d")+'t*.nc')
+                l2_list = l2_list+flist
+            os.chdir(cwd)
+        else:
+            l2_dir = os.path.split(l2_path_pattern)[0]
+            l2_list = []
+            for DATE in DATES:
+                flist = glob.glob(DATE.strftime(l2_path_pattern))
+                l2_list = l2_list+flist
+        
         self.l2_dir = l2_dir
         self.l2_list = l2_list
         
@@ -3064,22 +3128,30 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
-    def F_subset_MethaneSAT(self,path,data_fields=None,
+    def F_subset_MethaneSAT(self,l2_path_pattern=None,path=None,data_fields=None,
                             data_fields_l2g=None):
         import glob
-        l2_dir = path
-        l2_list = []
-        cwd = os.getcwd()
-        os.chdir(l2_dir)
         start_date = self.start_python_datetime.date()
         end_date = self.end_python_datetime.date()
         days = (end_date-start_date).days+1
         DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
-        for DATE in DATES:
-            flist = glob.glob('*O2-CH4_'+DATE.strftime("%Y%m%d")+'T*.nc')
-            l2_list = l2_list+flist
+        if l2_path_pattern is None:
+            self.logger.info('It is suggested to use l2_path_pattern for level 2 paths structure')
+            l2_dir = path
+            l2_list = []
+            cwd = os.getcwd()
+            os.chdir(l2_dir)
+            for DATE in DATES:
+                flist = glob.glob('*O2-CH4_'+DATE.strftime("%Y%m%d")+'T*.nc')
+                l2_list = l2_list+flist
             
-        os.chdir(cwd)
+            os.chdir(cwd)
+        else:
+            l2_dir = os.path.split(l2_path_pattern)[0]
+            l2_list = []
+            for DATE in DATES:
+                flist = glob.glob(DATE.strftime(l2_path_pattern))
+                l2_list = l2_list+flist
         self.l2_dir = l2_dir
         self.l2_list = l2_list
         
