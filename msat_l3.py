@@ -42,8 +42,10 @@ def main():
     start_time = dateutil.parser.parse(args.start_time)
     end_time = dateutil.parser.parse(args.end_time)
 
+    input_dir = os.path.abspath(args.l2_input_dir)
+
     l3_data = F_wrapper_l3(instrum='MethaneSAT', product='CH4',grid_size=args.grid_size,
-            l2_path_pattern=args.l2_input_dir+'/*O2-CH4_%Y%m%dT*.nc',
+            l2_path_pattern=input_dir+'/*O2-CH4_%Y%m%dT*.nc',
             start_date_array=[start_time], end_date_array=[end_time], if_use_presaved_l2g=False,
             west=args.west, east=args.east, south=args.south, north=args.north, ncores=8, block_length=300)
     l3_data.plot(plot_field='XCH4')
