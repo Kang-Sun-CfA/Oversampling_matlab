@@ -52,3 +52,4 @@ Temporary Items
 # Python
 *.pyc
 /data
+**.egg-info
