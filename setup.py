@@ -23,4 +23,15 @@ setuptools.setup(
     package_dir={"": "."},
     packages=setuptools.find_packages(where="."),
     python_requires=">=3.8",
+    install_requires=[
+        "opencv-python>=4.5.0",
+        "netcdf4>=1.5.0",
+        "matplotlib>=3.4.0",
+        "h5py>=3.4.0",
+        "pyyaml>=5.4.0",
+        "scipy>=1.7.1",
+        "numpy>=1.21.0",
+        # "cartopy==0.18.0",
+        "shapely>=1.7.0"
+    ],
 )

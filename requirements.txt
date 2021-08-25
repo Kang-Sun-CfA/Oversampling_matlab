@@ -1,1 +1,13 @@
--e .
+opencv-python>=4.5.0
+netcdf4>=1.5.0
+matplotlib>=3.4.0
+h5py>=3.4.0
+pyyaml>=5.4.0
+scipy>=1.7.1
+numpy>=1.21.0
+# Need to ensure PROJ_DIR env var is set
+# export PROJ_DIR=/usr/local/Cellar/proj@7/7.2.1/bin
+# Also need to ensure "proj" executable is on your PATH
+# export PATH=$PATH:/usr/local/Cellar/proj@7/7.2.1/bin
+# cartopy==0.18.0 --install-option=build_ext --install-option="-I${PROJ_DIR}/include" --install-option="-L${PROJ_DIR}/lib" 
+shapely>=1.7.0
