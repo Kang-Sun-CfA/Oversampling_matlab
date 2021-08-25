@@ -131,7 +131,7 @@ class Feature2(OrderedDict):
                           p_n_edge=None,p_all_edge=None,
                           h_n_edge=None,h_all_edge=None,
                           if_bootstrap=False,nbootstrap=100,
-                          bootstrap_percentiles=[5,95],
+                          bootstrap_percentiles=[2.5,97.5],
                           if_save_all_profiles=False,
                           pcount_threshold=100,
                           vertical_bounds=[0,3]):
@@ -322,7 +322,7 @@ class Normalized_Profile(OrderedDict):
     
     def plot_normalized_profile(self,molecule,existing_ax=None,
                                 field='p_n_median',if_plot_all_profile=True,
-                                if_plot_CI=True,bootstrap_percentiles=[5,95],
+                                if_plot_CI=True,bootstrap_percentiles=[2.5,97.5],
                                 if_hexbin=False,
                                 Xlim=(-0.1,1.8),Ylim=(-0.1,3.5)):
         ''' 
@@ -370,8 +370,9 @@ class Normalized_Profile(OrderedDict):
                           .format(self['gamma_'+field][molecule+'_mixingratio_n'],\
                                   self['gamma_'+field][molecule+'_mixingratio_n_CI{}'.format(bootstrap_percentiles[0])],\
                                   self['gamma_'+field][molecule+'_mixingratio_n_CI{}'.format(bootstrap_percentiles[1])]))
-            except:
-                self.logger.warning('CI plot did not work')
+            except Exception as e:
+                self.logger.warning('CI plot did not work, the error message is:')
+                self.logger.warning(e)
                 figout['CI'] = None
                 figout['text'] = figout['ax'].text(1,2,r'$\gamma$={:.2f}'.format(self['gamma_'+field][molecule+'_mixingratio_n']))
         else:
@@ -424,12 +425,14 @@ if __name__ == "__main__":
                                                         if_save_all_profiles=True,
                                                         if_bootstrap=True,
                                                         nbootstrap=100,
+                                                        bootstrap_percentiles=[2.5,97.5],
                                                         vertical_bounds=[0,3])
         f_all = f_all.merge(f_c[campaign])
     n_all = f_all.normalize_profile(molecules=['no2','no','nox','ch2o'],
                                     if_save_all_profiles=True,
                                     if_bootstrap=True,
-                                    nbootstrap=20,
+                                    nbootstrap=100,
+                                    bootstrap_percentiles=[2.5,97.5],
                                     vertical_bounds=[0,3])
     #%%
     plt.close('all')
@@ -446,10 +449,10 @@ if __name__ == "__main__":
     figout_list = []
     for (ic,c) in enumerate(campaigns):
         for (im,m) in enumerate(['no2','no','nox','ch2o']):
-            figout = n_c[c].plot_normalized_profile(existing_ax=axs[ic,im],molecule=m,if_hexbin=True)
+            figout = n_c[c].plot_normalized_profile(existing_ax=axs[ic,im],molecule=m,bootstrap_percentiles=[2.5,97.5],if_hexbin=True)
             figout_list.append(figout)
     for (im,m) in enumerate(['no2','no','nox','ch2o']):
-        figout = n_all.plot_normalized_profile(existing_ax=axs[4,im],molecule=m,if_hexbin=True)
+        figout = n_all.plot_normalized_profile(existing_ax=axs[4,im],molecule=m,bootstrap_percentiles=[2.5,97.5],if_hexbin=True)
         figout_list.append(figout)
     for figout in figout_list:
         figout['all_profile'].set_cmap('gray_r')#(tol_colors.tol_cmap('sunset'))
