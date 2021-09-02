@@ -35,7 +35,7 @@ def F_wrapper_l3(instrum,product,grid_size,
                  l2_path_pattern=None,
                  if_plot_l3=False,existing_ax=None,
                  ncores=0,block_length=100,
-                 subset_kw={},plot_kw={},
+                 subset_kw=None,plot_kw=None,
                  start_date_array=None,
                  end_date_array=None):
     '''
@@ -74,6 +74,9 @@ def F_wrapper_l3(instrum,product,grid_size,
         if if_plot_l3 is False, return a Level3_Data object. otherwise return a dictionary containing the 
         Level3_Data object and the figout dictionary
     '''
+    subset_kw = subset_kw or {}
+    plot_kw = plot_kw or {}
+
     from calendar import monthrange
     if end_day is None:
         end_day = monthrange(end_year,end_month)[-1]
@@ -349,7 +352,7 @@ def F_interp_gcrs(sounding_lon,sounding_lat,sounding_datenum,sounding_ps,
 
 def F_interp_merra2_global(sounding_lon,sounding_lat,sounding_datenum,\
                   merra2_dir='/mnt/Data2/MERRA2_2x2.5/',\
-                  interp_fields=['TROPPT'],\
+                  interp_fields=None,\
                   fn_suffix='.A1.2x25'):
     """
     sample a field from geos chem merra2 data
@@ -370,6 +373,8 @@ def F_interp_merra2_global(sounding_lon,sounding_lat,sounding_datenum,\
     """
     import glob
     from scipy.interpolate import RegularGridInterpolator
+    
+    interp_fields = interp_fields or ['TROPPT']
     start_datenum = np.amin(sounding_datenum)
     end_datenum = np.amax(sounding_datenum)
     start_date = datedev_py(start_datenum).date()
@@ -431,7 +436,7 @@ def F_interp_merra2_global(sounding_lon,sounding_lat,sounding_datenum,\
     return sounding_interp     
 def F_interp_merra2(sounding_lon,sounding_lat,sounding_datenum,\
                   merra2_dir='/mnt/Data2/MERRA/',\
-                  interp_fields=['PBLTOP','PS','TROPPT'],\
+                  interp_fields=None,\
                   fn_header='MERRA2_300.tavg1_2d_slv_Nx'):
     """
     sample a field from merra2 data in .nc format. 
@@ -453,6 +458,8 @@ def F_interp_merra2(sounding_lon,sounding_lat,sounding_datenum,\
     """
     import glob
     from scipy.interpolate import RegularGridInterpolator
+    
+    interp_fields = interp_fields or ['PBLTOP','PS','TROPPT']
     start_datenum = np.amin(sounding_datenum)
     end_datenum = np.amax(sounding_datenum)
     start_date = datedev_py(start_datenum).date()
@@ -514,7 +521,7 @@ def F_interp_merra2(sounding_lon,sounding_lat,sounding_datenum,\
 def F_interp_era5_3D(sounding_lon,sounding_lat,sounding_datenum,
                      sounding_p0,sounding_p1,nlevel=10,\
                      era5_dir='/mnt/Data2/ERA5/',\
-                     interp_fields=['v','u'],\
+                     interp_fields=None,\
                      fn_header='CONUS'):
     """
     sample 3D field from era5 data in .nc format. 
@@ -541,6 +548,7 @@ def F_interp_era5_3D(sounding_lon,sounding_lat,sounding_datenum,
     """
     from scipy.interpolate import RegularGridInterpolator
 #    nl2 = len(sounding_datenum)
+    interp_fields = interp_fields or ['v','u']
     p_interp = np.linspace(sounding_p0,sounding_p1,nlevel).T
     lat_interp = np.tile(sounding_lat,(nlevel,1)).T
     lon_interp = np.tile(sounding_lon,(nlevel,1)).T
@@ -605,7 +613,7 @@ def F_interp_era5_3D(sounding_lon,sounding_lat,sounding_datenum,
 
 def F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,\
                   era5_dir='/mnt/Data2/ERA5/',\
-                  interp_fields=['blh','u10','v10','u100','v100','sp'],\
+                  interp_fields=None,\
                   fn_header='CONUS'):
     """
     sample a field from era5 data in .nc format. 
@@ -625,6 +633,8 @@ def F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,\
     created on 2019/09/18
     """
     from scipy.interpolate import RegularGridInterpolator
+
+    interp_fields = interp_fields or ['blh','u10','v10','u100','v100','sp']
     start_datenum = np.amin(sounding_datenum)
     end_datenum = np.amax(sounding_datenum)
     start_date = datedev_py(start_datenum).date()
@@ -683,7 +693,7 @@ def F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,\
     
 def F_interp_geos_mat(sounding_lon,sounding_lat,sounding_datenum,\
                   geos_dir='/mnt/Data2/GEOS/s5p_interp/',\
-                  interp_fields=['TROPPT'],\
+                  interp_fields=None,\
                   time_collection='inst3',\
                   fn_header='subset'):
     """
@@ -706,6 +716,8 @@ def F_interp_geos_mat(sounding_lon,sounding_lat,sounding_datenum,\
     """
     from scipy.io import loadmat
     from scipy.interpolate import RegularGridInterpolator
+    
+    interp_fields = interp_fields or ['TROPPT']
     
     if time_collection == 'inst3' or time_collection == '':
         step_hour = 3
@@ -799,9 +811,7 @@ def F_interp_geos_mat(sounding_lon,sounding_lat,sounding_datenum,\
 
 def F_interp_narr_mat(sounding_lon,sounding_lat,sounding_datenum,\
                   narr_dir='/mnt/Data2/NARR/acmap_narr/',\
-                  interp_fields=['GPH_tropopause','P_tropopause',
-                                 'PBLH','P_surf','T_surf',
-                                 'U_10m','V_10m','U_30m','V_30m'],\
+                  interp_fields=None,
                   fn_header='subset'):
     """
     sample a field from presaved narr data
@@ -821,6 +831,10 @@ def F_interp_narr_mat(sounding_lon,sounding_lat,sounding_datenum,\
     from scipy.io import loadmat
     from scipy.interpolate import RegularGridInterpolator
     from pyproj import Proj
+
+    interp_fields = interp_fields or ['GPH_tropopause','P_tropopause',
+                                 'PBLH','P_surf','T_surf',
+                                 'U_10m','V_10m','U_30m','V_30m']
     #p1 = Proj(proj='latlong',datum='WGS84')
     # really don't know why y_0=-6245.456824468616 has to be here
     p2 = Proj(proj='lcc',R=6367.470, lat_1=50, lat_2=50,lon_0=360-107,lat_0=50)#, ellps='clrk66')#the ellps option doesn't matter
@@ -1217,7 +1231,7 @@ class Level3_Data(dict):
                  start_python_datetime=None,
                  end_python_datetime=None,
                  instrum='unknown',product='unknown',
-                 oversampling_list=[]):
+                 oversampling_list=None):
         self.logger = logging.getLogger(__name__)
         self.logger.info('creating an instance of Level3_Data')
         self.grid_size = grid_size
@@ -1231,7 +1245,7 @@ class Level3_Data(dict):
             self.end_python_datetime = datetime.datetime(2100,1,1)
         self.instrum = instrum
         self.product = product
-        self.oversampling_list = oversampling_list
+        self.oversampling_list = oversampling_list or []
     
     def add(self,key,value):
         self.__setitem__(key,value)
@@ -1343,8 +1357,10 @@ class Level3_Data(dict):
         return self
     
     def read_nc(self,l3_filename,
-                fields_name=[]):
+                fields_name=None):
         from netCDF4 import Dataset
+
+        fields_name = fields_name or []
         if len(fields_name) == 0:
             if len(self.oversampling_list) == 0 and self.product == 'CH4':
                 guess = 'XCH4'
@@ -1379,7 +1395,8 @@ class Level3_Data(dict):
         return self
         
     def save_tif(self,l3_filename,
-                 fields_name=[]):
+                 fields_name=None):
+        fields_name = fields_name or []
         if len(fields_name) == 0:
             if len(self.oversampling_list) == 0 and self.product == 'CH4':
                 guess = 'XCH4'
@@ -1411,12 +1428,14 @@ class Level3_Data(dict):
             dataset.write(self[fields_name[0]], 1)
     
     def save_nc(self,l3_filename,
-                fields_name=[],
+                fields_name=None,
                 fields_rename=None,
                 fields_comment=None,
                 fields_unit=None,
-                ncattr_dict={}):
+                ncattr_dict=None):
         from netCDF4 import Dataset
+
+        fields_name = fields_name or []
         if len(fields_name) == 0:
             if len(self.oversampling_list) == 0 and self.product == 'CH4':
                 guess = 'XCH4'
@@ -2098,7 +2117,7 @@ class popy(object):
                 /(l3_data0['total_sample_weight']
                 +l3_data1['total_sample_weight'])
         return l3_data
-    def F_read_S5P_nc(self,fn,data_fields,data_fields_l2g=[]):
+    def F_read_S5P_nc(self,fn,data_fields,data_fields_l2g=None):
         """ 
         function to read tropomi's level 2 netcdf file to a dictionary
         fn: file name
@@ -2146,7 +2165,7 @@ class popy(object):
             (outp['latc'].shape[0],1)).astype(np.int16)
         return outp
     
-    def F_read_MEaSUREs_nc(self,fn,data_fields,data_fields_l2g=[]):
+    def F_read_MEaSUREs_nc(self,fn,data_fields,data_fields_l2g=None):
         """ 
         function to read MEaSURE's level 2 netcdf file to a dictionary
         fn: file name
@@ -2221,7 +2240,7 @@ class popy(object):
         f.close()
         return outp        
     
-    def F_read_he5(self,fn,swathname,data_fields,geo_fields,data_fields_l2g=[],geo_fields_l2g=[]):
+    def F_read_he5(self,fn,swathname,data_fields,geo_fields,data_fields_l2g=None,geo_fields_l2g=None):
         import h5py
         outp_he5 = {}
         if not data_fields_l2g:
@@ -2683,7 +2702,7 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
-    def F_subset_S5PAI(self,path,data_fields=[],data_fields_l2g=[],
+    def F_subset_S5PAI(self,path,data_fields=None,data_fields_l2g=None,
                        s5p_product='*',whichAI='aerosol_index_340_380'):
         """ 
         function to subset tropomi aerosol level 2 data, calling self.F_read_S5P_nc
@@ -2740,6 +2759,7 @@ class popy(object):
                            '/PRODUCT/time_utc',\
                            '/PRODUCT/'+whichAI,\
                            '/PRODUCT/'+whichAI+'_precision']    
+        if not data_fields_l2g:
             # standardized variable names in l2g file. should map one-on-one to data_fields
             data_fields_l2g = ['latitude_bounds','longitude_bounds','latc','lonc','qa_value','time_utc',\
                                'AI','column_uncertainty']
@@ -2791,8 +2811,8 @@ class popy(object):
     
     def F_subset_S5PSO2(self,
                         l2_path_pattern='S5P*L2__SO2____%Y%m%dT*.nc',
-                        data_fields=[],
-                        data_fields_l2g=[]):
+                        data_fields=None,
+                        data_fields_l2g=None):
         '''
         l2_path_pattern=r'C:\research\S5PSO2\L2\S5P*L2__SO2____%Y%m%dT*.nc'
         '''
@@ -2829,6 +2849,7 @@ class popy(object):
                            '/PRODUCT/delta_time',\
                            '/PRODUCT/sulfurdioxide_total_vertical_column',\
                            '/PRODUCT/sulfurdioxide_total_vertical_column_precision']    
+        if not data_fields_l2g:
             # standardized variable names in l2g file. should map one-on-one to data_fields
             data_fields_l2g = ['cloud_fraction','latitude_bounds','longitude_bounds','SolarZenithAngle',\
                                'vza','albedo','surface_pressure','latc','lonc','qa_value','time','delta_time',\
@@ -2878,9 +2899,9 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
-    def F_subset_S5PNO2(self,path,data_fields=[],data_fields_l2g=[],
+    def F_subset_S5PNO2(self,path,data_fields=None,data_fields_l2g=None,
                         s5p_product='*',
-                        geos_interp_variables=[],geos_time_collection=''):
+                        geos_interp_variables=None,geos_time_collection=''):
         """ 
         function to subset tropomi no2 level 2 data, calling self.F_read_S5P_nc
         path:
@@ -2900,6 +2921,7 @@ class popy(object):
         updated on 2019/04/24
         updated on 2019/06/20 to add s5p_product/geos_interp_variables option
         """      
+        geos_interp_variables = geos_interp_variables or []
         # find out list of l2 files to subset
         if os.path.isfile(path):
             self.F_update_popy_with_control_file(path)
@@ -2945,6 +2967,7 @@ class popy(object):
                            '/PRODUCT/time_utc',\
                            '/PRODUCT/nitrogendioxide_tropospheric_column',\
                            '/PRODUCT/nitrogendioxide_tropospheric_column_precision']    
+        if not data_fields_l2g:
             # standardized variable names in l2g file. should map one-on-one to data_fields
             data_fields_l2g = ['cloud_fraction','latitude_bounds','longitude_bounds','SolarZenithAngle',\
                                'vza','albedo','surface_pressure','latc','lonc','qa_value','time_utc',\
@@ -3005,7 +3028,7 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
             
-    def F_subset_S5PHCHO(self,path,s5p_product='*',geos_interp_variables=[],
+    def F_subset_S5PHCHO(self,path,s5p_product='*',geos_interp_variables=None,
                          geos_time_collection=''):
         """ 
         function to subset tropomi hcho level 2 data, calling self.F_read_S5P_nc
@@ -3022,6 +3045,8 @@ class popy(object):
         updated on 2019/04/30
         updated on 2019/06/20 to add s5p_product/geos_interp_variables option
         """      
+        geos_interp_variables = geos_interp_variables or []
+
         # find out list of l2 files to subset
         if os.path.isfile(path):
             self.F_update_popy_with_control_file(path)
@@ -3224,9 +3249,9 @@ class popy(object):
             self.nl2 = len(l2g_data['latc'])
 
     def F_subset_S5PCH4(self,path,if_trop_xch4=False,s5p_product='*',
-                        merra2_interp_variables=['TROPPT','PS','U50M','V50M'],
+                        merra2_interp_variables=None,
                         merra2_dir='./',
-                        geos_interp_variables=[],geos_time_collection=''):
+                        geos_interp_variables=None,geos_time_collection=''):
         """ 
         function to subset tropomi ch4 level 2 data, calling self.F_read_S5P_nc
         path: directory containing S5PCH4 level 2 files, OR path to control.txt
@@ -3252,6 +3277,8 @@ class popy(object):
         updated on 2019/06/20 to include more interpolation options from geos fp
         """      
         from scipy.interpolate import interp1d
+        merra2_interp_variables = merra2_interp_variables or ['TROPPT','PS','U50M','V50M']
+        geos_interp_variables = geos_interp_variables or []
         # find out list of l2 files to subset
         if os.path.isfile(path):
             self.F_update_popy_with_control_file(path)
@@ -3417,7 +3444,7 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
-    def F_subset_S5PCO(self,path,s5p_product='*',geos_interp_variables=[],
+    def F_subset_S5PCO(self,path,s5p_product='*',geos_interp_variables=None,
                         geos_time_collection=''):
         """ 
         function to subset tropomi co level 2 data, calling self.F_read_S5P_nc
@@ -3432,7 +3459,9 @@ class popy(object):
         geos_time_collection:
             choose from inst3, tavg1, tavg3
         created on 2019/08/12 based on F_subset_S5PNO2
-        """      
+        """    
+        geos_interp_variables = geos_interp_variables or []
+
         # find out list of l2 files to subset
         if os.path.isfile(path):
             self.F_update_popy_with_control_file(path)
@@ -3539,7 +3568,7 @@ class popy(object):
             self.nl2 = len(l2g_data['latc'])
     
     def F_subset_BEHR(self,path,l2_path_structure='OMI_BEHR-DAILY_US_v3-0B_%Y%m/',
-                       data_fields=[],data_fields_l2g=[],
+                       data_fields=None,data_fields_l2g=None,
                        met_dir=None,
                        boundary_polygon=None):
         '''
@@ -3578,6 +3607,7 @@ class popy(object):
                            'BEHRQualityFlags','VcdQualityFlags',\
                            'XTrackQualityFlags','BEHRSurfacePressure','BEHRTropopausePressure',
                            'Latitude','Longitude','Time','SolarZenithAngle','FoV75CornerLatitude','FoV75CornerLongitude']
+        if not data_fields_l2g:
             data_fields_l2g = ['cloud_fraction','cloud_pressure','albedo',\
                                'column_amount','column_uncertainty',
                                'BEHRNO2apriori','BEHRAvgKernels','BEHRPressureLevels',
@@ -3675,7 +3705,7 @@ class popy(object):
             
         
     def F_subset_OMNO2(self,path,l2_path_structure=None,
-                       data_fields=[],data_fields_l2g=[]):
+                       data_fields=None,data_fields_l2g=None):
         """ 
         function to subset omno2, nasa sp level 2 data, calling self.F_read_he5
         path:
@@ -3721,6 +3751,7 @@ class popy(object):
             data_fields = ['CloudFraction','CloudPressure','TerrainReflectivity',\
                            'ColumnAmountNO2Trop','ColumnAmountNO2TropStd','VcdQualityFlags',\
                            'XTrackQualityFlags','TerrainPressure','TropopausePressure']
+        if not data_fields_l2g:
             data_fields_l2g = ['cloud_fraction','cloud_pressure','albedo',\
                                'column_amount','column_uncertainty','VcdQualityFlags',\
                                'XTrackQualityFlags','surface_pressure','tropopause_pressure']
@@ -4871,7 +4902,7 @@ class popy(object):
             
 
         
-    def F_save_l2g_to_mat(self,file_path,data_fields=[],data_fields_l2g=[]):
+    def F_save_l2g_to_mat(self,file_path,data_fields=None,data_fields_l2g=None):
         """ 
         save l2g dictionary to .mat file
         file_path: 
@@ -4886,6 +4917,8 @@ class popy(object):
             return
         
         import scipy.io
+        data_fields = data_fields or []
+        data_fields_l2g = data_fields_l2g or []
         l2g_data = self.l2g_data.copy()
         for i in range(len(data_fields)):
             if data_fields[i] in l2g_data.keys():
@@ -6159,8 +6192,8 @@ class popy(object):
         self.l2g_data['smoke_density'] = smoke_density
         return smoke_df.loc[overlapping_smoke_mask]
     
-    def F_derive_model_subcolumn(self,pressure_boundaries=['ps','pbl',600,'tropopause',0],
-                                 pbl_multiplier=[2.5],
+    def F_derive_model_subcolumn(self,pressure_boundaries=None,
+                                 pbl_multiplier=None,
                                  min_pbltop_pressure=None,
                                  max_pbltop_pressure=None,
                                  min_pbltop_dp=300.,
@@ -6195,6 +6228,9 @@ class popy(object):
         created on 2020/03/14
         """
         from scipy.interpolate import interp1d
+        
+        pbl_multiplier = pbl_multiplier or [2.5]
+        pressure_boundaries = pressure_boundaries or ['ps','pbl',600,'tropopause',0]
         if surface_pressure_field not in self.l2g_data.keys():
             self.logger.warning(surface_pressure_field+' is not in l2g_data!')
             return
