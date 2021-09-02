@@ -1396,7 +1396,7 @@ class Level3_Data(dict):
         
     def save_tif(self,l3_filename,
                  fields_name=None):
-        fields_name = fields_name or None
+        fields_name = fields_name or []
         if len(fields_name) == 0:
             if len(self.oversampling_list) == 0 and self.product == 'CH4':
                 guess = 'XCH4'
