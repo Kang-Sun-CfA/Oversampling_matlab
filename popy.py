@@ -371,10 +371,10 @@ def F_interp_merra2_global(sounding_lon,sounding_lat,sounding_datenum,\
         only A1 2d data are supported
     created on 2021/04/18
     """
-    interp_fields = interp_fields or ['TROPPT']
-
     import glob
     from scipy.interpolate import RegularGridInterpolator
+    
+    interp_fields = interp_fields or ['TROPPT']
     start_datenum = np.amin(sounding_datenum)
     end_datenum = np.amax(sounding_datenum)
     start_date = datedev_py(start_datenum).date()
