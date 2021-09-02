@@ -3,14 +3,17 @@
 This repository is the Data Platform orchestration system, built on top of 
 Flyte.
 
-Setup is simple - just run `python -m pip install -r requirements_dev.txt` from the
-`orchestration` folder.
+Setup is simple - run the following commands
+Note: This assumes you have cloned the [msat-platform](https://github.com/methanesat-org/msat-platform) repository 
+```bash
+pip install --editable modules/sci-level3
+pip install --editable orchestration/
+```
 
 Internally, this installs any necessary packages and then installs the 
-`orchestration` folder in editable mode. See 
+specified folder in editable mode. See 
 [pip install](https://pip.pypa.io/en/stable/cli/pip_install/#editable-installs) 
-for further info. Alternatively, you can achieve the same thing manually by 
-running `pip install --editable .`
+for further info.
 
 From there, you can run each task or workflow file directly through python 
 `python3 workflow/test_all.py`
