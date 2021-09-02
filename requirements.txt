@@ -1,0 +1,10 @@
+opencv-python>=4.5.0
+netcdf4>=1.5.0
+matplotlib>=3.4.0
+h5py>=3.4.0
+pyyaml>=5.4.0
+scipy>=1.7.1
+numpy>=1.21.0
+# See README.md for how to install and configure Proj and GEOS which Cartopy requires
+# cartopy==0.18.0 --install-option=build_ext --install-option="-I${PROJ_DIR}/include" --install-option="-L${PROJ_DIR}/lib" 
+shapely>=1.7.0
