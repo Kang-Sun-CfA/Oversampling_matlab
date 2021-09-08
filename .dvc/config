@@ -3,4 +3,4 @@
 [core]
     remote = origin
 ['remote "origin"']
-    url = gs://msat-static-data-dev/sci-level3/data
+    url = gs://msat-data-version-control-dev/level3/data
