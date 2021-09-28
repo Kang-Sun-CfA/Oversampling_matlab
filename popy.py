@@ -18,6 +18,7 @@ Created on Sat Jan 26 15:50:30 2019
 2021/04/26: l3 wrapper, MethaneSAT, l3 data object
 2021/06/15: S5PSO2, l2_path_pattern, basemap
 2021/07/27: breaking change for F_wrapper_l3. l2_path_pattern prevails
+2021/09/27: add MethaneAIR and projection option
 """
 
 import numpy as np
@@ -1500,7 +1501,7 @@ class Level3_Data(dict):
 
         fields_name = fields_name or []
         if len(fields_name) == 0:
-            if len(self.oversampling_list) == 0 and self.product == 'CH4':
+            if self.product == 'CH4':
                 guess = 'XCH4'
             else:
                 guess = 'column_amount'
@@ -1516,12 +1517,18 @@ class Level3_Data(dict):
             fields_name.append('xgrid')
             fields_rename.append('xgrid')
             fields_comment.append('horizontal grid')
-            fields_unit.append('degree')
+            if self.proj is not None:
+                fields_unit.append('km')
+            else:
+                fields_unit.append('degree')
         if 'ygrid' not in fields_name:
             fields_name.append('ygrid')
             fields_rename.append('ygrid')
             fields_comment.append('vertical grid')
-            fields_unit.append('degree')
+            if self.proj is not None:
+                fields_unit.append('km')
+            else:
+                fields_unit.append('degree')
         if 'num_samples' not in fields_name:
             fields_name.append('num_samples')
             fields_rename.append('num_samples')
@@ -1552,6 +1559,21 @@ class Level3_Data(dict):
         nc.setncatts(ncattr_dict)
         nc.createDimension('nrows',self.nrows)
         nc.createDimension('ncols',self.ncols)
+        if self.proj is not None and 'lonmesh' not in self.keys():
+            self.logger.info('generating lat/lon mesh based on projection')
+            lonmesh,latmesh = self.proj(*np.meshgrid(self['xgrid'],self['ygrid']),inverse=True)
+            self['lonmesh'] = lonmesh
+            self['latmesh'] = latmesh
+            if 'lonmesh' not in fields_name:
+                fields_name.append('lonmesh')
+                fields_rename.append('lonmesh')
+                fields_comment.append('longitude mesh')
+                fields_unit.append('degree')
+            if 'latmesh' not in fields_name:
+                fields_name.append('latmesh')
+                fields_rename.append('latmesh')
+                fields_comment.append('latitude mesh')
+                fields_unit.append('degree')
         for (i,fn) in enumerate(fields_name):
             if fn in ['xgrid']:
                 vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('ncols'))
