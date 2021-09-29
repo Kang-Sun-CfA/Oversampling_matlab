@@ -1324,13 +1324,13 @@ class Level3_Data(dict):
         self.ncols = len(self['xgrid'])
         xgrid_size = np.median(np.diff(self['xgrid']))
         ygrid_size = np.median(np.diff(self['ygrid']))
-        if not isclose(xgrid_size,ygrid_size):
+        if not isclose(xgrid_size,ygrid_size,rel_tol=1e-2):
             self.logger.info('x/y grid size''s inconsistency may need attention, {} vs {}'.format(xgrid_size,ygrid_size))
         if self.grid_size is None:
             self.grid_size = np.mean([xgrid_size,ygrid_size])
             self.logger.debug('xgrid size is {}; ygrid size is {}; grid size is {}'.format(xgrid_size,ygrid_size,self.grid_size))
         else:
-            if not isclose(self.grid_size,np.mean([xgrid_size,ygrid_size])):
+            if not isclose(self.grid_size,np.mean([xgrid_size,ygrid_size]),rel_tol=1e-2):
                 self.logger.info('grid_size''s inconsistency with x/y grid may need attention, {} vs {}'\
                                     .format(self.grid_size,np.mean([xgrid_size,ygrid_size])))
                 self.grid_size = np.mean([xgrid_size,ygrid_size])
@@ -1609,7 +1609,7 @@ class Level3_Data(dict):
         for (k,v) in self.items():
             if k in ['total_sample_weight','pres_total_sample_weight']:
                 new_l3.add(k,block_reduce(self[k][:nrows_trim,:ncols_trim],(reduce_factor,reduce_factor),func=np.nansum))
-            elif k in ['xmesh','ymesh','num_samples','pres_num_samples']:
+            elif k in ['xmesh','ymesh','num_samples','pres_num_samples','lonmesh','latmesh']:
                 new_l3.add(k,block_reduce(self[k][:nrows_trim,:ncols_trim],(reduce_factor,reduce_factor),func=np.nanmean))
             elif k in ['xgrid']:
                 new_l3.add(k,block_reduce(self[k][:ncols_trim],(reduce_factor,),func=np.nanmean))
@@ -1625,7 +1625,8 @@ class Level3_Data(dict):
                                           (reduce_factor,reduce_factor),func=np.nansum)\
                            /new_l3['pres_total_sample_weight'])
             elif self[k].shape == (self.nrows,self.ncols) and \
-                k not in ['xmesh','ymesh','total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
+                k not in ['xmesh','ymesh','lonmesh','latmesh',
+                          'total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
                 self.logger.info('block reducing field {}'.format(k))
                 new_l3.add(k,block_reduce(self[k][:nrows_trim,:ncols_trim]*self['total_sample_weight'][:nrows_trim,:ncols_trim],
                                           (reduce_factor,reduce_factor),func=np.nansum)\
@@ -1633,7 +1634,7 @@ class Level3_Data(dict):
         new_l3.check()
         return new_l3
     
-    def plot_basemap(self,plot_field='column_amount',
+    def plot_basemap(self,plot_field=None,
              existing_ax=None,
              layer_threshold=0.5,draw_colorbar=True,
              func=None,zoom=5,basemap_source=None,**kwargs):
@@ -1653,7 +1654,15 @@ class Level3_Data(dict):
             self.logger.error('pyproj.CRS not available. returning')
             return
         xgrid = self['xgrid'];ygrid = self['ygrid']
-        
+        if self.proj is not None:
+            if 'lonmesh' not in self.keys():
+                lonmesh,latmesh = self.proj(self['xmesh'],self['ymesh'],inverse=True)
+                self.add('lonmesh',lonmesh)
+                self.add('latmesh',latmesh)
+        if self.product == 'CH4':
+            plot_field = plot_field or 'XCH4'
+        else:
+            plot_field = plot_field or 'column_amount'
         if plot_field not in self.keys():
             self.logger.warning(plot_field+' doesn''t exist in l3_data!')
             return {}
@@ -1671,11 +1680,17 @@ class Level3_Data(dict):
             kwargs['vmin'] = np.nanmin(plotdata)
             kwargs['vmax'] = np.nanmax(plotdata)
         if 'xlim' not in kwargs.keys():
-            xlim = (np.min(xgrid),np.max(xgrid))
+            if self.proj is None and 'lonmesh' not in self.keys():
+                xlim = (np.min(xgrid),np.max(xgrid))
+            else:
+                xlim = (np.min(self['lonmesh']),np.max(self['lonmesh']))
         else:
             xlim = kwargs['xlim']
         if 'ylim' not in kwargs.keys():
-            ylim = (np.min(ygrid),np.max(ygrid))
+            if self.proj is None and 'lonmesh' not in self.keys():
+                ylim = (np.min(ygrid),np.max(ygrid))
+            else:
+                ylim = (np.min(self['latmesh']),np.max(self['latmesh']))
         else:
             ylim = kwargs['ylim']
         if existing_ax is None:
@@ -1686,7 +1701,12 @@ class Level3_Data(dict):
             ax = existing_ax
         if 'num_samples' in self.keys():
             plotdata[self['num_samples']<layer_threshold] = np.nan
-        pc = ax.pcolormesh(xgrid,ygrid,plotdata,
+        if self.proj is None and 'lonmesh' not in self.keys():
+            pc = ax.pcolormesh(xgrid,ygrid,plotdata,
+                           alpha=kwargs['alpha'],cmap=kwargs['cmap'],
+                           vmin=kwargs['vmin'],vmax=kwargs['vmax'],shading='gouraud')
+        else:
+            pc = ax.pcolormesh(self['lonmesh'],self['latmesh'],plotdata,
                            alpha=kwargs['alpha'],cmap=kwargs['cmap'],
                            vmin=kwargs['vmin'],vmax=kwargs['vmax'],shading='gouraud')
         ax.set_xlim(xlim);
@@ -1702,7 +1722,7 @@ class Level3_Data(dict):
         fig_output['cb'] = cb
         fig_output['pc'] = pc
         return fig_output
-    def plot(self,plot_field='column_amount',
+    def plot(self,plot_field=None,
              existing_ax=None,draw_admin_level=1,
              layer_threshold=0.5,draw_colorbar=True,
              func=None,**kwargs):
@@ -1717,7 +1737,10 @@ class Level3_Data(dict):
             self.logger.warning('PROJ_LIB cannot be found. Trying to infer it')
             os.environ['PROJ_LIB'] = os.path.join(os.environ['CONDA_PREFIX'],'Library','share','proj')
             os.environ['GDAL_DATA'] = os.path.join(os.environ['CONDA_PREFIX'],'Library','share')
-        
+        if self.product == 'CH4':
+            plot_field = plot_field or 'XCH4'
+        else:
+            plot_field = plot_field or 'column_amount'
         xgrid = self['xgrid'];ygrid = self['ygrid']
         if self.proj is not None:
             if 'lonmesh' not in self.keys():
@@ -1747,10 +1770,11 @@ class Level3_Data(dict):
         else:
             fig = None
             ax = existing_ax
-        if self.proj is None:
+        if self.proj is None and 'lonmesh' not in self.keys():
             ax.set_extent([self['xgrid'].min(), self['xgrid'].max(), self['ygrid'].min(), self['ygrid'].max()], ccrs.Geodetic())
         else:
-            ax.set_extent([np.min(lonmesh),np.max(lonmesh),np.min(latmesh),np.max(latmesh)], ccrs.Geodetic())
+            ax.set_extent([np.min(self['lonmesh']),np.max(self['lonmesh']),
+                           np.min(self['latmesh']),np.max(self['latmesh'])], ccrs.Geodetic())
         ax.add_feature(cfeature.COASTLINE)
         if draw_admin_level == 0:
             ax.add_feature(cfeature.BORDERS, edgecolor='gray')
@@ -1759,11 +1783,11 @@ class Level3_Data(dict):
             ax.add_feature(cfeature.STATES,edgecolor='gray')
         if 'num_samples' in self.keys():
             plotdata[self['num_samples']<layer_threshold] = np.nan
-        if self.proj is None:
+        if self.proj is None and 'lonmesh' not in self.keys():
             pc = ax.pcolormesh(xgrid,ygrid,plotdata,transform=ccrs.PlateCarree(),
                            alpha=kwargs['alpha'],cmap=kwargs['cmap'],vmin=kwargs['vmin'],vmax=kwargs['vmax'],shading='auto')
         else:
-            pc = ax.pcolormesh(lonmesh,latmesh,plotdata,transform=ccrs.PlateCarree(),
+            pc = ax.pcolormesh(self['lonmesh'],self['latmesh'],plotdata,transform=ccrs.PlateCarree(),
                            alpha=kwargs['alpha'],cmap=kwargs['cmap'],vmin=kwargs['vmin'],vmax=kwargs['vmax'],shading='auto')    
         if draw_colorbar:
             cb = plt.colorbar(pc,ax=ax,label=plot_field,shrink=kwargs['shrink'])
