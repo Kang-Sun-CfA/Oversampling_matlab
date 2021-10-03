@@ -1346,6 +1346,11 @@ class Level3_Data(dict):
             self.logger.info('added level 3 is empty. returning the orignial level 3.')
             return self
         common_keys = set(self).intersection(set(l3_data1))
+        initial_only_keys = ['xgrid','ygrid','nrows','nrow','ncols','ncol','xmesh','ymesh','lonmesh','latmesh']
+        for k in initial_only_keys:
+            if k in self.keys() and k not in l3_data1.keys():
+                self.logger.info(k+' is only found in and adopted from the left object')
+                common_keys.append(k)
         merged_grid_size = np.mean([self.grid_size,l3_data1.grid_size])
         self.logger.info('orginal grid size is {}, added grid size is {}, merged grid size is {}'\
                          .format(self.grid_size,l3_data1.grid_size,merged_grid_size))
@@ -1384,7 +1389,7 @@ class Level3_Data(dict):
             v1[np.isnan(v1)] = 0.
             if key in ['total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
                 l3_data[key] = v0+v1
-            elif key in ['xgrid','ygrid','nrows','nrow','ncols','ncol','xmesh','ymesh','lonmesh','latmesh']:
+            elif key in initial_only_keys:
                 l3_data[key] = v0
             elif key == 'cloud_pressure':
                 l3_data[key] = (v0*self['pres_total_sample_weight']
