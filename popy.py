@@ -3302,29 +3302,30 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
-    def F_subset_MethaneAIR(self,l2_path_pattern=None,path=None,data_fields=None,
+    def F_subset_MethaneAIR(self,l2_path_pattern,data_fields=None,
                             data_fields_l2g=None):
         import glob
         start_date = self.start_python_datetime.date()
         end_date = self.end_python_datetime.date()
+        # for methanair, we go down to minutes instead of dates
+        start_dt = self.start_python_datetime
+        end_dt = self.end_python_datetime
+        minutes = int(np.ceil((end_dt - start_dt).seconds/60)+1)
+        MINUTES = [start_dt+datetime.timedelta(seconds=m*60) for m in range(minutes)]
         days = (end_date-start_date).days+1
         DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
-        if l2_path_pattern is None:
-            self.logger.info('It is suggested to use l2_path_pattern for level 2 paths structure')
-            l2_dir = path
-            l2_list = []
-            cwd = os.getcwd()
-            os.chdir(l2_dir)
-            for DATE in DATES:
-                flist = glob.glob('MethaneAIR*CH4_'+DATE.strftime("%Y%m%d")+'T*.nc')
-                l2_list = l2_list+flist
-            
-            os.chdir(cwd)
-        else:
+        if '%Y%m%dT%M' not in l2_path_pattern:
+            self.logger.warning('It is suggested to be accurate to minutes for MethaneAIR')
             l2_dir = os.path.split(l2_path_pattern)[0]
             l2_list = []
             for DATE in DATES:
                 flist = glob.glob(DATE.strftime(l2_path_pattern))
+                l2_list = l2_list+flist
+        else:
+            l2_dir = os.path.split(l2_path_pattern)[0]
+            l2_list = []
+            for MINUTE in MINUTES:
+                flist = glob.glob(MINUTE.strftime(l2_path_pattern))
                 l2_list = l2_list+flist
         self.l2_dir = l2_dir
         self.l2_list = l2_list
