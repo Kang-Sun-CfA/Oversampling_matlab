@@ -3314,7 +3314,7 @@ class popy(object):
         MINUTES = [start_dt+datetime.timedelta(seconds=m*60) for m in range(minutes)]
         days = (end_date-start_date).days+1
         DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
-        if '%Y%m%dT%M' not in l2_path_pattern:
+        if '%Y%m%dT%H%M' not in l2_path_pattern:
             self.logger.warning('It is suggested to be accurate to minutes for MethaneAIR')
             l2_dir = os.path.split(l2_path_pattern)[0]
             l2_list = []
