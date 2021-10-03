@@ -1366,12 +1366,17 @@ class Level3_Data(dict):
                                  l3_data1.end_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
                                  merged_end_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')))
         merged_oversampling_list = list(set(self.oversampling_list).union(set(l3_data1.oversampling_list)))
+        if self.proj != l3_data1.proj:
+            self.logger.warning('the two Level3_Data objects are inconsistent in projection!')
+        merged_proj = self.proj or l3_data1.proj
+        
         l3_data = Level3_Data(grid_size=merged_grid_size,
                              start_python_datetime=merged_start_datetime,
                              end_python_datetime=merged_end_datetime,
                              instrum=self.instrum,
                              product=self.product,
-                             oversampling_list=merged_oversampling_list)
+                             oversampling_list=merged_oversampling_list,
+                             proj=merged_proj)
         for key in common_keys:
             v0 = self[key]
             v1 = l3_data1[key]
@@ -1379,7 +1384,7 @@ class Level3_Data(dict):
             v1[np.isnan(v1)] = 0.
             if key in ['total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
                 l3_data[key] = v0+v1
-            elif key in ['xgrid','ygrid','nrows','nrow','ncols','ncol','xmesh','ymesh']:
+            elif key in ['xgrid','ygrid','nrows','nrow','ncols','ncol','xmesh','ymesh','lonmesh','latmesh']:
                 l3_data[key] = v0
             elif key == 'cloud_pressure':
                 l3_data[key] = (v0*self['pres_total_sample_weight']
