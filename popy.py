@@ -1507,8 +1507,8 @@ class Level3_Data(dict):
                 fields_comment=None,
                 fields_unit=None,
                 ncattr_dict=None):
+        self.check()
         from netCDF4 import Dataset
-
         fields_name = fields_name or []
         if len(fields_name) == 0:
             if self.product == 'CH4':
