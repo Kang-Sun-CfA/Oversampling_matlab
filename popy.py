@@ -1334,6 +1334,12 @@ class Level3_Data(dict):
                 self.logger.info('grid_size''s inconsistency with x/y grid may need attention, {} vs {}'\
                                     .format(self.grid_size,np.mean([xgrid_size,ygrid_size])))
                 self.grid_size = np.mean([xgrid_size,ygrid_size])
+        if self.proj is not None and 'lonmesh' not in self.keys():
+            self.logger.info('there is a projection but no lat/lon grid')
+            self.logger.info('generating lat/lon mesh based on projection')
+            lonmesh,latmesh = self.proj(*np.meshgrid(self['xgrid'],self['ygrid']),inverse=True)
+            self['lonmesh'] = lonmesh
+            self['latmesh'] = latmesh
     
     def merge(self,l3_data1):
         if len(self.keys()) == 0:
