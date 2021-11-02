@@ -183,6 +183,72 @@ def F_wrapper_l3(instrum,product,grid_size,
     else:
         return l3_data
 
+def F_download_gesdisc_l2(txt_fn,
+                          start_dt,end_dt,
+                          re_pattern=r'\d{8}T\d{6}',
+                          orbit_start_dt_idx=0,orbit_end_dt_idx=None,
+                          dt_pattern='%Y%m%dT%H%M%S',
+                          l2_dir=None,tmp_txt_dir=None,
+                          download_str=None,
+                          if_delete_tmp_txt=True):
+    '''
+    txt_fn:
+        path to the txt file from nasa ges disc
+    start/end_t:
+        datetime for start/end of download
+    re_pattern:
+        pattern recognizable by re in python, usually r'\d{8}T\d{6}' <=> '%Y%m%dT%H%M%S'
+    orbit_start/end_dt_idx:
+        index of orbit start/end datetime from lines in the txt file
+    dt_pattern:
+        how to extract datetime from the sub string
+    l2_dir:
+        where to save level 2 files
+    tmp_txt_dir:
+        directory to write a temporary txt file
+    download_str:
+        usually wrapping wget
+    2021/10/17
+    '''
+    import datetime as dt
+    import re
+    if l2_dir is None:
+        logging.warning('use cwd as l2_dir')
+        l2_dir = os.getcwd()
+    if not os.path.exists(l2_dir):
+        os.makedirs(l2_dir)
+    if tmp_txt_dir is None:
+        logging.warning('use cwd to save temporary txt file')
+        tmp_txt_dir = os.getcwd()
+    tmp_txt_fn = os.path.join(tmp_txt_dir,'tmp.txt')
+    if download_str is None:
+        download_str = 'cd {}; wget -N -q --load-cookies ~/.urs_cookies\
+        --save-cookies ~/.urs_cookies --auth-no-challenge=on --keep-session-cookies\
+            --content-disposition -i {}'.format(l2_dir,tmp_txt_fn)
+    count = 0
+    with open(txt_fn,'r') as f, open(tmp_txt_fn,'w') as t:
+        while True:
+            l = f.readline()
+            if not l:
+                break
+            try:
+                tmp = re.findall(re_pattern,l)
+                orbit_start_dt = dt.datetime.strptime(tmp[orbit_start_dt_idx],dt_pattern)
+                if orbit_end_dt_idx is not None:
+                    orbit_end_dt = dt.datetime.strptime(tmp[orbit_end_dt_idx],dt_pattern)
+                else:
+                    orbit_end_dt = orbit_start_dt
+                if orbit_start_dt >= start_dt and orbit_end_dt <= end_dt:
+                    t.write(l)
+                    count += 1
+            except Exception as e:
+                logging.warning(e)
+    logging.info('{} files saved to tmp txt file and to be downloaded'.format(count))
+    os.system(download_str)
+    if if_delete_tmp_txt:
+        os.remove(tmp_txt_fn)    
+    return download_str
+
 def datedev_py(matlab_datenum):
     """
     convert matlab datenum double to python datetime object
