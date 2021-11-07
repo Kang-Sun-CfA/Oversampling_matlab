@@ -27,8 +27,8 @@ import os, sys
 import logging
 
 def F_wrapper_l3(instrum,product,grid_size,
-                 start_year=2005,start_month=7,end_year=2005,end_month=7,
-                 start_day=1,end_day=None,
+                 start_year=None,start_month=None,end_year=None,end_month=None,
+                 start_day=None,end_day=None,
                  west=None,east=None,south=None,north=None,
                  column_unit='umol/m2',
                  if_use_presaved_l2g=True,
@@ -82,10 +82,17 @@ def F_wrapper_l3(instrum,product,grid_size,
     plot_kw = plot_kw or {}
 
     from calendar import monthrange
-    if end_day is None:
-        end_day = monthrange(end_year,end_month)[-1]
+    if start_year is None:
+        if start_date_array is None:
+            logging.error('start/end_date_array have to be provided')
+            return
+    else:
+        logging.warning('please use start/end_date_array instead of setting year/month/day')
+        if end_day is None:
+            end_day = monthrange(end_year,end_month)[-1]
     if start_date_array is not None:
-        logging.info('Array of date provided, superseding start/end_year/month/day')
+        if start_year is not None:
+            logging.info('Array of date provided, superseding start/end_year/month/day')
         if end_date_array is None:
             logging.info('end dates not provided, assuming end of months')
             end_date_array = np.array([datetime.date(d.year,d.month,monthrange(d.year,d.month)[-1]) for d in start_date_array])
@@ -1305,10 +1312,10 @@ def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
             if(pcld_idx > 0 and cloud_fraction[il2] > 0.0):
                 pres_sum_aboves[ijmsh] += tmp_wt[:,:]*grid_flds[il2,pcld_idx]
         if il2 == count*np.round(nl2/10.):
-            if verbose:print('block %d'%iblock+' %d%% finished' %(count*10))
+            logging.debug('block %d'%iblock+' %d%% finished\n' %(count*10))
             count = count + 1
         
-    if verbose:print('block %d'%iblock+' completed at '+datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'))
+    logging.info('block %d'%iblock+' completed at '+datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'))
     l3_data = {}
     np.seterr(divide='ignore', invalid='ignore')
     for ikey in range(len(oversampling_list)):
@@ -1488,7 +1495,14 @@ class Level3_Data(dict):
         d.pop('__globals__')
         d.pop('__header__')
         d.pop('__version__')
-        
+        if 'proj_srs' in d.keys():
+            try:
+                from pyproj import Proj
+                self.proj = Proj(d['proj_srs'])
+                self.logger.info('the level 3 data appear to be in projection {}'.format(d['proj_srs']))
+            except Exception as e:
+                self.logger.warning(e)
+            d.pop('proj_srs')
         self.assimilate(d)
         if boundary_polygon is not None:
             self.logger.info('boundary polygon provided, masking out-of-boundary grid cells...')
@@ -1528,6 +1542,12 @@ class Level3_Data(dict):
         self.product = nc.getncattr('product')
         self.start_python_datetime = datetime.datetime.strptime(nc.getncattr('time_coverage_start'),'%Y-%m-%dT%H:%M:%SZ')
         self.end_python_datetime = datetime.datetime.strptime(nc.getncattr('time_coverage_end'),'%Y-%m-%dT%H:%M:%SZ')
+        try:
+            from pyproj import Proj
+            self.proj = Proj(nc.getncattr('proj_srs'))
+            self.logger.info('the level 3 data appear to be in projection {}'.format(nc.getncattr('proj_srs')))
+        except:
+            self.logger.info('no projection found')
         self.logger.info('Loading level 3 data for instrument {}, product {}, and grid size {:02f}'\
                          .format(self.instrum,self.product,self.grid_size))
         for (i,varname) in enumerate(fields_name):
@@ -1572,13 +1592,51 @@ class Level3_Data(dict):
                 dtype=np.float32,
                 ) as dataset:
             dataset.write(self[fields_name[0]], 1)
+    def save_mat(self,l3_filename,
+                fields_name=None,
+                min_num_samples=0.):
+        self.check()
+        from scipy.io import savemat
+        fields_name = fields_name or []
+        if len(fields_name) == 0:
+            if self.product == 'CH4':
+                guess = 'XCH4'
+            else:
+                guess = 'column_amount'
+            self.logger.info('no fields_name provided, adding '+guess)
+            fields_name.append(guess)
+        if 'xgrid' not in fields_name:
+            fields_name.append('xgrid')
+        if 'ygrid' not in fields_name:
+            fields_name.append('ygrid')
+        if 'num_samples' not in fields_name:
+            fields_name.append('num_samples')
+        if 'total_sample_weight' not in fields_name:
+            fields_name.append('total_sample_weight')
+        nan_mask = self['num_samples']<min_num_samples
+        save_dict = {}
+        for fn in fields_name:
+            if fn in ['column_amount','XCH4']:
+                tmp = self[fn].copy()
+                tmp[nan_mask] = np.nan
+                save_dict[fn] = np.asfortranarray(tmp)
+            elif self[fn].shape == self['num_samples'].shape:
+                save_dict[fn] = np.asfortranarray(self[fn])
+            else:
+                save_dict[fn] = self[fn]
+        save_dict['nrows'] = self.nrows
+        save_dict['ncols'] = self.ncols
+        if self.proj is not None:
+            save_dict['proj_srs'] = self.proj.srs
+        savemat(l3_filename,save_dict)
     
     def save_nc(self,l3_filename,
                 fields_name=None,
                 fields_rename=None,
                 fields_comment=None,
                 fields_unit=None,
-                ncattr_dict=None):
+                ncattr_dict=None,
+                proj_unit='km'):
         self.check()
         from netCDF4 import Dataset
         fields_name = fields_name or []
@@ -1600,7 +1658,7 @@ class Level3_Data(dict):
             fields_rename.append('xgrid')
             fields_comment.append('horizontal grid')
             if self.proj is not None:
-                fields_unit.append('km')
+                fields_unit.append(proj_unit)
             else:
                 fields_unit.append('degree')
         if 'ygrid' not in fields_name:
@@ -1608,7 +1666,7 @@ class Level3_Data(dict):
             fields_rename.append('ygrid')
             fields_comment.append('vertical grid')
             if self.proj is not None:
-                fields_unit.append('km')
+                fields_unit.append(proj_unit)
             else:
                 fields_unit.append('degree')
         if 'num_samples' not in fields_name:
@@ -1626,6 +1684,8 @@ class Level3_Data(dict):
             ncattr_dict = {'description':'Level 3 data created using physical oversampling (https://doi.org/10.5194/amt-11-6679-2018)',
                            'institution':'University at Buffalo',
                            'contact':'Kang Sun, kangsun@buffalo.edu'}
+            if self.proj is not None:
+                ncattr_dict['proj_srs'] = self.proj.srs
         if 'history' not in ncattr_dict.keys():
             ncattr_dict['history'] = 'Created '+datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ')
         if 'time_coverage_start' not in ncattr_dict.keys():
@@ -1684,7 +1744,8 @@ class Level3_Data(dict):
                              start_python_datetime=self.start_python_datetime,
                              end_python_datetime=self.end_python_datetime,
                              instrum=self.instrum,
-                             product=self.product)
+                             product=self.product,
+                             proj=self.proj)
         # otherwise block_reduce will pad zeros, ruining the end elements
         ncols_trim = self.ncols-self.ncols%reduce_factor
         nrows_trim = self.nrows-self.nrows%reduce_factor
@@ -2170,8 +2231,8 @@ class popy(object):
             [xmeshr,ymeshr] = np.meshgrid(xgridr,ygridr)
             '''
         else:
-            self.logger.info('use projection')
-            # self.logger.info(proj.definition_string())
+            self.logger.info('use projection:')
+            self.logger.info(proj.srs)
             x0,_ = proj(west,np.mean([north,south]))
             x1,_ = proj(east,np.mean([north,south]))
             
@@ -3130,11 +3191,15 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
-    def F_subset_S5PNO2(self,path,data_fields=None,data_fields_l2g=None,
+    def F_subset_S5PNO2(self,l2_path_pattern='S5P*L2__NO2____%Y%m%dT*.nc',
+                        path=None,data_fields=None,data_fields_l2g=None,
                         s5p_product='*',
                         geos_interp_variables=None,geos_time_collection=''):
         """ 
         function to subset tropomi no2 level 2 data, calling self.F_read_S5P_nc
+        l2_path_pattern:
+            a format string indicating the path structure of level 2 data. e.g.,
+            r'C:/data/*O2-CH4_%Y%m%dT*CO2proxy.nc' 
         path:
             l2 data directory, or path to control file
         s5p_product:
@@ -3154,11 +3219,8 @@ class popy(object):
         """      
         geos_interp_variables = geos_interp_variables or []
         # find out list of l2 files to subset
-        if os.path.isfile(path):
-            self.F_update_popy_with_control_file(path)
-            l2_list = self.l2_list
-            l2_dir = self.l2_dir
-        else:
+        if path is not None:
+            self.logger.warning('please use l2_path_pattern instead')
             import glob
             l2_dir = path
             l2_list = []
@@ -3173,6 +3235,17 @@ class popy(object):
                 l2_list = l2_list+flist
             os.chdir(cwd)
             self.l2_dir = l2_dir
+            self.l2_list = l2_list
+        else:
+            import glob
+            l2_list = []
+            start_date = self.start_python_datetime.date()
+            end_date = self.end_python_datetime.date()
+            days = (end_date-start_date).days+1
+            DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+            for DATE in DATES:
+                flist = glob.glob(DATE.strftime(l2_path_pattern))
+                l2_list = l2_list+flist
             self.l2_list = l2_list
         
         maxsza = self.maxsza
@@ -3204,17 +3277,14 @@ class popy(object):
                                'vza','albedo','surface_pressure','latc','lonc','qa_value','time_utc',\
                                'column_amount','column_uncertainty']
         self.logger.info('Read, subset, and store level 2 data to l2g_data')
-        self.logger.info('Level 2 data are located at '+l2_dir)
         l2g_data = {}
         for fn in l2_list:
-            fn_dir = os.path.join(l2_dir,fn)
-            self.logger.info('Loading '+fn)
+            self.logger.info('Loading '+os.path.split(fn)[-1])
             try:
-                outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
+                outp_nc = self.F_read_S5P_nc(fn,data_fields,data_fields_l2g)
             except Exception as e:
                 self.logger.warning(fn+' gives error:');
-                print(e)
-                input("Press Enter to continue...")
+                self.logger.warning(e)
                 continue
             if geos_interp_variables != []:
                 sounding_interp = F_interp_geos_mat(outp_nc['lonc'],outp_nc['latc'],outp_nc['UTC_matlab_datenum'],\
