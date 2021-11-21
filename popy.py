@@ -1548,14 +1548,37 @@ class Level3_Data(dict):
             self.logger.info('the level 3 data appear to be in projection {}'.format(nc.getncattr('proj_srs')))
         except:
             self.logger.info('no projection found')
+            self.proj = None
         self.logger.info('Loading level 3 data for instrument {}, product {}, and grid size {:02f}'\
                          .format(self.instrum,self.product,self.grid_size))
         for (i,varname) in enumerate(fields_name):
+            # the variable names are inconsistent with Level3_Data in CF-compatible nc files
+            nc_varname = varname
+            if self.proj is None:
+                if varname == 'xgrid':
+                    if 'longitude' in nc.variables.keys():
+                        nc_varname = 'longitude'
+                if varname == 'ygrid':
+                    if 'latitude' in nc.variables.keys():
+                        nc_varname = 'latitude'
+            else:
+                if varname == 'xgrid':
+                    if 'projection_x_coordinate' in nc.variables.keys():
+                        nc_varname = 'projection_x_coordinate'
+                if varname == 'ygrid':
+                    if 'projection_y_coordinate' in nc.variables.keys():
+                        nc_varname = 'projection_y_coordinate'
+                if varname == 'lonmesh':
+                    if 'longitude' in nc.variables.keys():
+                        nc_varname = 'longitude'
+                if varname == 'latmesh':
+                    if 'latitude' in nc.variables.keys():
+                        nc_varname = 'latitude'
             try:
-                self[varname] = nc[varname][:].filled(np.nan)
+                self[varname] = nc[nc_varname][:].filled(np.nan)
             except:
-                self.logger.debug('{} cannot be filled by nan or is not a masked array'.format(varname))
-                self[varname] = np.array(nc[varname][:])
+                self.logger.debug('{} cannot be filled by nan or is not a masked array'.format(nc_varname))
+                self[varname] = np.array(nc[nc_varname][:])
         self.check()
         nc.close()
         return self
@@ -1687,20 +1710,20 @@ class Level3_Data(dict):
             if self.proj is not None:
                 ncattr_dict['proj_srs'] = self.proj.srs
         if 'history' not in ncattr_dict.keys():
-            ncattr_dict['history'] = 'Created '+datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ')
+            ncattr_dict['history'] = 'Created '+datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')#local time
         if 'time_coverage_start' not in ncattr_dict.keys():
             ncattr_dict['time_coverage_start'] = self.start_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
         if 'time_coverage_end' not in ncattr_dict.keys():
             ncattr_dict['time_coverage_end'] = self.end_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
         if 'grid_size' not in ncattr_dict.keys():
-            ncattr_dict['grid_size'] = '{}'.format(self.grid_size)
+            ncattr_dict['grid_size'] = float(self.grid_size)
         if 'instrument' not in ncattr_dict.keys():
             ncattr_dict['instrument'] = '{}'.format(self.instrum)
         if 'product' not in ncattr_dict.keys():
             ncattr_dict['product'] = '{}'.format(self.product)
         nc.setncatts(ncattr_dict)
-        nc.createDimension('nrows',self.nrows)
-        nc.createDimension('ncols',self.ncols)
+        nc.createDimension('ygrid',self.nrows)
+        nc.createDimension('xgrid',self.ncols)
         if self.proj is not None and 'lonmesh' not in self.keys():
             self.logger.info('generating lat/lon mesh based on projection')
             lonmesh,latmesh = self.proj(*np.meshgrid(self['xgrid'],self['ygrid']),inverse=True)
@@ -1710,19 +1733,34 @@ class Level3_Data(dict):
                 fields_name.append('lonmesh')
                 fields_rename.append('lonmesh')
                 fields_comment.append('longitude mesh')
-                fields_unit.append('degree')
+                fields_unit.append('degree_east')
             if 'latmesh' not in fields_name:
                 fields_name.append('latmesh')
                 fields_rename.append('latmesh')
                 fields_comment.append('latitude mesh')
-                fields_unit.append('degree')
+                fields_unit.append('degree_north')
         for (i,fn) in enumerate(fields_name):
             if fn in ['xgrid']:
-                vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('ncols'))
+                vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('xgrid'))
             elif fn in ['ygrid']:
-                vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('nrows'))
+                vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('ygrid'))
             else:
-                vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('nrows','ncols'))
+                vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('ygrid','xgrid'))
+            # use standard_name to inform lat/lon vs x/y
+            if self.proj is not None:
+                if fn == 'xgrid':
+                    vid.standard_name = 'projection_x_coordinate'
+                if fn == 'ygrid':
+                    vid.standard_name = 'projection_y_coordinate'
+                if fn == 'lonmesh':
+                    vid.standard_name = 'longitude'
+                if fn == 'latmesh':
+                    vid.standard_name = 'latitude'
+            else:
+                if fn == 'xgrid':
+                    vid.standard_name = 'longitude'
+                if fn == 'ygrid':
+                    vid.standard_name = 'latitude'
             vid.comment = fields_comment[i]
             vid.units = fields_unit[i]
             vid[:] = np.ma.masked_invalid(np.float32(self[fn]))
