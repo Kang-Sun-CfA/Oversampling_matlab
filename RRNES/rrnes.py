@@ -148,6 +148,60 @@ class RRNES(object):
                 T = pd.read_csv(inventoryPathList[i],index_col=0) # mol/s
                 self.inventories[molecule] = np.array([T.loc[d.year].iloc[d.month-1] for d in dateArray])
     
+    def F_load_jpl(self,jpl_path,jpl_type='tot'):
+        '''
+        recover lost function that did not commit, 2021/10/02
+        jpl files: https://tes.jpl.nasa.gov/tes/chemical-reanalysis/products/monthly-mean
+        '''
+        from netCDF4 import Dataset
+        from shapely.geometry import Polygon
+        import glob
+        jpl_flist = glob.glob(os.path.join(jpl_path,'mon_emi_nox_'+jpl_type+'_20*.nc'))
+        jpl_dates = []
+        for (i,fn) in enumerate(jpl_flist):
+            jpl_year = int(fn[-7:-3])
+            nc = Dataset(fn)
+            jpl_dates = jpl_dates+[dt.date(jpl_year,int(m+1),15) for m in nc['time'][:]]
+            if i == 0:
+                jpl_lon = nc['lon'][:]
+                jpl_lon[jpl_lon>=180] = jpl_lon[jpl_lon>=180]-360#jpl lon is 0-360
+                jpl_lat = nc['lat'][:]
+                lon_int = (jpl_lon>self.minlon2) & (jpl_lon<self.maxlon2)
+                lat_int = (jpl_lat>self.minlat2) & (jpl_lat<self.maxlat2)
+                jpl_lon = jpl_lon[lon_int]
+                jpl_lat = jpl_lat[lat_int]
+                jpl_nox = np.array([nox_map[np.ix_(lat_int,lon_int)] for nox_map in nc['nox'][:]])
+            else:
+                jpl_nox = np.concatenate((jpl_nox,
+                                         np.array([nox_map[np.ix_(lat_int,lon_int)] for nox_map in nc['nox'][:]])),
+                                         axis=0)
+        jpl_dates = np.array(jpl_dates)
+        time_mask = np.array([(d>=np.min(self.dateArray)) &(d<=np.max(self.dateArray)) for d in jpl_dates])
+        jpl_dates = jpl_dates[time_mask]
+        jpl_nox = jpl_nox[time_mask,]/0.014#kgN/m2/s to mol/m2/s            
+        w = np.zeros((len(jpl_lat),len(jpl_lon)))
+        lon_grid_size = np.median(np.abs(np.diff(jpl_lon)))
+        lat_grid_size = np.median(np.abs(np.diff(jpl_lat)))
+        ppolygon = Polygon(np.vstack((self.b1x,self.b1y)).T)
+        verts = []
+        for ilat in range(len(jpl_lat)):
+            for ilon in range(len(jpl_lon)):
+                gx = [jpl_lon[ilon]-lon_grid_size/2,jpl_lon[ilon]-lon_grid_size/2,jpl_lon[ilon]+lon_grid_size/2,jpl_lon[ilon]+lon_grid_size/2]
+                gy = [jpl_lat[ilat]-lat_grid_size/2,jpl_lat[ilat]+lat_grid_size/2,jpl_lat[ilat]+lat_grid_size/2,jpl_lat[ilat]-lat_grid_size/2]
+                verts.append(np.array([gx,gy]).T)
+                gpolygon = Polygon(np.vstack((gx,gy)).T)
+                w[ilat,ilon] = ppolygon.intersection(gpolygon).area/(lon_grid_size*lat_grid_size)
+        jpl_emissionRate = np.zeros(len(jpl_dates))
+        for i in range(len(jpl_dates)):
+            jpl_emissionRate[i]=np.nansum(jpl_nox[i,...]*w)/np.sum(w)*np.power(self.L,2)#mol m-2 s-1 to mol s-1
+        nc.close()
+        jpl = {}
+        jpl['dates'] = jpl_dates
+        jpl['lon'] = jpl_lon
+        jpl['lat'] = jpl_lat
+        jpl['map'] = jpl_nox
+        jpl['emission_rate'] = jpl_emissionRate
+        return jpl
     def F_load_carb(self,carb_path,season='summer',exclude_natural=True):
         '''
         load carb emission from https://www.arb.ca.gov/app/emsinv/fcemssumcat/fcemssumcat2016.php
