@@ -52,7 +52,7 @@ def F_wrapper_l3(instrum,product,grid_size,
     west/east/south/north:
         spatial boundaries
     column_unit:
-        umol/m2, mol/m2, or molec/cm2. only works when column_amount is there
+        umol/m2, mol/m2, or molec/cm2 when column_amount is there; ppb or ppm when XCH4 or XCO2 are there
     if_use_presaved_l2g:
         if True, use presaved .mat files, otherwise read/subset raw level 2 files
     subset_function:
@@ -128,6 +128,15 @@ def F_wrapper_l3(instrum,product,grid_size,
                 logging.warning(e)
                 logging.info('subset function is not updated yet to take l2_path_pattern input')
                 getattr(o, subset_function)(**subset_kw)
+            # xch4 or xco2 products
+            x_set = set(o.oversampling_list).intersection({'xch4','XCH4','XCO2','xco2'})
+            if len(x_set)>0:
+                if o.default_column_unit == 'mol/mol' and column_unit in ['ppb','ppbv','nmol/mol']:
+                    for x_something in x_set:
+                        o.l2g_data[x_something] = o.l2g_data[x_something]*1e9
+                if o.default_column_unit == 'mol/mol' and column_unit in ['ppm','ppmv','umol/mol']:
+                    for x_something in x_set:
+                        o.l2g_data[x_something] = o.l2g_data[x_something]*1e6
             if 'column_amount' in o.oversampling_list:
                 if o.default_column_unit == 'molec/cm2' and column_unit == 'mol/m2':
                     o.l2g_data['column_amount'] = o.l2g_data['column_amount']/6.02214e19
@@ -1187,10 +1196,8 @@ def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
         lonc_index = [np.argmin(np.abs(xgrid-lonc[i])) for i in range(nl2)]
         latc_index = [np.argmin(np.abs(ygrid-latc[i])) for i in range(nl2)]
         # Get East/West indices
-        tmp = np.array([F_lon_distance(lonr[:,0].squeeze(),lonc),F_lon_distance(lonr[:,1].squeeze(),lonc)]).T
-        west_extent = np.round( np.max(tmp,axis=1)/grid_size*xmargin )
-        tmp = np.array([F_lon_distance(lonc,lonr[:,2].squeeze()),F_lon_distance(lonc,lonr[:,3].squeeze())]).T
-        east_extent = np.round( np.max(tmp,axis=1)/grid_size*xmargin )
+        east_extent = np.ceil( (lonr.max(axis=1)-lonr.min(axis=1))/2/grid_size*xmargin)
+        west_extent = east_extent
         # Get lists of indices
         lon_index = [bound_arr(lonc_index[i]-west_extent[i],lonc_index[i]+east_extent[i]+1,max_ncol,ncols)  for i in range(nl2)]
         # The western most longitude
@@ -2136,8 +2143,9 @@ class popy(object):
                 oversampling_list = ['AI']
                 self.default_subset_function = 'F_subset_S5PAI'
             elif product in ['CH4']:
-                oversampling_list = ['xch4']
-                self.default_subset_function = 'F_subset_S5PAI'
+                oversampling_list = ['XCH4']
+                self.default_subset_function = 'F_subset_S5PCH4'
+                self.default_column_unit = 'mol/mol'
             elif product in ['NO2']:
                 self.default_subset_function = 'F_subset_S5PNO2'
                 oversampling_list = ['column_amount','albedo',\
@@ -3764,7 +3772,7 @@ class popy(object):
         # standardized variable names in l2g file. should map one-on-one to data_fields
         data_fields_l2g = ['latitude_bounds','longitude_bounds','SolarZenithAngle',\
                            'vza','latc','lonc','qa_value','time','delta_time',\
-                           'column_amount_no_bias_correction','column_amount','column_uncertainty']
+                           'XCH4_no_bias_correction','XCH4','column_uncertainty']
         if if_trop_xch4:
              # absolute path of useful variables in the nc file
              data_fields = ['/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds',\
@@ -3789,7 +3797,7 @@ class popy(object):
              data_fields_l2g = ['latitude_bounds','longitude_bounds','SolarZenithAngle',\
                                 'vza','dry_air_subcolumns','surface_pressure','pressure_interval',
                                 'methane_profile_apriori','latc','lonc','qa_value','time','delta_time',\
-                                'column_amount_no_bias_correction','column_amount','column_uncertainty',\
+                                'XCH4_no_bias_correction','XCH4','column_uncertainty',\
                                 'albedo','surface_altitude']
         self.logger.info('Read, subset, and store level 2 data to l2g_data')
         self.logger.info('Level 2 data are located at '+l2_dir)
@@ -6011,12 +6019,8 @@ class popy(object):
             lonc_index = [np.argmin(np.abs(xgrid-lonc[i])) for i in range(nl2)]
             latc_index = [np.argmin(np.abs(ygrid-latc[i])) for i in range(nl2)]
             # Get East/West indices
-            tmp = np.array([F_lon_distance(lonr[:,0].squeeze(),lonc),F_lon_distance(lonr[:,1].squeeze(),lonc)]).T
-            west_extent = np.round( np.max(tmp,axis=1)/grid_size*xmargin )
-            self.west_dist_extent = tmp.copy()
-            tmp = np.array([F_lon_distance(lonc,lonr[:,2].squeeze()),F_lon_distance(lonc,lonr[:,3].squeeze())]).T
-            self.east_dist_extent = tmp.copy()
-            east_extent = np.round( np.max(tmp,axis=1)/grid_size*xmargin )
+            east_extent = np.ceil( (lonr.max(axis=1)-lonr.min(axis=1))/2/grid_size*xmargin)
+            west_extent = east_extent
             # Get lists of indices
             lon_index = [bound_arr(lonc_index[i]-west_extent[i],lonc_index[i]+east_extent[i]+1,max_ncol,ncols)  for i in range(nl2)]
             self.lon_index = lon_index
