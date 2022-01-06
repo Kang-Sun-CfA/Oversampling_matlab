@@ -1421,6 +1421,34 @@ class Level3_Data(dict):
             self['lonmesh'] = lonmesh
             self['latmesh'] = latmesh
     
+    def remesh(self,xgrid,ygrid):
+        from scipy.interpolate import RegularGridInterpolator
+        grid_sizex = np.median(np.diff(xgrid))
+        grid_sizey = np.median(np.diff(ygrid))
+        if not np.isclose(grid_sizex,grid_sizey,rtol=1e-3):
+            self.logger.warning('x grid size {} and y grid size {} are inconsistent!'.format(grid_sizex,grid_sizey))
+        new_grid_size = np.mean([grid_sizex,grid_sizey])
+        
+        self.logger.info('input grid_size is {}'.format(self.grid_size))
+        self.logger.info('remeshing to grid_size of {}'.format(new_grid_size))
+        if new_grid_size >= 2*self.grid_size:
+            l3_data = self.block_reduce(new_grid_size)
+        else:
+            l3_data = self
+        xmesh,ymesh = np.meshgrid(xgrid,ygrid)
+        l3_new = Level3_Data(instrum=l3_data.instrum,product=l3_data.product,
+                             start_python_datetime=l3_data.start_python_datetime,
+                             end_python_datetime=l3_data.end_python_datetime,
+                             proj=l3_data.proj,oversampling_list=l3_data.oversampling_list)
+        l3_new.assimilate({'xgrid':xgrid,'ygrid':ygrid,'xmesh':xmesh,'ymesh':ymesh})
+        for key in l3_data.keys():
+            if key in ['xgrid','ygrid','nrows','nrow','ncols','ncol','xmesh','ymesh','lonmesh','latmesh']:
+                continue
+            f = RegularGridInterpolator((l3_data['ygrid'],l3_data['xgrid']),l3_data[key],bounds_error=False,fill_value=np.nan)
+            l3_new.add(key,f((ymesh,xmesh)))
+        l3_new.check()
+        return l3_new
+    
     def merge(self,l3_data1):
         if len(self.keys()) == 0:
             self.logger.info('orignial level 3 is empty. adopting attributes of the added level 3.')
@@ -3500,6 +3528,49 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
+    def F_subset_combined_MethaneAIR(self,path,alongtrack_mask=None,acrosstrack_mask=None,
+                                     oversampling_list=None):
+        '''
+        subset function for combined MethaneAIR L2 for a single research flight
+        '''
+        from netCDF4 import Dataset
+        start_tau = (self.start_python_datetime-datetime.datetime(1985,1,1)).total_seconds()/3600
+        end_tau = (self.end_python_datetime-datetime.datetime(1985,1,1)).total_seconds()/3600
+        if oversampling_list is None:
+            oversampling_list = ['alb0','xch4','xch4_0','xco2_0','h2o_vcd','rms','ch4_dofs',\
+            'co2_dofs','xch4_bias_corr','isrfsqz_w1','isrfsqz_w2',\
+            'xch4_bias_corr_tv','xch4_bias_corr_anom','plm_mask']
+        self.oversampling_list = oversampling_list
+        nc = Dataset(path,'r')
+        acrosstrack_mask = None
+        if alongtrack_mask is None:
+            alongtrack_mask = np.ones(nc.dimensions['t'].size,dtype=bool)
+        if acrosstrack_mask is None:
+            acrosstrack_mask = np.ones(nc.dimensions['x'].size,dtype=bool)
+        lonc = nc['lon'][acrosstrack_mask,alongtrack_mask]
+        latc = nc['lat'][acrosstrack_mask,alongtrack_mask]
+        tau = nc['tau'][acrosstrack_mask,alongtrack_mask]
+        validmask = (lonc >= self.west) & (lonc <= self.east) \
+        & (latc >= self.south) & (latc <= self.north) & (tau >= start_tau) & (tau <= end_tau)
+        self.logger.info('there are {} l2 pixels'.format(np.sum(validmask)))
+        if np.sum(validmask) == 0:
+            self.l2g_data = {}
+            self.nl2 = 0
+            return
+        l2g_data = {}
+        l2g_data['lonc'] = lonc[validmask].ravel()
+        l2g_data['latc'] = latc[validmask].ravel()
+        l2g_data['UTC_matlab_datenum'] = tau[validmask].ravel()/24+725008.
+        l2g_data['lonr'] = np.column_stack([nc['clon_{}'.format(ic)][acrosstrack_mask,alongtrack_mask][validmask].ravel() 
+                                            for ic in range(1,5)])
+        l2g_data['latr'] = np.column_stack([nc['clat_{}'.format(ic)][acrosstrack_mask,alongtrack_mask][validmask].ravel() 
+                                            for ic in range(1,5)])
+        for field in oversampling_list:
+            l2g_data[field] = nc[field][acrosstrack_mask,alongtrack_mask][validmask].ravel() 
+        l2g_data['column_uncertainty'] = np.ones_like(l2g_data['latc'])
+        self.l2g_data = l2g_data
+        self.nl2 = len(l2g_data['latc'])
+        
     def F_subset_MethaneAIR(self,l2_path_pattern,data_fields=None,
                             data_fields_l2g=None):
         import glob
