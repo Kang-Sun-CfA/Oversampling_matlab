@@ -3403,7 +3403,9 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
             
-    def F_subset_S5PHCHO(self,path,s5p_product='*',geos_interp_variables=None,
+    def F_subset_S5PHCHO(self,l2_path_pattern='S5P*L2__HCHO___%Y%m%dT*.nc',
+                         path=None,data_fields=None,data_fields_l2g=None,
+                         s5p_product='*',geos_interp_variables=None,
                          geos_time_collection=''):
         """ 
         function to subset tropomi hcho level 2 data, calling self.F_read_S5P_nc
@@ -3419,15 +3421,12 @@ class popy(object):
             choose from inst3, tavg1, tavg3
         updated on 2019/04/30
         updated on 2019/06/20 to add s5p_product/geos_interp_variables option
+        updated on 2020/01/15 to simplify to l2_path_pattern
         """      
         geos_interp_variables = geos_interp_variables or []
-
         # find out list of l2 files to subset
-        if os.path.isfile(path):
-            self.F_update_popy_with_control_file(path)
-            l2_list = self.l2_list
-            l2_dir = self.l2_dir
-        else:
+        if path is not None:
+            self.logger.warning('please use l2_path_pattern instead')
             import glob
             l2_dir = path
             l2_list = []
@@ -3443,7 +3442,18 @@ class popy(object):
             os.chdir(cwd)
             self.l2_dir = l2_dir
             self.l2_list = l2_list
-        
+        else:
+            import glob
+            l2_list = []
+            start_date = self.start_python_datetime.date()
+            end_date = self.end_python_datetime.date()
+            days = (end_date-start_date).days+1
+            DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+            for DATE in DATES:
+                flist = glob.glob(DATE.strftime(l2_path_pattern))
+                l2_list = l2_list+flist
+            self.l2_list = l2_list
+                
         maxsza = self.maxsza
         maxcf = self.maxcf
         west = self.west
@@ -3454,36 +3464,34 @@ class popy(object):
         
         # absolute path of useful variables in the nc file
         # not sure about cloud fraction
-        # the time_utc string is empty?! why are you doing this to the user!
-        data_fields = ['/PRODUCT/SUPPORT_DATA/INPUT_DATA/cloud_fraction_crb',\
-               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds',\
-               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds',\
-               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/solar_zenith_angle',\
-               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/viewing_zenith_angle',\
-               '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_albedo',\
-               '/PRODUCT/latitude',\
-               '/PRODUCT/longitude',\
-               '/PRODUCT/qa_value',\
-               '/PRODUCT/time',\
-               '/PRODUCT/delta_time',\
-               '/PRODUCT/formaldehyde_tropospheric_vertical_column',\
-               '/PRODUCT/formaldehyde_tropospheric_vertical_column_precision']    
-        # standardized variable names in l2g file. should map one-on-one to data_fields
-        data_fields_l2g = ['cloud_fraction','latitude_bounds','longitude_bounds','SolarZenithAngle',\
-                           'vza','albedo','latc','lonc','qa_value','time','delta_time',\
-                           'column_amount','column_uncertainty']
+        if not data_fields:
+            data_fields = ['/PRODUCT/SUPPORT_DATA/INPUT_DATA/cloud_fraction_crb',\
+                   '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds',\
+                   '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds',\
+                   '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/solar_zenith_angle',\
+                   '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/viewing_zenith_angle',\
+                   '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_albedo',\
+                   '/PRODUCT/latitude',\
+                   '/PRODUCT/longitude',\
+                   '/PRODUCT/qa_value',\
+                   '/PRODUCT/time',\
+                   '/PRODUCT/delta_time',\
+                   '/PRODUCT/formaldehyde_tropospheric_vertical_column',\
+                   '/PRODUCT/formaldehyde_tropospheric_vertical_column_precision']    
+        if not data_fields_l2g:
+            # standardized variable names in l2g file. should map one-on-one to data_fields
+            data_fields_l2g = ['cloud_fraction','latitude_bounds','longitude_bounds','SolarZenithAngle',\
+                               'vza','albedo','latc','lonc','qa_value','time','delta_time',\
+                               'column_amount','column_uncertainty']
         self.logger.info('Read, subset, and store level 2 data to l2g_data')
-        self.logger.info('Level 2 data are located at '+l2_dir)
         l2g_data = {}
         for fn in l2_list:
-            fn_dir = os.path.join(l2_dir,fn)
-            self.logger.info('Loading '+fn)
+            self.logger.info('Loading '+os.path.split(fn)[-1])
             try:
-                outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
+                outp_nc = self.F_read_S5P_nc(fn,data_fields,data_fields_l2g)
             except Exception as e:
                 self.logger.warning(fn+' gives error:');
-                print(e)
-                input("Press Enter to continue...")
+                self.logger.warning(e)
                 continue
             if geos_interp_variables != []:
                 sounding_interp = F_interp_geos_mat(outp_nc['lonc'],outp_nc['latc'],outp_nc['UTC_matlab_datenum'],\
