@@ -1031,7 +1031,6 @@ def F_ncread_selective(fn,varnames,varnames_short=None):
         varnames_short = varnames
     for (i,varname) in enumerate(varnames):
         if 'APosterioriState' in varname or 'APrioriState' in varname:
-            print(f'reading {varname}')
             varname, sv_varname = varname.split('__')
             nc_slice = get_sv_slice(ncid,sv_varname)
         else:
