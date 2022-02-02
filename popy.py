@@ -3660,8 +3660,17 @@ class popy(object):
             tmp_time = outp['time'].squeeze(axis=2)
             tmp_time[tmp_time>1e36] = np.nan
             tmp_time = np.nanmean(tmp_time,axis=1)
-            outp['UTC_matlab_datenum'] = np.tile(np.array([datetime2datenum(datetime.datetime(1985,1,1)+datetime.timedelta(hours=h))
-                                                   for h in tmp_time]),(outp['latc'].shape[1],1)).T
+            # need to deal with nans in tmp_time that throw an error in datetime.timedelta(hours=h)
+            tmp_time_na = []
+            for h in tmp_time:
+                try:
+                    tmp_time_na += [datetime2datenum(datetime.datetime(1985,1,1)+datetime.timedelta(hours=h))]
+                except ValueError:
+                    tmp_time_na += [np.nan]
+            tmp_time_na = np.array(tmp_time_na)
+            outp['UTC_matlab_datenum'] = np.tile(tmp_time_na,(outp['latc'].shape[1],1)).T
+            #outp['UTC_matlab_datenum'] = np.tile(np.array([datetime2datenum(datetime.datetime(1985,1,1)+datetime.timedelta(hours=h))
+            #                                       for h in tmp_time]),(outp['latc'].shape[1],1)).T
             outp['latc'] = outp['latc'].squeeze(axis=2)
             outp['lonc'] = outp['lonc'].squeeze(axis=2)
             f4 = outp['latc'] >= south
@@ -3672,7 +3681,11 @@ class popy(object):
             f7 = tmplon <= east-west
             f8 = outp['UTC_matlab_datenum'] >= self.start_matlab_datenum
             f9 = outp['UTC_matlab_datenum'] <= self.end_matlab_datenum
-            validmask = f4 & f5 & f6 & f7 & f8 & f9
+            f10 = np.ones(outp['UTC_matlab_datenum'].shape,dtype=bool) # filter out rows that have only nans
+            for irow,row in enumerate(outp['UTC_matlab_datenum']):
+                if np.isnan(row).all():
+                    f10[irow][:] = False
+            validmask = f4 & f5 & f6 & f7 & f8 & f9 & f10
             self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
             l2g_data0 = {}
             if np.sum(validmask) == 0:
