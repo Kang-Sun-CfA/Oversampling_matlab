@@ -1003,6 +1003,22 @@ def F_interp_narr_mat(sounding_lon,sounding_lat,sounding_datenum,\
         sounding_interp[fn] = my_interpolating_function((sounding_x,sounding_y,sounding_datenum))
     return sounding_interp
 
+def get_sv_slice(nc_dset,var):
+    """
+    Array that slices the MethaneAIR/SAT state vector for the given variable
+    dset: netCDF4.Dataset object
+    var: variable name (e.g.: 'SurfacePressure')
+    """
+    sv_dict = nc_dset["SpecFitDiagnostics"]["APosterioriState"].__dict__
+
+    for key, val in sv_dict.items():
+        if key.startswith("SubStateName") and val.strip() == var:
+            num = int(key.split("_")[-1]) - 1
+            slice = np.arange(sv_dict["SubState_Idx0"][num] - 1, sv_dict["SubState_Idxf"][num])
+            break
+
+    return slice 
+
 def F_ncread_selective(fn,varnames,varnames_short=None):
     """
     very basic netcdf reader, similar to F_ncread_selective.m
@@ -1014,11 +1030,17 @@ def F_ncread_selective(fn,varnames,varnames_short=None):
     if varnames_short is None:
         varnames_short = varnames
     for (i,varname) in enumerate(varnames):
+        if 'APosterioriState' in varname or 'APrioriState' in varname:
+            print(f'reading {varname}')
+            varname, sv_varname = varname.split('__')
+            nc_slice = get_sv_slice(ncid,sv_varname)
+        else:
+            nc_slice = tuple() # x[tuple()] is equivalent to x[:]
         try:
-            outp[varnames_short[i]] = ncid[varname][:].filled(np.nan)
+            outp[varnames_short[i]] = ncid[varname][nc_slice].filled(np.nan)
         except:
             logging.debug('{} cannot be filled by nan or is not a masked array'.format(varname))
-            outp[varnames_short[i]] = ncid[varname][:]
+            outp[varnames_short[i]] = ncid[varname][nc_slice]
     ncid.close()
     return outp
 
