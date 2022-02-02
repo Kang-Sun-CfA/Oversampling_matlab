@@ -3703,6 +3703,8 @@ class popy(object):
             for key in outp.keys():
                 if key not in {'latitude_bounds','longitude_bounds','time'}:
                     l2g_data0[key] = outp[key][validmask].squeeze()
+                    if np.sum(validmask) == 1:
+                        l2g_data0[key] = l2g_data0[key].reshape(1,)
             l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
         
         self.l2g_data = l2g_data
