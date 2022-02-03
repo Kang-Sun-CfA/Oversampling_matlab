@@ -172,6 +172,17 @@ def F_wrapper_l3(instrum,product,grid_size,
                     if instrum == 'CrIS':
                         mask = (o.l2g_data['column_amount'] > 0) & (o.l2g_data['column_uncertainty'] > 0)
                         o.l2g_data = {k:v[mask,] for (k,v) in o.l2g_data.items()}
+                    
+                    # xch4 or xco2 products
+                    x_set = set(o.oversampling_list).intersection({'xch4','XCH4','XCO2','xco2'})
+                    if len(x_set)>0:
+                        if o.default_column_unit == 'mol/mol' and column_unit in ['ppb','ppbv','nmol/mol']:
+                            for x_something in x_set:
+                                o.l2g_data[x_something] = o.l2g_data[x_something]*1e9
+                        if o.default_column_unit == 'mol/mol' and column_unit in ['ppm','ppmv','umol/mol']:
+                            for x_something in x_set:
+                                o.l2g_data[x_something] = o.l2g_data[x_something]*1e6
+                    
                     if 'column_amount' in o.oversampling_list:
                         if o.default_column_unit == 'molec/cm2' and column_unit == 'mol/m2':
                             o.l2g_data['column_amount'] = o.l2g_data['column_amount']/6.02214e19
@@ -2171,7 +2182,7 @@ class popy(object):
                 oversampling_list = ['AI']
                 self.default_subset_function = 'F_subset_S5PAI'
             elif product in ['CH4']:
-                oversampling_list = ['XCH4']
+                oversampling_list = ['XCH4','xch4']
                 self.default_subset_function = 'F_subset_S5PCH4'
                 self.default_column_unit = 'mol/mol'
             elif product in ['NO2']:
