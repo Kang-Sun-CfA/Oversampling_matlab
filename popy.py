@@ -19,12 +19,14 @@ Created on Sat Jan 26 15:50:30 2019
 2021/06/15: S5PSO2, l2_path_pattern, basemap
 2021/07/27: breaking change for F_wrapper_l3. l2_path_pattern prevails
 2021/09/27: add MethaneAIR and projection option
+2022/05/22: start adding l2_list (list of l2 paths) besides l2_path_pattern
 """
 
 import numpy as np
 import datetime
 import os, sys
 import logging
+import inspect
 
 def F_wrapper_l3(instrum,product,grid_size,
                  start_year=None,start_month=None,end_year=None,end_month=None,
@@ -33,6 +35,7 @@ def F_wrapper_l3(instrum,product,grid_size,
                  column_unit='umol/m2',
                  if_use_presaved_l2g=True,
                  subset_function=None,
+                 l2_list=None,
                  l2_path_pattern=None,
                  if_plot_l3=False,existing_ax=None,
                  ncores=0,block_length=200,
@@ -57,6 +60,8 @@ def F_wrapper_l3(instrum,product,grid_size,
         if True, use presaved .mat files, otherwise read/subset raw level 2 files
     subset_function:
         function name in popy object to subset level 2 data. should be string like "F_subset_S5PNO2"
+    l2_list:
+        a list of level 2 file paths. If provided, l2_path_pattern will be ignored.
     l2_path_pattern:
         a format string indicating the path structure of level 2 (or level 2g if if_use_presaved_l2g is True). e.g.,
         r'C:/data/*O2-CH4_%Y%m%dT*CO2proxy.nc' for level 2 or r'C:/data/CONUS_%Y_%m.mat' for level 2g
@@ -69,7 +74,7 @@ def F_wrapper_l3(instrum,product,grid_size,
     plot_kw:
         arguments input to Level3_Data.plot function
     start/end_date_array:
-        each element should be the start/end datetime.date. e.g., to average all July data in 2005-2021,
+        each element should be the start/end datetime.date(). e.g., to average all July data in 2005-2021,
         start_date_array = [datetime.date(y,7,1) for y in range(2005,2022)],
         end_date_array = [datetime.date(y,7,31) for y in range(2005,2022)],
     proj:
@@ -80,7 +85,11 @@ def F_wrapper_l3(instrum,product,grid_size,
     '''
     subset_kw = subset_kw or {}
     plot_kw = plot_kw or {}
-
+    
+    if l2_list is not None and l2_path_pattern is not None:
+        logging.info('both l2_list and l2_path_pattern are provided. l2_path_pattern will be overwritten')
+        l2_path_pattern = None
+    
     from calendar import monthrange
     if start_year is None:
         if start_date_array is None:
@@ -106,6 +115,7 @@ def F_wrapper_l3(instrum,product,grid_size,
         start_dt_array = np.array([datetime.datetime(d.year,d.month,d.day) for d in start_date_array])
         end_dt_array = np.array([datetime.datetime(d.year,d.month,d.day) for d in end_date_array])
     l3_data = Level3_Data(proj=proj)
+    
     for idate in range(len(start_date_array)):
         start_date = start_date_array[idate]
         end_date = end_date_array[idate]
@@ -122,12 +132,20 @@ def F_wrapper_l3(instrum,product,grid_size,
         if not if_use_presaved_l2g:
             if subset_function is None:
                 subset_function = o.default_subset_function
-            try:
-                getattr(o, subset_function)(l2_path_pattern=l2_path_pattern,**subset_kw)
-            except Exception as e:
-                logging.warning(e)
-                logging.info('subset function is not updated yet to take l2_path_pattern input')
-                getattr(o, subset_function)(**subset_kw)
+            
+            subset_arg_list = inspect.getfullargspec(getattr(o,subset_function)).args
+            
+            if 'l2_path_pattern' in subset_arg_list and \
+                'l2_path_pattern' not in subset_kw.keys() and \
+                l2_path_pattern is not None:
+                subset_kw['l2_path_pattern'] = l2_path_pattern
+            
+            if 'l2_list' in subset_arg_list and \
+                'l2_list' not in subset_kw.keys() and \
+                l2_list is not None:
+                subset_kw['l2_list'] = l2_list
+            
+            getattr(o, subset_function)(**subset_kw)
             # xch4 or xco2 products
             x_set = set(o.oversampling_list).intersection({'xch4','XCH4','XCO2','xco2'})
             if len(x_set)>0:
@@ -3276,12 +3294,14 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
-    def F_subset_S5PNO2(self,l2_path_pattern='S5P*L2__NO2____%Y%m%dT*.nc',
+    def F_subset_S5PNO2(self,l2_list=None,l2_path_pattern=None,
                         path=None,data_fields=None,data_fields_l2g=None,
                         s5p_product='*',
                         geos_interp_variables=None,geos_time_collection=''):
         """ 
         function to subset tropomi no2 level 2 data, calling self.F_read_S5P_nc
+        l2_list:
+            a list of level 2 file paths. If provided, l2_path_pattern will be ignored.
         l2_path_pattern:
             a format string indicating the path structure of level 2 data. e.g.,
             r'C:/data/*O2-CH4_%Y%m%dT*CO2proxy.nc' 
@@ -3305,7 +3325,7 @@ class popy(object):
         geos_interp_variables = geos_interp_variables or []
         # find out list of l2 files to subset
         if path is not None:
-            self.logger.warning('please use l2_path_pattern instead')
+            self.logger.warning('please use l2_list or l2_path_pattern instead')
             import glob
             l2_dir = path
             l2_list = []
@@ -3322,17 +3342,24 @@ class popy(object):
             self.l2_dir = l2_dir
             self.l2_list = l2_list
         else:
-            import glob
-            l2_list = []
-            start_date = self.start_python_datetime.date()
-            end_date = self.end_python_datetime.date()
-            days = (end_date-start_date).days+1
-            DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
-            for DATE in DATES:
-                flist = glob.glob(DATE.strftime(l2_path_pattern))
-                l2_list = l2_list+flist
+            if l2_list is None and l2_path_pattern is None:
+                self.logger.error('either l2_list or l2_path_pattern has to be provided!')
+                return
+            if l2_list is not None and l2_path_pattern is not None:
+                self.logger.info('both l2_list and l2_path_pattern are provided. l2_path_pattern will be overwritten')
+                l2_path_pattern = None
+            
+            if l2_list is None:
+                import glob
+                l2_list = []
+                start_date = self.start_python_datetime.date()
+                end_date = self.end_python_datetime.date()
+                days = (end_date-start_date).days+1
+                DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+                for DATE in DATES:
+                    flist = glob.glob(DATE.strftime(l2_path_pattern))
+                    l2_list = l2_list+flist                 
             self.l2_list = l2_list
-        
         maxsza = self.maxsza
         maxcf = self.maxcf
         west = self.west
@@ -3590,31 +3617,45 @@ class popy(object):
         self.l2g_data = l2g_data
         self.nl2 = len(l2g_data['latc'])
         
-    def F_subset_MethaneAIR(self,l2_path_pattern,data_fields=None,
+    def F_subset_MethaneAIR(self,l2_list=None,l2_path_pattern=None,data_fields=None,
                             data_fields_l2g=None):
-        import glob
-        start_date = self.start_python_datetime.date()
-        end_date = self.end_python_datetime.date()
-        # for methanair, we go down to minutes instead of dates
-        start_dt = self.start_python_datetime
-        end_dt = self.end_python_datetime
-        minutes = int(np.ceil((end_dt - start_dt).seconds/60)+1)
-        MINUTES = [start_dt+datetime.timedelta(seconds=m*60) for m in range(minutes)]
-        days = (end_date-start_date).days+1
-        DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
-        if '%Y%m%dT%H%M' not in l2_path_pattern:
-            self.logger.warning('It is suggested to be accurate to minutes for MethaneAIR')
-            l2_dir = os.path.split(l2_path_pattern)[0]
-            l2_list = []
-            for DATE in DATES:
-                flist = glob.glob(DATE.strftime(l2_path_pattern))
-                l2_list = l2_list+flist
+        '''
+        use l2_list as the major argument instead of l2_path_pattern
+        '''
+        if l2_list is None and l2_path_pattern is None:
+            self.logger.error('either l2_list or l2_path_pattern has to be provided!')
+            return
+        if l2_list is not None and l2_path_pattern is not None:
+            self.logger.info('both l2_list and l2_path_pattern are provided. l2_path_pattern will be overwritten')
+            l2_path_pattern = None
+        
+        if l2_list is None:
+            import glob
+            start_date = self.start_python_datetime.date()
+            end_date = self.end_python_datetime.date()
+            # for methanair, we go down to minutes instead of dates
+            start_dt = self.start_python_datetime
+            end_dt = self.end_python_datetime
+            minutes = int(np.ceil((end_dt - start_dt).seconds/60)+1)
+            MINUTES = [start_dt+datetime.timedelta(seconds=m*60) for m in range(minutes)]
+            days = (end_date-start_date).days+1
+            DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+            if '%Y%m%dT%H%M' not in l2_path_pattern:
+                self.logger.warning('It is suggested to be accurate to minutes for MethaneAIR')
+                l2_dir = os.path.split(l2_path_pattern)[0]
+                l2_list = []
+                for DATE in DATES:
+                    flist = glob.glob(DATE.strftime(l2_path_pattern))
+                    l2_list = l2_list+flist
+            else:
+                l2_dir = os.path.split(l2_path_pattern)[0]
+                l2_list = []
+                for MINUTE in MINUTES:
+                    flist = glob.glob(MINUTE.strftime(l2_path_pattern))
+                    l2_list = l2_list+flist
         else:
-            l2_dir = os.path.split(l2_path_pattern)[0]
-            l2_list = []
-            for MINUTE in MINUTES:
-                flist = glob.glob(MINUTE.strftime(l2_path_pattern))
-                l2_list = l2_list+flist
+            l2_dir = 'unspecified location if l2_list is provided'
+        
         self.l2_dir = l2_dir
         self.l2_list = l2_list
         
