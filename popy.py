@@ -23,10 +23,12 @@ Created on Sat Jan 26 15:50:30 2019
 """
 
 import numpy as np
+np.seterr(divide='ignore', invalid='ignore')
 import datetime
 import os, sys
 import logging
 import inspect
+from calendar import monthrange
 
 def F_wrapper_l3(instrum,product,grid_size,
                  start_year=None,start_month=None,end_year=None,end_month=None,
@@ -42,7 +44,8 @@ def F_wrapper_l3(instrum,product,grid_size,
                  subset_kw=None,plot_kw=None,
                  start_date_array=None,
                  end_date_array=None,
-                 proj=None):
+                 proj=None,
+                 nudge_grid_origin=None):
     '''
     instrum:
         instrument name
@@ -79,6 +82,8 @@ def F_wrapper_l3(instrum,product,grid_size,
         end_date_array = [datetime.date(y,7,31) for y in range(2005,2022)],
     proj:
         if provided, should be a pyproj.Proj object
+    nudge_grid_origin:
+        does nothing if none. if integar, adjust west and south to multiplies of grid_size. useful when tiling l3_data together
     output:
         if if_plot_l3 is False, return a Level3_Data object. otherwise return a dictionary containing the 
         Level3_Data object and the figout dictionary
@@ -86,19 +91,33 @@ def F_wrapper_l3(instrum,product,grid_size,
     subset_kw = subset_kw or {}
     plot_kw = plot_kw or {}
     
+    if nudge_grid_origin is not None:
+        step_grid_size = nudge_grid_origin*grid_size
+        west1 = np.floor(west/step_grid_size)*step_grid_size
+        south1 = np.floor(south/step_grid_size)*step_grid_size
+        logging.info('west will be adjusted from {} to {}'.format(west,west1))
+        west = west1
+        logging.info('south will be adjusted from {} to {}'.format(south,south1))
+        south = south1
     if l2_list is not None and l2_path_pattern is not None:
         logging.info('both l2_list and l2_path_pattern are provided. l2_path_pattern will be overwritten')
         l2_path_pattern = None
     
-    from calendar import monthrange
     if start_year is None:
         if start_date_array is None:
-            logging.error('start/end_date_array have to be provided')
-            return
+            if subset_function in ['F_subset_combined_MethaneAIR'] and 'alongtrack_mask' in subset_kw.keys():
+                logging.warning('no time constraint will be applied')
+                # create a dummy time
+                start_date_array = np.array([datetime.datetime(1900,1,1)])
+                end_date_array = np.array([datetime.datetime(2100,1,1)])
+            else:
+                logging.error('start/end_date_array have to be provided')
+                return
     else:
         logging.warning('please use start/end_date_array instead of setting year/month/day')
         if end_day is None:
             end_day = monthrange(end_year,end_month)[-1]
+    
     if start_date_array is not None:
         if start_year is not None:
             logging.info('Array of date provided, superseding start/end_year/month/day')
@@ -108,15 +127,18 @@ def F_wrapper_l3(instrum,product,grid_size,
     else:
         start_date_array = np.array([datetime.date(start_year,start_month,start_day)])
         end_date_array = np.array([datetime.date(end_year,end_month,end_day)])
+    
     if isinstance(start_date_array[0],datetime.datetime):
         start_dt_array = start_date_array
         end_dt_array = end_date_array
     elif isinstance(start_date_array[0],datetime.date):
         start_dt_array = np.array([datetime.datetime(d.year,d.month,d.day) for d in start_date_array])
         end_dt_array = np.array([datetime.datetime(d.year,d.month,d.day) for d in end_date_array])
+    
     l3_data = Level3_Data(proj=proj)
     
     for idate in range(len(start_date_array)):
+        
         start_date = start_date_array[idate]
         end_date = end_date_array[idate]
         
@@ -1353,7 +1375,7 @@ def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
         
     logging.info('block %d'%iblock+' completed at '+datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'))
     l3_data = {}
-    np.seterr(divide='ignore', invalid='ignore')
+    #np.seterr(divide='ignore', invalid='ignore')
     for ikey in range(len(oversampling_list)):
         l3_data[oversampling_list[ikey]] = sum_aboves[ikey][:,:].squeeze()\
         /total_sample_weight
@@ -1450,7 +1472,7 @@ class Level3_Data(dict):
             self['lonmesh'] = lonmesh
             self['latmesh'] = latmesh
     
-    def remesh(self,xgrid,ygrid):
+    def remesh(self,xgrid,ygrid,xmesh=None,ymesh=None):
         from scipy.interpolate import RegularGridInterpolator
         grid_sizex = np.median(np.diff(xgrid))
         grid_sizey = np.median(np.diff(ygrid))
@@ -1464,7 +1486,8 @@ class Level3_Data(dict):
             l3_data = self.block_reduce(new_grid_size)
         else:
             l3_data = self
-        xmesh,ymesh = np.meshgrid(xgrid,ygrid)
+        if xmesh is None:
+            xmesh,ymesh = np.meshgrid(xgrid,ygrid)
         l3_new = Level3_Data(instrum=l3_data.instrum,product=l3_data.product,
                              start_python_datetime=l3_data.start_python_datetime,
                              end_python_datetime=l3_data.end_python_datetime,
@@ -1473,8 +1496,16 @@ class Level3_Data(dict):
         for key in l3_data.keys():
             if key in ['xgrid','ygrid','nrows','nrow','ncols','ncol','xmesh','ymesh','lonmesh','latmesh']:
                 continue
-            f = RegularGridInterpolator((l3_data['ygrid'],l3_data['xgrid']),l3_data[key],bounds_error=False,fill_value=np.nan)
-            l3_new.add(key,f((ymesh,xmesh)))
+            elif key in ['total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
+                f = RegularGridInterpolator((l3_data['ygrid'],l3_data['xgrid']),
+                                            l3_data[key],bounds_error=False,fill_value=0.,method='nearest')
+                interpolated_fields = f((ymesh,xmesh))
+                interpolated_fields[np.isnan(interpolated_fields)] = 0.
+            else:
+                f = RegularGridInterpolator((l3_data['ygrid'],l3_data['xgrid']),
+                                            l3_data[key],bounds_error=False,fill_value=np.nan,method='nearest')
+                interpolated_fields = f((ymesh,xmesh))
+            l3_new.add(key,interpolated_fields)
         l3_new.check()
         return l3_new
     
@@ -1528,22 +1559,25 @@ class Level3_Data(dict):
         for key in common_keys:
             v0 = self[key]
             v1 = l3_data1[key]
-            v0[np.isnan(v0)] = 0.
-            v1[np.isnan(v1)] = 0.
+            
             if key in ['total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
+                v0[np.isnan(v0)] = 0.
+                v1[np.isnan(v1)] = 0.
                 l3_data[key] = v0+v1
             elif key in initial_only_keys:
                 l3_data[key] = v0
             elif key == 'cloud_pressure':
-                l3_data[key] = (v0*self['pres_total_sample_weight']
-                +v1*l3_data1['pres_total_sample_weight'])\
-                /(self['pres_total_sample_weight']
-                +l3_data1['pres_total_sample_weight'])
+                above = np.nansum(np.array([(v0*self['pres_total_sample_weight'],v1*l3_data1['pres_total_sample_weight'])]),axis=0)
+                below = np.nansum(np.array([self['pres_total_sample_weight'],l3_data1['pres_total_sample_weight']]),axis=0)
+                l3_data[key] = above/below
             else:
-                l3_data[key] = (v0*self['total_sample_weight']
-                +v1*l3_data1['total_sample_weight'])\
-                /(self['total_sample_weight']
-                +l3_data1['total_sample_weight'])
+                weight0 = self['total_sample_weight'].copy()
+                weight0[np.isnan(v0)] = 0
+                weight1 = l3_data1['total_sample_weight'].copy()
+                weight1[np.isnan(v1)] = 0
+                above = np.nansum(np.array([v0*weight0,v1*weight1]),axis=0)
+                below = np.nansum(np.array([weight0,weight1]),axis=0)
+                l3_data[key] = above/below
         return l3_data
     
     def read_mat(self,l3_filename,
@@ -1873,9 +1907,12 @@ class Level3_Data(dict):
                 k not in ['xmesh','ymesh','lonmesh','latmesh',
                           'total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
                 self.logger.info('block reducing field {}'.format(k))
+                total_sample_weight = self['total_sample_weight'].copy()
+                total_sample_weight[np.isnan(self[k])] = np.nan
+                aggregated_weight = block_reduce(total_sample_weight[:nrows_trim,:ncols_trim],(reduce_factor,reduce_factor),func=np.nansum)
                 new_l3.add(k,block_reduce(self[k][:nrows_trim,:ncols_trim]*self['total_sample_weight'][:nrows_trim,:ncols_trim],
                                           (reduce_factor,reduce_factor),func=np.nansum)\
-                           /new_l3['total_sample_weight'])
+                           /aggregated_weight)
         new_l3.check()
         return new_l3
     
@@ -3575,7 +3612,8 @@ class popy(object):
             self.nl2 = len(l2g_data['latc'])
     
     def F_subset_combined_MethaneAIR(self,path,alongtrack_mask=None,acrosstrack_mask=None,
-                                     oversampling_list=None):
+                                     oversampling_list=None,pixel_adjust_func=None,
+                                     singularity_mask=None):
         '''
         subset function for combined MethaneAIR L2 for a single research flight
         '''
@@ -3588,14 +3626,17 @@ class popy(object):
             'xch4_bias_corr_tv','xch4_bias_corr_anom','plm_mask']
         self.oversampling_list = oversampling_list
         nc = Dataset(path,'r')
-        acrosstrack_mask = None
+#         acrosstrack_mask = None
         if alongtrack_mask is None:
-            alongtrack_mask = np.ones(nc.dimensions['t'].size,dtype=bool)
+            alongtrack_mask = np.ones(nc.dimensions['tmx'].size,dtype=bool)
         if acrosstrack_mask is None:
-            acrosstrack_mask = np.ones(nc.dimensions['x'].size,dtype=bool)
+            acrosstrack_mask = np.ones(nc.dimensions['xmx'].size,dtype=bool)
         lonc = nc['lon'][acrosstrack_mask,alongtrack_mask]
         latc = nc['lat'][acrosstrack_mask,alongtrack_mask]
-        tau = nc['tau'][acrosstrack_mask,alongtrack_mask]
+        if nc['tau'].ndim == 2:
+            tau = nc['tau'][acrosstrack_mask,alongtrack_mask]
+        else:
+            tau = np.broadcast_to(nc['tau'][alongtrack_mask],lonc.shape)
         validmask = (lonc >= self.west) & (lonc <= self.east) \
         & (latc >= self.south) & (latc <= self.north) & (tau >= start_tau) & (tau <= end_tau)
         self.logger.info('there are {} l2 pixels'.format(np.sum(validmask)))
@@ -3607,10 +3648,37 @@ class popy(object):
         l2g_data['lonc'] = lonc[validmask].ravel()
         l2g_data['latc'] = latc[validmask].ravel()
         l2g_data['UTC_matlab_datenum'] = tau[validmask].ravel()/24+725008.
-        l2g_data['lonr'] = np.column_stack([nc['clon_{}'.format(ic)][acrosstrack_mask,alongtrack_mask][validmask].ravel() 
-                                            for ic in range(1,5)])
-        l2g_data['latr'] = np.column_stack([nc['clat_{}'.format(ic)][acrosstrack_mask,alongtrack_mask][validmask].ravel() 
-                                            for ic in range(1,5)])
+        if singularity_mask is not None:
+            singularity_mask = np.broadcast_to(singularity_mask[alongtrack_mask],lonc.shape)[validmask]
+        else:
+            singularity_mask = np.ones(len(l2g_data['lonc']),dtype=bool)
+        # and clon is changed also
+        if 'clon_1' in nc.variables.keys():
+            self.logger.warning('this appears to be clon1, clon2, clat1...')
+            l2g_data['lonr'] = np.column_stack([nc['clon_{}'.format(ic)][acrosstrack_mask,alongtrack_mask][validmask].ravel() 
+                                                for ic in range(1,5)])
+            l2g_data['latr'] = np.column_stack([nc['clat_{}'.format(ic)][acrosstrack_mask,alongtrack_mask][validmask].ravel() 
+                                                for ic in range(1,5)])
+        elif 'clon' in nc.variables.keys():
+            self.logger.warning('this appears to be clon, clat, ...')
+            l2g_data['lonr'] = np.column_stack([nc['clon'][acrosstrack_mask,alongtrack_mask,ic][validmask].ravel() 
+                                                for ic in range(4)])
+            l2g_data['latr'] = np.column_stack([nc['clat'][acrosstrack_mask,alongtrack_mask,ic][validmask].ravel() 
+                                                for ic in range(4)])
+            
+        else:
+            self.logger.error('can you be more confusing?!')
+            return
+        
+        if pixel_adjust_func is not None:
+            self.logger.warning('pixel corners will be manipulated according to pixel_adjust_func')
+            lonr,latr = pixel_adjust_func(l2g_data['lonr'][singularity_mask,],
+                                          l2g_data['latr'][singularity_mask,],
+                                          l2g_data['lonc'][singularity_mask],
+                                          l2g_data['latc'][singularity_mask])
+            l2g_data['lonr'][singularity_mask,] = lonr
+            l2g_data['latr'][singularity_mask,] = latr
+            
         for field in oversampling_list:
             l2g_data[field] = nc[field][acrosstrack_mask,alongtrack_mask][validmask].ravel() 
         l2g_data['column_uncertainty'] = np.ones_like(l2g_data['latc'])
