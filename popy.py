@@ -20,6 +20,7 @@ Created on Sat Jan 26 15:50:30 2019
 2021/07/27: breaking change for F_wrapper_l3. l2_path_pattern prevails
 2021/09/27: add MethaneAIR and projection option
 2022/05/22: start adding l2_list (list of l2 paths) besides l2_path_pattern
+2022/06/07: updates for MethaneAIR level3 (merging, inflation)
 """
 
 import numpy as np
@@ -45,7 +46,8 @@ def F_wrapper_l3(instrum,product,grid_size,
                  start_date_array=None,
                  end_date_array=None,
                  proj=None,
-                 nudge_grid_origin=None):
+                 nudge_grid_origin=None,
+                 k1=None,k2=None,k3=None,inflatex=None,inflatey=None):
     '''
     instrum:
         instrument name
@@ -84,6 +86,10 @@ def F_wrapper_l3(instrum,product,grid_size,
         if provided, should be a pyproj.Proj object
     nudge_grid_origin:
         does nothing if none. if integar, adjust west and south to multiplies of grid_size. useful when tiling l3_data together
+    k1/2/3:
+        shape exponents for the 2d super gaussian. see https://doi.org/10.5194/amt-11-6679-2018, fig. 5
+    inflatex/y:
+        options to inflate level2 pixels across (x) and along (y) track
     output:
         if if_plot_l3 is False, return a Level3_Data object. otherwise return a dictionary containing the 
         Level3_Data object and the figout dictionary
@@ -150,7 +156,8 @@ def F_wrapper_l3(instrum,product,grid_size,
                  start_hour=start_dt.hour,start_minute=start_dt.minute,start_second=start_dt.second,
                  end_year=end_dt.year,end_month=end_dt.month,end_day=end_dt.day,
                  end_hour=end_dt.hour,end_minute=end_dt.minute,end_second=end_dt.second,
-                 west=west,east=east,south=south,north=north,proj=proj)
+                 west=west,east=east,south=south,north=north,proj=proj,
+                 k1=k1,k2=k2,k3=k3,inflatex=inflatex,inflatey=inflatey)
         if not if_use_presaved_l2g:
             if subset_function is None:
                 subset_function = o.default_subset_function
@@ -1054,6 +1061,93 @@ def F_interp_narr_mat(sounding_lon,sounding_lat,sounding_datenum,\
         sounding_interp[fn] = my_interpolating_function((sounding_x,sounding_y,sounding_datenum))
     return sounding_interp
 
+def pixel_adjust_func(lonr,latr,lonc,latc,threshold_m=3,inflatex=1,inflatey=1):
+    '''
+    function to manipulate pixel corners if you don't like them
+    lonr, latr:
+        (nl2, 4) arrays, pixel corners
+    lonc, latc:
+        (nl2,) arrays, pixel centers
+    threshold_m:
+        if pixel fwhmx or fwhmx are smaller than this value, make it this value
+    inflatex/y:
+        stretch the pixels across track (x) or along track (y)
+    return:
+        updated lonr and latr
+    '''
+    import cv2
+    lonr_new = lonr.copy()
+    latr_new = latr.copy()
+    count = 0
+    for il2 in range(len(lonc)):
+        
+        xr = (lonr[il2,:]-lonc[il2])*111e3*np.cos(latc[il2]/180*np.pi)
+        yr = (latr[il2,:]-latc[il2])*111e3
+
+        edgecenterx = np.mean(np.column_stack((xr,xr[[1,2,3,0]])),axis=1)
+        edgecentery = np.mean(np.column_stack((yr,yr[[1,2,3,0]])),axis=1)
+
+        fwhmy = np.linalg.norm([edgecenterx[0]-edgecenterx[2],edgecentery[0]-edgecentery[2]])
+        fwhmx = np.linalg.norm([edgecenterx[1]-edgecenterx[3],edgecentery[1]-edgecentery[3]])
+        
+        if fwhmx >= threshold_m and fwhmy >= threshold_m and inflatex == 1 and inflatey == 1:
+            continue
+        
+        if fwhmx < threshold_m:
+            e0e2v = np.array([edgecenterx[2]-edgecenterx[0],edgecentery[2]-edgecentery[0]])
+            e0c0v = np.array([e0e2v[1],-e0e2v[0]])/np.linalg.norm(e0e2v)
+            e0 = np.array([edgecenterx[0],edgecentery[0]])
+            e2 = np.array([edgecenterx[2],edgecentery[2]])
+            c0 = e0+e0c0v
+            c1 = e0-e0c0v
+            c2 = e2-e0c0v
+            c3 = e2+e0c0v
+            xr = np.array([c0[0],c1[0],c2[0],c3[0]])
+            yr = np.array([c0[1],c1[1],c2[1],c3[1]])
+            edgecenterx = np.mean(np.column_stack((xr,xr[[1,2,3,0]])),axis=1)
+            edgecentery = np.mean(np.column_stack((yr,yr[[1,2,3,0]])),axis=1)
+
+            fwhmy = np.linalg.norm([edgecenterx[0]-edgecenterx[2],edgecentery[0]-edgecentery[2]])
+            fwhmx = np.linalg.norm([edgecenterx[1]-edgecenterx[3],edgecentery[1]-edgecentery[3]])
+        
+        if fwhmy < threshold_m:
+            e1e3v = np.array([edgecenterx[3]-edgecenterx[1],edgecentery[3]-edgecentery[1]])
+            e1c1v = np.array([e1e3v[1],-e1e3v[0]])/np.linalg.norm(e1e3v)
+            e1 = np.array([edgecenterx[1],edgecentery[1]])
+            e3 = np.array([edgecenterx[3],edgecentery[3]])
+            c1 = e1+e1c1v
+            c2 = e1-e1c1v
+            c0 = e3+e1c1v
+            c3 = e3-e1c1v
+            xr = np.array([c0[0],c1[0],c2[0],c3[0]])
+            yr = np.array([c0[1],c1[1],c2[1],c3[1]])
+            edgecenterx = np.mean(np.column_stack((xr,xr[[1,2,3,0]])),axis=1)
+            edgecentery = np.mean(np.column_stack((yr,yr[[1,2,3,0]])),axis=1)
+
+            fwhmy = np.linalg.norm([edgecenterx[0]-edgecenterx[2],edgecentery[0]-edgecentery[2]])
+            fwhmx = np.linalg.norm([edgecenterx[1]-edgecenterx[3],edgecentery[1]-edgecentery[3]])
+            
+        if inflatex != 1 or inflatey != 1:
+            xrr = np.array([-fwhmx,fwhmx,fwhmx,-fwhmx])/2
+            yrr = np.array([fwhmy,fwhmy,-fwhmy,-fwhmy])/2
+
+            fwhmx_new = inflatex*fwhmx
+            fwhmy_new = inflatey*fwhmy
+
+            xrr_new = np.array([-fwhmx_new,fwhmx_new,fwhmx_new,-fwhmx_new])/2
+            yrr_new = np.array([fwhmy_new,fwhmy_new,-fwhmy_new,-fwhmy_new])/2
+            
+            tform = cv2.getPerspectiveTransform(np.float32(np.column_stack((xrr,yrr))),
+                                               np.float32(np.column_stack((xr,yr))))
+            tmp = np.float32(np.column_stack((xrr_new,yrr_new,np.ones_like(yrr_new)))).dot(tform.T)
+            xr = tmp[:,0]
+            yr = tmp[:,1]
+           
+        lonr_new[il2,:] = xr/(111e3*np.cos(latc[il2]/180*np.pi))+lonc[il2]
+        latr_new[il2,:] = yr/111e3+latc[il2]
+    
+    return lonr_new, latr_new
+
 def F_ncread_selective(fn,varnames,varnames_short=None):
     """
     very basic netcdf reader, similar to F_ncread_selective.m
@@ -1135,7 +1229,7 @@ def F_block_regrid_wrapper(args):
 def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
                        oversampling_list,pixel_shape,error_model,
                        k1,k2,k3,xmargin,ymargin,
-                       iblock=1,verbose=False):
+                       iblock=1,verbose=False,inflatex=None,inflatey=None):
     '''
     a more compact version of F_regrid_ccm designed for parallel regridding
     l2g_data:
@@ -1158,6 +1252,10 @@ def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
         factors extending beyond pixel boundary
     iblock:
         indicate block in parallel regridding
+    verbose:
+        if print diagnostics
+    inflatex/y:
+        inflate pixels across (x) and along (y) track
     created on 2020/07/19
     '''
     if len(l2g_data['latc']) == 0:
@@ -1176,6 +1274,8 @@ def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
     from shapely.geometry import Polygon
     sg_kfacx = 2*(np.log(2)**(1/k1/k3))
     sg_kfacy = 2*(np.log(2)**(1/k2/k3))
+    inflatex = inflatex or 1
+    inflatey = inflatey or 1
     nvar_oversampling = len(oversampling_list)
     nl2 = len(l2g_data['latc'])
     xgrid = xmesh[0,:]
@@ -1329,8 +1429,8 @@ def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
         if(error_model == 'log') and (oversampling_list[n] == 'column_amount'):
             grid_flds[:,n] = np.log10(grid_flds[:,n])
         #t1 = time.time()
-    sg_wx = fwhmx/sg_kfacx
-    sg_wy = fwhmy/sg_kfacy
+    sg_wx = inflatex*fwhmx/sg_kfacx
+    sg_wy = inflatey*fwhmy/sg_kfacy
     # Init point counter for logger
     count = 0
     for il2 in range(nl2):
@@ -2090,7 +2190,7 @@ class popy(object):
                  start_hour=0,start_minute=0,start_second=0,\
                  end_year=2100,end_month=12,end_day=31,\
                  end_hour=23,end_minute=59,end_second=59,verbose=False,
-                 proj=None):
+                 proj=None,k1=None,k2=None,k3=None,inflatex=None,inflatey=None):
         
         self.instrum = instrum
         self.product = product
@@ -2098,9 +2198,9 @@ class popy(object):
         self.logger.info('creating an instance of popy')
         self.verbose = verbose
         if(instrum == "OMI"):
-            k1 = 4
-            k2 = 2
-            k3 = 1
+            k1 = k1 or 4
+            k2 = k2 or 2
+            k3 = k3 or 1
             error_model = "linear"
             oversampling_list = ['column_amount','albedo',\
                                  'cloud_fraction','cloud_pressure','terrain_height']
@@ -2118,9 +2218,9 @@ class popy(object):
             if product == 'NO2':
                 self.default_subset_function = 'F_subset_OMNO2'
         elif(instrum == "GOME-1"):
-            k1 = 4
-            k2 = 2
-            k3 = 1
+            k1 = k1 or 4
+            k2 = k2 or 2
+            k3 = k3 or 1
             error_model = "linear"
             oversampling_list = ['column_amount','albedo',\
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
@@ -2132,9 +2232,9 @@ class popy(object):
             self.default_subset_function = 'F_subset_MEaSUREs'
             self.default_column_unit = 'molec/cm2'
         elif(instrum == "SCIAMACHY"):
-            k1 = 4
-            k2 = 2
-            k3 = 1
+            k1 = k1 or 4
+            k2 = k2 or 2
+            k3 = k3 or 1
             error_model = "linear"
             oversampling_list = ['column_amount','albedo',\
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
@@ -2146,9 +2246,9 @@ class popy(object):
             self.default_subset_function = 'F_subset_MEaSUREs'
             self.default_column_unit = 'molec/cm2'
         elif(instrum == "GOME-2A"):
-            k1 = 4
-            k2 = 2
-            k3 = 1
+            k1 = k1 or 4
+            k2 = k2 or 2
+            k3 = k3 or 1
             error_model = "linear"
             oversampling_list = ['column_amount','albedo',\
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
@@ -2160,9 +2260,9 @@ class popy(object):
             self.default_subset_function = 'F_subset_MEaSUREs'
             self.default_column_unit = 'molec/cm2'
         elif(instrum == "GOME-2B"):
-            k1 = 4
-            k2 = 2
-            k3 = 1
+            k1 = k1 or 4
+            k2 = k2 or 2
+            k3 = k3 or 1
             error_model = "linear"
             oversampling_list = ['column_amount','albedo',\
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
@@ -2174,9 +2274,9 @@ class popy(object):
             self.default_subset_function = 'F_subset_MEaSUREs'
             self.default_column_unit = 'molec/cm2'
         elif(instrum == "OMPS-NPP"):
-            k1 = 6
-            k2 = 2
-            k3 = 3
+            k1 = k1 or 6
+            k2 = k2 or 2
+            k3 = k3 or 3
             error_model = "linear"
             oversampling_list = ['column_amount','albedo',\
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
@@ -2188,9 +2288,9 @@ class popy(object):
             self.default_subset_function = 'F_subset_MEaSUREs'
             self.default_column_unit = 'molec/cm2'
         elif(instrum == "OMPS-N20"):
-            k1 = 4
-            k2 = 2
-            k3 = 1
+            k1 = k1 or 4
+            k2 = k2 or 2
+            k3 = k3 or 1
             error_model = "linear"
             oversampling_list = ['column_amount','albedo',\
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
@@ -2203,9 +2303,9 @@ class popy(object):
             self.default_subset_function = 'F_subset_MEaSUREs'
             self.default_column_unit = 'molec/cm2'
         elif(instrum == "MethaneSAT"):
-            k1 = 4
-            k2 = 2
-            k3 = 1
+            k1 = k1 or 4
+            k2 = k2 or 2
+            k3 = k3 or 1
             error_model = "linear"
             oversampling_list = ['XCH4','XCO2','terrain_height']
             xmargin = 1.5
@@ -2216,9 +2316,9 @@ class popy(object):
             self.default_subset_function = 'F_subset_MethaneSAT'
             self.default_column_unit = 'mol/mol'         
         elif(instrum == "MethaneAIR"):
-            k1 = 2
-            k2 = 2
-            k3 = 1
+            k1 = k1 or 2
+            k2 = k2 or 2
+            k3 = k3 or 1
             error_model = "linear"
             oversampling_list = ['XCH4','XCO2','terrain_height']
             xmargin = 1.5
@@ -2229,9 +2329,9 @@ class popy(object):
             self.default_subset_function = 'F_subset_MethaneAIR'
             self.default_column_unit = 'mol/mol'
         elif(instrum == "TROPOMI"):
-            k1 = 4
-            k2 = 2
-            k3 = 1
+            k1 = k1 or 4
+            k2 = k2 or 2
+            k3 = k3 or 1
             error_model = "linear"
             if product in ['AI']:
                 oversampling_list = ['AI']
@@ -2264,9 +2364,9 @@ class popy(object):
             self.pixel_shape = 'quadrilateral'
             self.default_column_unit = 'mol/m2'
         elif(instrum == "IASI"):
-            k1 = 2
-            k2 = 2
-            k3 = 9
+            k1 = k1 or 2
+            k2 = k2 or 2
+            k3 = k3 or 9
             error_model = "square"
             oversampling_list = ['column_amount']
             xmargin = 2
@@ -2277,9 +2377,9 @@ class popy(object):
             self.default_subset_function = 'F_subset_IASINH3'
             self.default_column_unit = 'mol/m2'
         elif(instrum == "CrIS"):
-            k1 = 2
-            k2 = 2
-            k3 = 4
+            k1 = k1 or 2
+            k2 = k2 or 2
+            k3 = k3 or 4
             error_model = "log"
             oversampling_list = ['column_amount']
             xmargin = 2
@@ -2292,9 +2392,9 @@ class popy(object):
             self.default_subset_function = 'F_subset_CrISNH3_Lite'
             self.default_column_unit = 'molec/cm2'
         elif(instrum == "TES"):
-            k1 = 4
-            k2 = 4
-            k3 = 1
+            k1 = k1 or 4
+            k2 = k2 or 4
+            k3 = k3 or 1
             error_model = "log"
             oversampling_list = ['column_amount']
             xmargin = 2
@@ -2306,9 +2406,9 @@ class popy(object):
             self.default_subset_function = 'F_subset_TESNH3'
             self.default_column_unit = 'molec/cm2'
         else:
-            k1 = 2
-            k2 = 2
-            k3 = 1
+            k1 = k1 or 2
+            k2 = k2 or 2
+            k3 = k3 or 1
             error_model = "linear"
             oversampling_list = ['column_amount']
             xmargin = 2
@@ -2324,6 +2424,8 @@ class popy(object):
         self.k1 = k1
         self.k2 = k2
         self.k3 = k3
+        self.inflatex = inflatex
+        self.inflatey = inflatey
         self.sg_kfacx = 2*(np.log(2)**(1/k1/k3))
         self.sg_kfacy = 2*(np.log(2)**(1/k2/k3))
         self.error_model = error_model
@@ -3660,11 +3762,13 @@ class popy(object):
             l2g_data['latr'] = np.column_stack([nc['clat_{}'.format(ic)][acrosstrack_mask,alongtrack_mask][validmask].ravel() 
                                                 for ic in range(1,5)])
         elif 'clon' in nc.variables.keys():
+            # assuming the corner order is rear right, rear left, front left, front right
+            # standardize to rear left, front left, front right, rear right
             self.logger.warning('this appears to be clon, clat, ...')
             l2g_data['lonr'] = np.column_stack([nc['clon'][acrosstrack_mask,alongtrack_mask,ic][validmask].ravel() 
-                                                for ic in range(4)])
+                                                for ic in [1,2,3,0]])
             l2g_data['latr'] = np.column_stack([nc['clat'][acrosstrack_mask,alongtrack_mask,ic][validmask].ravel() 
-                                                for ic in range(4)])
+                                                for ic in [1,2,3,0]])
             
         else:
             self.logger.error('can you be more confusing?!')
@@ -5871,7 +5975,7 @@ class popy(object):
             l3_data = F_block_regrid_ccm(l2g_data,xmesh,ymesh,
                        oversampling_list,self.pixel_shape,self.error_model,
                        self.k1,self.k2,self.k3,xmargin,ymargin,
-                       iblock=1)
+                       iblock=1,inflatex=self.inflatex,inflatey=self.inflatey)
             l3_data['xgrid'] = self.xgrid
             l3_data['ygrid'] = self.ygrid
             l3_object = Level3_Data(grid_size=self.grid_size,
@@ -5956,7 +6060,7 @@ class popy(object):
                           block_ymesh[iblock],oversampling_list,\
                           self.pixel_shape,self.error_model, \
                           self.k1,self.k2,self.k3,
-                          xmargin,ymargin,iblock,self.verbose) for iblock in range(nblock) ) )
+                          xmargin,ymargin,iblock,self.verbose,self.inflatex,self.inflatey) for iblock in range(nblock) ) )
 #        pp = multiprocessing.Pool(ncores)
 #        l3_data_list = pp.map( F_block_regrid_wrapper, \
 #                        ((block_l2g_data[iblock],block_xmesh[iblock],\
@@ -6101,14 +6205,8 @@ class popy(object):
                           block_ymesh[iblock],oversampling_list,\
                           self.pixel_shape,self.error_model, \
                           self.k1,self.k2,self.k3,
-                          xmargin,ymargin,iblock,self.verbose) for iblock in range(nblock) ) )
-#        pp = multiprocessing.Pool(ncores)
-#        l3_data_list = pp.map( F_block_regrid_wrapper, \
-#                        ((block_l2g_data[iblock],block_xmesh[iblock],\
-#                          block_ymesh[iblock],oversampling_list,\
-#                          self.instrum,self.error_model, \
-#                          self.k1,self.k2,self.k3,
-#                          xmargin,ymargin,iblock) for iblock in range(nblock) ) )
+                          xmargin,ymargin,iblock,self.verbose,self.inflatex,self.inflatey) for iblock in range(nblock) ) )
+        
         self.logger.info('Reassemble blocks back to l3 grid')
         dict_of_lists = {}
         for iblock in range(nblock):
