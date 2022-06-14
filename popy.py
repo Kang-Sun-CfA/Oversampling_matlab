@@ -851,7 +851,82 @@ def F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,\
                                 era5_data[fn],bounds_error=False,fill_value=np.nan)
         sounding_interp[fn] = my_interpolating_function((sounding_lon,sounding_lat,sounding_datenum))
     return sounding_interp
+
+def F_interp_hrrr_mat(sounding_lon,sounding_lat,sounding_datenum,
+                      file_pattern='/projects/academic/kangsun/data/hrrr/%Y%m%d/hrrr_sfc_uv.mat',
+                      interp_fields=None):
+    '''interpolate fields from hrrr data, concatenated as daily mat files
+    sounding_lon:
+        longitude for interpolation
+    sounding_lat:
+        latitude for interpolation
+    sounding_datenum:
+        time for interpolation in matlab datenum double format
+    file_pattern:
+        pattern of daily met files, similar to l2_path_pattern
+    interp_fields:
+        variables to interpolate from hrrr, only 2d fields are supported
+    created on 2022/06/13
+    '''
+    from scipy.io import loadmat
+    from scipy.interpolate import RegularGridInterpolator
+    from pyproj import Proj
+    import glob
+
+    interp_fields = interp_fields or ['u80','v80']
+    p2 = Proj(proj='lcc',R=6371.229, lat_1=38.5, lat_2=38.5,lon_0=262.5,lat_0=38.5)
+    sounding_x,sounding_y = p2(sounding_lon,sounding_lat)
+    start_datenum = np.amin(sounding_datenum)
+    end_datenum = np.amax(sounding_datenum)
+    start_datetime = datedev_py(start_datenum)
+    end_datetime = datedev_py(end_datenum)
     
+    days = (end_datetime-start_datetime).days+1
+    DATES = [start_datetime + datetime.timedelta(days=d) for d in range(days)]
+    hrrr_data = {}
+    iday = 0
+    for date in DATES:
+        flist = glob.glob(date.strftime(file_pattern))
+        if len(flist) == 0:
+            logging.warning('no file found on '+date.strftime('%Y%m%d'))
+            continue
+        if len(flist) > 1:
+            logging.warning('{} files found on {}, using the first one'.format(len(flist),date.strftime('%Y%m%d')))
+        fn = flist[0]
+        
+        if not hrrr_data:
+            d = loadmat(fn,squeeze_me=True)
+            hrrr_data['x'] = d['x']
+            hrrr_data['y'] = d['y']
+            # how many hours are there in each daily file? have to be the same 
+            nhour = len(d['datetime'])
+            hrrr_data['datenum'] = np.zeros((nhour*(days)),dtype=np.float64)
+            hrrr_data['datenum'][iday*nhour:((iday+1)*nhour)] = d['datetime']
+            for field in interp_fields:
+                hrrr_data[field] = np.zeros((len(hrrr_data['x']),len(hrrr_data['y']),nhour*(days)))
+                # was read in as 3-d array in time, y, x; transpose to x, y, time
+                hrrr_data[field][...,iday*nhour:((iday+1)*nhour)] = d[field].transpose((2,1,0))
+        else:
+            d = loadmat(fn,squeeze_me=True)
+            hrrr_data['datenum'][iday*nhour:((iday+1)*nhour)] = d['datetime']
+            for field in interp_fields:
+                # was read in as 3-d array in time, y, x; transpose to x, y, time
+                hrrr_data[field][...,iday*nhour:((iday+1)*nhour)] = d[field].transpose((2,1,0))
+        iday += 1
+        
+    sounding_interp = {}
+    if not hrrr_data:
+        for fn in interp_fields:
+            sounding_interp[fn] = sounding_lon*np.nan
+        return sounding_interp
+    # interpolate
+    for fn in interp_fields:
+        my_interpolating_function = \
+        RegularGridInterpolator((hrrr_data['x'],hrrr_data['y'],hrrr_data['datenum']),\
+                                hrrr_data[fn],bounds_error=False,fill_value=np.nan)
+        sounding_interp[fn] = my_interpolating_function((sounding_x,sounding_y,sounding_datenum))
+    return sounding_interp
+
 def F_interp_geos_mat(sounding_lon,sounding_lat,sounding_datenum,\
                   geos_dir='/mnt/Data2/GEOS/s5p_interp/',\
                   interp_fields=None,\
@@ -6947,10 +7022,10 @@ class popy(object):
         finally made the decision to integrate all meteorological interopolation
         to the same framework.
         which_met:
-            a string, choosen from 'ERA5', 'NARR', 'GEOS-FP', 'MERRA-2'
+            a string, choosen from 'ERA5', 'NARR', 'GEOS-FP', 'MERRA-2', 'HRRR'
         met_dir:
             directory containing those met data, data structure should be consistently
-            Y%Y/M%M/D%D
+            Y%Y/M%M/D%D, except for HRRR (implemented in 2022 and file_path should be used)
         interp_fields:
             variables to interpolate from met data, only 2d fields are supported
         fn_header:
@@ -7003,6 +7078,12 @@ class popy(object):
             for key in sounding_interp.keys():
                 self.logger.info(key+' from MERRA2 is sampled to L2g coordinate/time')
                 self.l2g_data['merra2_'+key] = np.float32(sounding_interp[key])
+        elif which_met.lower() == 'hrrr':
+            sounding_interp = F_interp_hrrr_mat(sounding_lon,sounding_lat,sounding_datenum,
+                                                met_dir,interp_fields)
+            for key in sounding_interp.keys():
+                self.logger.info(key+' from HRRR is sampled to L2g coordinate/time')
+                self.l2g_data['hrrr_'+key] = np.float32(sounding_interp[key])
     
     def F_label_HMS(self,HMS_dir,fn_date_identifier='%Y/%m/%d/hms_smoke%Y%m%d.shp'):
         '''
