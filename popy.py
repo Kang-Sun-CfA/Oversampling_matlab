@@ -6100,8 +6100,9 @@ class popy(object):
         if 'lonr' in l2g_data.keys():
             lonr = l2g_data['lonr']
             latr = l2g_data['latr']
-            pixel_width = np.max([F_lon_distance(lonr[:,0],lonr[:,2]),F_lon_distance(lonr[:,1],lonr[:,3])],axis=0)
-            pixel_height = np.max([np.abs(latr[:,2]-latr[:,0]),np.abs(latr[:,1]-latr[:,3])],axis=0)
+            # this will break if a pixel spans the +/-180 longitude
+            pixel_width = np.ptp(lonr,axis=1)
+            pixel_height = np.ptp(latr,axis=1)
         else:
             pixel_width = np.max([l2g_data['u'],l2g_data['v']],axis=0)*3
             pixel_height = pixel_width
