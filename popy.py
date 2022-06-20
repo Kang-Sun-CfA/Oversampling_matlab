@@ -21,6 +21,7 @@ Created on Sat Jan 26 15:50:30 2019
 2021/09/27: add MethaneAIR and projection option
 2022/05/22: start adding l2_list (list of l2 paths) besides l2_path_pattern
 2022/06/07: updates for MethaneAIR level3 (merging, inflation)
+2022/06/20: flux divergence 2.0
 """
 
 import numpy as np
@@ -48,14 +49,14 @@ def F_wrapper_l3(instrum,product,grid_size,
                  proj=None,
                  nudge_grid_origin=None,
                  k1=None,k2=None,k3=None,inflatex=None,inflatey=None,
-                 flux_kw=None):
+                 flux_kw=None,flux_grid_size=None):
     '''
     instrum:
         instrument name
     product:
         product name, usually the name of molecule (NO2, CH4, NH3, HCHO, etc.)
     grid_size:
-        grid size in degree
+        grid size, should be <~ 0.5 l2 pixel size
     start/end_year/month/day:
         recommend to use start/end_date_array instead
     west/east/south/north:
@@ -92,7 +93,9 @@ def F_wrapper_l3(instrum,product,grid_size,
     inflatex/y:
         options to inflate level2 pixels across (x) and along (y) track
     flux_kw:
-        arguments input to F_calculate_horizontal_flux function
+        arguments input to F_calculate_horizontal_flux function, will trigger flux calculation
+    flux_grid_size:
+        grid size on which to calculate flux divergence, should be >~ 1 l2 pixel size
     output:
         if if_plot_l3 is False, return a Level3_Data object. otherwise return a dictionary containing the 
         Level3_Data object and the figout dictionary
@@ -102,6 +105,7 @@ def F_wrapper_l3(instrum,product,grid_size,
     if flux_kw is not None:
         logging.info('flux calculation is enabled using wind fields {} and {}'.format(flux_kw['x_wind_field'],flux_kw['y_wind_field']))
         do_flux = True
+        flux_grid_size = flux_grid_size or grid_size
     else:
         do_flux = False
     
@@ -165,7 +169,7 @@ def F_wrapper_l3(instrum,product,grid_size,
                  end_year=end_dt.year,end_month=end_dt.month,end_day=end_dt.day,
                  end_hour=end_dt.hour,end_minute=end_dt.minute,end_second=end_dt.second,
                  west=west,east=east,south=south,north=north,proj=proj,
-                 k1=k1,k2=k2,k3=k3,inflatex=inflatex,inflatey=inflatey)
+                 k1=k1,k2=k2,k3=k3,inflatex=inflatex,inflatey=inflatey,flux_grid_size=flux_grid_size)
         if not if_use_presaved_l2g:
             if subset_function is None:
                 subset_function = o.default_subset_function
@@ -260,6 +264,10 @@ def F_wrapper_l3(instrum,product,grid_size,
         l3_data = l3_data.merge(l3_data0)
     if hasattr(l3_data,'check'):
         l3_data.check()
+    if 'flux_div' not in l3_data.keys() and do_flux:
+        if flux_grid_size > grid_size:
+            l3_data = l3_data.block_reduce(flux_grid_size)
+        l3_data.calculate_flux_divergence()
     if if_plot_l3 and hasattr(l3_data,'plot'):
         figout = l3_data.plot(existing_ax=existing_ax,**plot_kw)
     else:
@@ -1723,7 +1731,10 @@ class Level3_Data(dict):
         flux_div[np.isnan(div_xy) & np.isnan(div_rs)] = np.nan
         
         if remove_wind_div:
-            vcd = self['vcd']
+            if 'vcd' not in self.keys():
+                vcd = self['column_amount']
+            else:
+                vcd = self['vcd']
             div_wind_xy,div_wind_rs = F_divs(self['flux_e']/vcd,self['flux_n']/vcd,
                                              self['flux_ne']/vcd,self['flux_nw']/vcd,
                                              dy,dx_vec,dd_vec)
@@ -2358,7 +2369,8 @@ class popy(object):
                  start_hour=0,start_minute=0,start_second=0,\
                  end_year=2100,end_month=12,end_day=31,\
                  end_hour=23,end_minute=59,end_second=59,verbose=False,
-                 proj=None,k1=None,k2=None,k3=None,inflatex=None,inflatey=None):
+                 proj=None,k1=None,k2=None,k3=None,inflatex=None,inflatey=None,
+                 flux_grid_size=None):
         
         self.instrum = instrum
         self.product = product
@@ -2599,6 +2611,7 @@ class popy(object):
         self.error_model = error_model
         self.oversampling_list = oversampling_list
         self.grid_size = grid_size
+        self.flux_grid_size = flux_grid_size or grid_size
         
         start_python_datetime = datetime.datetime(start_year,start_month,start_day,\
                                                   start_hour,start_minute,start_second)
@@ -2761,29 +2774,31 @@ class popy(object):
             self.F_mask_l2g_with_boundary(boundary_polygon=boundary_polygon,center_only=False)
     
     def F_calculate_horizontal_flux(self,x_wind_field,y_wind_field,
-                                    vcd_field=None,func_to_get_vcd=None,
+                                    func_to_get_vcd=None,
+                                    unique_layer_identifier=None,
                                     **interp_met_kw):
         '''add horizontal flux to l2g_data
         x/y_wind_field:
             key in l2g_data for east/north wind component, e.g., era5_u/v100
-        vcd_field:
-            key in l2g_data for column amount, if None, see below
         func_to_get_vcd:
             function that takes in l2g_data dictionary and output vcd
         interp_met_kw:
             if x/y_wind_field are not in l2g_data, call self.F_interp_met to get those fields
+        unique_layer_identifier:
+            name of l2g_data to identify unique layers for flux div calculation. l2g_data will be divided to a list
+            if it exists in l2g_data. each element will be a dict with a unique value of unique_layer_identifier
         output:
             'flux_e','flux_n','flux_ne','flux_nw' added to l2g_data
         created on 2022/06/15
         '''
+        if unique_layer_identifier is None:
+            self.logger.warning('make sure your l2 data are not overlapping too much, otherwise provide unique_layer_identifier')
         # vcd should be in mol/m2
-        if vcd_field is None:
-            if func_to_get_vcd is None:
-                self.logger.warning('neither vcd_field nor a function to calculate vcd is provided. use column_amount')
-                vcd_field = 'column_amount'
-                vcd = self.l2g_data[vcd_field]
-            else:
-                vcd = func_to_get_vcd(self.l2g_data)
+        if func_to_get_vcd is None:
+            self.logger.warning('the function to calculate vcd is not provided. use column_amount')
+            vcd = self.l2g_data['column_amount']
+        else:
+            vcd = func_to_get_vcd(self.l2g_data)
         
         # wind should be in m/s
         if (x_wind_field not in self.l2g_data.keys()) or (y_wind_field not in self.l2g_data.keys()):
@@ -2803,13 +2818,19 @@ class popy(object):
         # flux to the northwest, mol/m/s
         self.l2g_data['flux_nw'] = vcd*(self.l2g_data[x_wind_field]*(-ne2e_cos)+self.l2g_data[y_wind_field]*ne2e_sin)
         # add 'vcd' to the oversampling list if it is not column_amount, e.g., derived from xch4
-        if vcd_field != 'column_amount':
+        if func_to_get_vcd is not None:
             self.l2g_data['vcd'] = vcd
             self.oversampling_list.append('vcd')
-        add_list = ['flux_e','flux_n','flux_ne','flux_nw','vcd']
+        add_list = ['flux_e','flux_n','flux_ne','flux_nw']
         for add_field in add_list:
             if add_field not in self.oversampling_list:
                 self.oversampling_list.append(add_field)
+        
+        # last step, if there is a unique identifier, divide l2g_data from a dict to a list of dict
+        if unique_layer_identifier in self.l2g_data.keys():
+            self.logger.info('l2g_data will be divided into a list according to {}'.format(unique_layer_identifier))
+            unique_values,unique_idx = np.unique(self.l2g_data[unique_layer_identifier],return_inverse=True)
+            self.l2g_data = [{k:v[unique_idx==i,] for k,v in self.l2g_data.items()} for i in range(len(unique_values))]
             
     def F_load_l3_mat(self,l3_filename,boundary_polygon=None):
         '''
@@ -2878,6 +2899,7 @@ class popy(object):
         data_fields_l2g: what do you want to call the variables in the output
         updated on 2019/04/22
         updated on 2019/11/20 to handle SUB.nc
+        updated on 2022/06/19 to add orbit number
         additional packages:
             netCDF4, conda install -c anaconda netcdf4
         """
@@ -2916,6 +2938,8 @@ class popy(object):
         
         outp['across_track_position'] = np.tile(np.arange(1.,outp['latc'].shape[1]+1),\
             (outp['latc'].shape[0],1)).astype(np.int16)
+        outp['orbit'] = np.full(outp['latc'].shape,ncid.orbit,dtype=int)
+        ncid.close()
         return outp
     
     def F_read_MEaSUREs_nc(self,fn,data_fields,data_fields_l2g=None):
@@ -6085,6 +6109,18 @@ class popy(object):
         created on 2020/07/19
         fix on 2020/08/17 so multiprocess does not consume all the memory
         '''
+        if l2g_data == None:
+            l2g_data = self.l2g_data
+        if isinstance(l2g_data,list):
+            self.logger.info('l2g_data appears to be a list. each unique layer will be oversampled, coarsened, flux-generated separately, and then merged')
+            l3_object = Level3_Data(proj=self.proj,grid_size=self.flux_grid_size)
+            for l2g in l2g_data:
+                l3_orbit = self.F_parallel_regrid(l2g,block_length,ncores).block_reduce(self.flux_grid_size)
+                l3_orbit.calculate_flux_divergence()
+                l3_object = l3_object.merge(l3_orbit)
+            l3_object.check()
+            return l3_object
+        
         west = self.west ; east = self.east ; south = self.south ; north = self.north
         nrows = self.nrows; ncols = self.ncols
         xmesh = self.xmesh ; ymesh = self.ymesh
@@ -6093,8 +6129,7 @@ class popy(object):
         start_matlab_datenum = self.start_matlab_datenum
         end_matlab_datenum = self.end_matlab_datenum
         oversampling_list = self.oversampling_list.copy()
-        if l2g_data == None:
-            l2g_data = self.l2g_data
+        
         if 'UTC_matlab_datenum' not in l2g_data.keys():
             l2g_data['UTC_matlab_datenum'] = l2g_data.pop('utc')
         for key in self.oversampling_list:
@@ -7076,7 +7111,7 @@ class popy(object):
             self.l2g_data['gcrs_plevel'] = sounding_pEdge
             self.logger.info('GEOS-Chem profiles sampled at level 2 g locations')
     
-    def F_interp_met(self,which_met,met_dir,interp_fields,fn_header='',
+    def F_interp_met(self,which_met,met_dir,interp_fields,fn_header=None,
                      time_collection='inst3'):
         """
         finally made the decision to integrate all meteorological interopolation
@@ -7098,12 +7133,8 @@ class popy(object):
         sounding_lat = self.l2g_data['latc']
         sounding_datenum = self.l2g_data['UTC_matlab_datenum']
         if which_met in {'era','era5','ERA','ERA5'}:
-            if not fn_header:
-                fn_header_local = 'CONUS'
-            else:
-                fn_header_local = fn_header
             sounding_interp = F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,
-                                            met_dir,interp_fields,fn_header_local)
+                                            met_dir,interp_fields,fn_header)
             for key in sounding_interp.keys():
                 self.logger.info(key+' from ERA5 is sampled to L2g coordinate/time')
                 self.l2g_data['era5_'+key] = np.float32(sounding_interp[key])
