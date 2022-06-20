@@ -26,7 +26,7 @@ Created on Sat Jan 26 15:50:30 2019
 import numpy as np
 np.seterr(divide='ignore', invalid='ignore')
 import datetime
-import os, sys
+import os, sys, glob
 import logging
 import inspect
 from calendar import monthrange
@@ -47,7 +47,8 @@ def F_wrapper_l3(instrum,product,grid_size,
                  end_date_array=None,
                  proj=None,
                  nudge_grid_origin=None,
-                 k1=None,k2=None,k3=None,inflatex=None,inflatey=None):
+                 k1=None,k2=None,k3=None,inflatex=None,inflatey=None,
+                 flux_kw=None):
     '''
     instrum:
         instrument name
@@ -90,12 +91,19 @@ def F_wrapper_l3(instrum,product,grid_size,
         shape exponents for the 2d super gaussian. see https://doi.org/10.5194/amt-11-6679-2018, fig. 5
     inflatex/y:
         options to inflate level2 pixels across (x) and along (y) track
+    flux_kw:
+        arguments input to F_calculate_horizontal_flux function
     output:
         if if_plot_l3 is False, return a Level3_Data object. otherwise return a dictionary containing the 
         Level3_Data object and the figout dictionary
     '''
     subset_kw = subset_kw or {}
     plot_kw = plot_kw or {}
+    if flux_kw is not None:
+        logging.info('flux calculation is enabled using wind fields {} and {}'.format(flux_kw['x_wind_field'],flux_kw['y_wind_field']))
+        do_flux = True
+    else:
+        do_flux = False
     
     if nudge_grid_origin is not None:
         step_grid_size = nudge_grid_origin*grid_size
@@ -175,6 +183,8 @@ def F_wrapper_l3(instrum,product,grid_size,
                 subset_kw['l2_list'] = l2_list
             
             getattr(o, subset_function)(**subset_kw)
+            if do_flux:
+                o.F_calculate_horizontal_flux(**flux_kw)
             # xch4 or xco2 products
             x_set = set(o.oversampling_list).intersection({'xch4','XCH4','XCO2','xco2'})
             if len(x_set)>0:
@@ -215,6 +225,8 @@ def F_wrapper_l3(instrum,product,grid_size,
                         logging.warning(l2g_path+' does not exist!')
                         continue
                     o.F_mat_reader(l2g_path)
+                    if do_flux:
+                        o.F_calculate_horizontal_flux(**flux_kw)
                     #kludge for CrIS
                     if instrum == 'CrIS':
                         mask = (o.l2g_data['column_amount'] > 0) & (o.l2g_data['column_uncertainty'] > 0)
@@ -775,7 +787,7 @@ def F_interp_era5_3D(sounding_lon,sounding_lat,sounding_datenum,
 def F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,\
                   era5_dir='/mnt/Data2/ERA5/',\
                   interp_fields=None,\
-                  fn_header='CONUS'):
+                  fn_header=None):
     """
     sample a field from era5 data in .nc format. 
     see era5.py for era5 downloading/subsetting
@@ -786,7 +798,7 @@ def F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,\
     sounding_datenum:
         time for interpolation in matlab datenum double format
     era5_dir:
-        directory where subset era5 data in .nc are saved
+        directory where subset era5 data in .nc are saved, if fn_header is None, use as file path pattern
     interp_fields:
         variables to interpolate from era5, only 2d fields are supported
     fn_header:
@@ -806,10 +818,19 @@ def F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,\
     era5_data = {}
     iday = 0
     for DATE in DATES:
-        fn = os.path.join(era5_dir,DATE.strftime('Y%Y'),\
-                                   DATE.strftime('M%m'),\
-                                   DATE.strftime('D%d'),\
-                                   fn_header+'_2D_'+DATE.strftime('%Y%m%d')+'.nc')
+        if fn_header is None:
+            flist = glob.glob(DATE.strftime(era5_dir))
+            if len(flist) == 0:
+                logging.warning('no file found on '+DATE.strftime('%Y%m%d'))
+                continue
+            if len(flist) > 1:
+                logging.warning('{} files found on {}, using the first one'.format(len(flist),DATE.strftime('%Y%m%d')))
+            fn = flist[0]
+        else:
+            fn = os.path.join(era5_dir,DATE.strftime('Y%Y'),\
+                                       DATE.strftime('M%m'),\
+                                       DATE.strftime('D%d'),\
+                                       fn_header+'_2D_'+DATE.strftime('%Y%m%d')+'.nc')
         if not era5_data:
             nc_out = F_ncread_selective(fn,np.concatenate(
                     (interp_fields,['latitude','longitude','time'])))
@@ -1647,6 +1668,78 @@ class Level3_Data(dict):
             self['lonmesh'] = lonmesh
             self['latmesh'] = latmesh
     
+    def calculate_flux_divergence(self,write_diagnostic=False,remove_wind_div=True):
+        if self.proj is not None:
+            self.logger.error('projection is not supported in flux divergence calculation yet')
+            return
+        
+        # get xy and rs divergences given the xy and rs decomposition of vector
+        def F_divs(fe,fn,fne,fnw,dy,dx_vec,dd_vec):
+            dfedx = np.full_like(fe,np.nan)
+            dfedx[:,1:-1] = (fe[:,2:]-fe[:,0:-2])/(2*np.broadcast_to(dx_vec[:,np.newaxis],fe[:,1:-1].shape))
+
+            dfndy = np.full_like(fn,np.nan)
+            dfndy[1:-1,] = (fn[2:,]-fn[0:-2,])/(2*dy)
+
+            dfnedr = np.full_like(fne,np.nan)
+            dfnedr[1:-1,1:-1] = (fne[2:,2:]-fne[0:-2,0:-2])/(2*np.broadcast_to(dd_vec[1:-1,np.newaxis],fne[1:-1,1:-1].shape))
+
+            dfnwds = np.full_like(fnw,np.nan)
+            dfnwds[1:-1,1:-1] = (fnw[2:,0:-2]-fnw[0:-2,2:])/(2*np.broadcast_to(dd_vec[1:-1,np.newaxis],fnw[1:-1,1:-1].shape))
+
+            div_xy = dfedx+dfndy
+            div_rs = dfnedr+dfnwds
+            return div_xy,div_rs        
+        
+        # weight such that w_xy = 0 when wind is aligned with r,s and w_xy = 1 when wind is aligned with x,y
+        def F_w_xy(x,x0):
+            w_xy = 1-x/x0
+            mask = x>x0
+            w_xy[mask] = x[mask]/(np.pi/2-x0[mask])+x0[mask]/(x0[mask]-np.pi/2)
+            return w_xy
+        
+        # y-grid size in m
+        dy = 111e3*self.grid_size
+        # x-grid size in m
+        dx_vec = np.cos(self['ygrid']/180*np.pi)*111e3*self.grid_size
+        # diagonal grid points distance in m
+        dd_vec = np.sqrt(np.square(dx_vec)+dy**2)
+        
+        div_xy,div_rs = F_divs(self['flux_e'],self['flux_n'],self['flux_ne'],self['flux_nw'],dy,dx_vec,dd_vec)
+        
+        wind2e_angle = np.arctan(np.abs(self['flux_e']/self['flux_n']))
+        ne2e_angle = np.arctan(1/(np.cos(self['ymesh']/180*np.pi)))
+        
+        w_xy = F_w_xy(wind2e_angle,ne2e_angle)
+        w_rs = 1.-w_xy
+        
+        w_xy[np.isnan(div_xy)] = 0.
+        w_rs[np.isnan(div_xy)] = 1.
+
+        w_xy[np.isnan(div_rs)] = 1.
+        w_rs[np.isnan(div_rs)] = 0.
+
+        flux_div = np.nansum(np.array([div_xy*w_xy,div_rs*w_rs]),axis=0)
+        flux_div[np.isnan(div_xy) & np.isnan(div_rs)] = np.nan
+        
+        if remove_wind_div:
+            vcd = self['vcd']
+            div_wind_xy,div_wind_rs = F_divs(self['flux_e']/vcd,self['flux_n']/vcd,
+                                             self['flux_ne']/vcd,self['flux_nw']/vcd,
+                                             dy,dx_vec,dd_vec)
+            wind_div = np.nansum(np.array([div_wind_xy*w_xy,div_wind_rs*w_rs]),axis=0)*vcd
+            wind_div[np.isnan(div_wind_xy) & np.isnan(div_wind_rs)] = np.nan
+            flux_div -= wind_div
+        
+        self['flux_div'] = flux_div
+        if write_diagnostic:
+            self['div_xy'] = div_xy
+            self['div_rs'] = div_rs
+            if remove_wind_div:
+                self['wind_div'] = wind_div
+            self['w_xy'] = w_xy
+            self['w_rs'] = w_rs
+        
     def remesh(self,xgrid,ygrid,xmesh=None,ymesh=None):
         from scipy.interpolate import RegularGridInterpolator
         grid_sizex = np.median(np.diff(xgrid))
@@ -2667,6 +2760,57 @@ class popy(object):
             self.logger.info('boundary polygon provided, further filtering l2g pixels...')
             self.F_mask_l2g_with_boundary(boundary_polygon=boundary_polygon,center_only=False)
     
+    def F_calculate_horizontal_flux(self,x_wind_field,y_wind_field,
+                                    vcd_field=None,func_to_get_vcd=None,
+                                    **interp_met_kw):
+        '''add horizontal flux to l2g_data
+        x/y_wind_field:
+            key in l2g_data for east/north wind component, e.g., era5_u/v100
+        vcd_field:
+            key in l2g_data for column amount, if None, see below
+        func_to_get_vcd:
+            function that takes in l2g_data dictionary and output vcd
+        interp_met_kw:
+            if x/y_wind_field are not in l2g_data, call self.F_interp_met to get those fields
+        output:
+            'flux_e','flux_n','flux_ne','flux_nw' added to l2g_data
+        created on 2022/06/15
+        '''
+        # vcd should be in mol/m2
+        if vcd_field is None:
+            if func_to_get_vcd is None:
+                self.logger.warning('neither vcd_field nor a function to calculate vcd is provided. use column_amount')
+                vcd_field = 'column_amount'
+                vcd = self.l2g_data[vcd_field]
+            else:
+                vcd = func_to_get_vcd(self.l2g_data)
+        
+        # wind should be in m/s
+        if (x_wind_field not in self.l2g_data.keys()) or (y_wind_field not in self.l2g_data.keys()):
+            self.logger.info('x/y_wind_field is unavailable in l2g_data. try sampling from met data')
+            self.F_interp_met(**interp_met_kw)
+            
+        # flux to the east, mol/m/s
+        self.l2g_data['flux_e'] = vcd*self.l2g_data[x_wind_field]
+        # flux to the north, mol/m/s
+        self.l2g_data['flux_n'] = vcd*self.l2g_data[y_wind_field]
+        # http://persweb.wabash.edu/facstaff/footer/courses/m225/handouts/divgradcurl3.pdf, page 8
+        ne2e_angle = np.arctan(1/(np.cos(self.l2g_data['latc']/180*np.pi)))
+        ne2e_cos = np.cos(ne2e_angle)
+        ne2e_sin = np.sin(ne2e_angle)
+        # flux to the northeast, mol/m/s
+        self.l2g_data['flux_ne'] = vcd*(self.l2g_data[x_wind_field]*ne2e_cos+self.l2g_data[y_wind_field]*ne2e_sin)
+        # flux to the northwest, mol/m/s
+        self.l2g_data['flux_nw'] = vcd*(self.l2g_data[x_wind_field]*(-ne2e_cos)+self.l2g_data[y_wind_field]*ne2e_sin)
+        # add 'vcd' to the oversampling list if it is not column_amount, e.g., derived from xch4
+        if vcd_field != 'column_amount':
+            self.l2g_data['vcd'] = vcd
+            self.oversampling_list.append('vcd')
+        add_list = ['flux_e','flux_n','flux_ne','flux_nw','vcd']
+        for add_field in add_list:
+            if add_field not in self.oversampling_list:
+                self.oversampling_list.append(add_field)
+            
     def F_load_l3_mat(self,l3_filename,boundary_polygon=None):
         '''
         load l3 mat files to l3_data dictionary
@@ -2899,91 +3043,6 @@ class popy(object):
                     (1.,outp_he5['latc'].shape[1]+1),\
                     (outp_he5['latc'].shape[0],1)).astype(np.int16)
         return outp_he5
-    
-    def F_update_popy_with_control_file(self,control_path):
-        """ 
-        function to update self with parameters found in control.txt
-        control_path: absolution path to control.txt
-        updated on 2019/04/22
-        additional packages: 
-            yaml, conda install -c anaconda yaml
-        """
-        import yaml
-        with open(control_path,'r') as stream:
-            control = yaml.load(stream)
-        l2_list = control['Input Files']['OMHCHO']
-        l2_dir = control['Runtime Parameters']['Lv2Dir']
-        
-        maxsza = float(control['Runtime Parameters']['maxSZA'])
-        maxcf = float(control['Runtime Parameters']['maxCfr'])
-        west = float(control['Runtime Parameters']['minLon'])
-        east = float(control['Runtime Parameters']['maxLon'])
-        south = float(control['Runtime Parameters']['minLat'])
-        north = float(control['Runtime Parameters']['maxLat'])
-        grid_size = float(control['Runtime Parameters']['res'])
-        maxMDQF= int(control['Runtime Parameters']['maxMDQF'])
-        maxEXTQF= int(control['Runtime Parameters']['maxEXTQF'])
-        self.maxsza = maxsza
-        self.maxcf = maxcf
-        self.west = west
-        self.east = east
-        self.south = south
-        self.north = north
-        self.grid_size = grid_size
-        self.maxMDQF = maxMDQF
-        self.maxEXTQF = maxEXTQF
-        xgrid = np.arange(west,east,grid_size,dtype=np.float64)+grid_size/2
-        ygrid = np.arange(south,north,grid_size,dtype=np.float64)+grid_size/2
-        [xmesh,ymesh] = np.meshgrid(xgrid,ygrid)
-
-        xgridr = np.hstack((np.arange(west,east,grid_size),east))
-        ygridr = np.hstack((np.arange(south,north,grid_size),north))
-        [xmeshr,ymeshr] = np.meshgrid(xgridr,ygridr)
-
-        self.xgrid = xgrid
-        self.ygrid = ygrid
-        self.xmesh = xmesh
-        self.ymesh = ymesh
-        self.xgridr = xgridr
-        self.ygridr = ygridr
-        self.xmeshr = xmeshr
-        self.ymeshr = ymeshr
-        self.nrows = len(ygrid)
-        self.ncols = len(xgrid)
-        
-        start_python_datetime = datetime.datetime.strptime(
-                control['Runtime Parameters']['StartTime'],'%Y-%m-%dT%H:%M:%Sz')
-        end_python_datetime = datetime.datetime.strptime(
-                control['Runtime Parameters']['EndTime'],'%Y-%m-%dT%H:%M:%Sz')
-        self.start_python_datetime = start_python_datetime
-        self.end_python_datetime = end_python_datetime
-        
-        self.tstart = start_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
-        self.tend = end_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
-        # most of my data are saved in matlab format, where time is defined as UTC days since 0000, Jan 0
-        start_matlab_datenum = (start_python_datetime.toordinal()\
-                                +start_python_datetime.hour/24.\
-                                +start_python_datetime.minute/1440.\
-                                +start_python_datetime.second/86400.+366.)
-        
-        end_matlab_datenum = (end_python_datetime.toordinal()\
-                                +end_python_datetime.hour/24.\
-                                +end_python_datetime.minute/1440.\
-                                +end_python_datetime.second/86400.+366.)
-        self.start_matlab_datenum = start_matlab_datenum
-        self.end_matlab_datenum = end_matlab_datenum
-        self.l2_list = l2_list
-        self.l2_dir = l2_dir
-        self.logger.info('The following parameters from control.txt will overwrite intital popy values:')
-        self.logger.info('maxsza = '+'%s'%maxsza)
-        self.logger.info('maxcf  = '+'%s'%maxcf)
-        self.logger.info('west   = '+'%s'%west)
-        self.logger.info('east   = '+'%s'%east)
-        self.logger.info('south  = '+'%s'%south)
-        self.logger.info('north  = '+'%s'%north)
-        self.logger.info('tstart = '+self.tstart)
-        self.logger.info('tend   = '+self.tend)
-        self.logger.info('res    = '+'%s'%self.grid_size)
             
     def F_subset_OMHCHO(self,path):
         """ 
