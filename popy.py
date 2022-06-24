@@ -267,7 +267,7 @@ def F_wrapper_l3(instrum,product,grid_size,
     if 'flux_div' not in l3_data.keys() and do_flux:
         if flux_grid_size > grid_size:
             l3_data = l3_data.block_reduce(flux_grid_size)
-        l3_data.calculate_flux_divergence()
+        l3_data.calculate_flux_divergence(**o.calculate_flux_divergence_kw)
     if if_plot_l3 and hasattr(l3_data,'plot'):
         figout = l3_data.plot(existing_ax=existing_ax,**plot_kw)
     else:
@@ -1620,6 +1620,18 @@ def arange_(lower,upper,step,dtype=None):
         npnt += 1    
     return np.linspace(lower,upper_new,int(npnt),dtype=dtype)
 
+def F_center2edge(lon,lat):
+    '''
+    function to shut up complain of pcolormesh like 
+    MatplotlibDeprecationWarning: shading='flat' when X and Y have the same dimensions as C is deprecated since 3.3.
+    create grid edges from grid centers
+    '''
+    res=np.mean(np.diff(lon))
+    lonr = np.append(lon-res/2,lon[-1]+res/2)
+    res=np.mean(np.diff(lat))
+    latr = np.append(lat-res/2,lat[-1]+res/2)
+    return lonr,latr
+
 class Level3_Data(dict):
     '''
     rewrite l3_data into a class based on python dict. include functions
@@ -1676,7 +1688,8 @@ class Level3_Data(dict):
             self['lonmesh'] = lonmesh
             self['latmesh'] = latmesh
     
-    def calculate_flux_divergence(self,write_diagnostic=False,remove_wind_div=True):
+    def calculate_flux_divergence(self,write_diagnostic=False,remove_wind_div=True,
+                                  finite_difference_order=2):
         if self.proj is not None:
             self.logger.error('projection is not supported in flux divergence calculation yet')
             return
@@ -1699,12 +1712,26 @@ class Level3_Data(dict):
             div_rs = dfnedr+dfnwds
             return div_xy,div_rs        
         
-        # weight such that w_xy = 0 when wind is aligned with r,s and w_xy = 1 when wind is aligned with x,y
-        def F_w_xy(x,x0):
-            w_xy = 1-x/x0
-            mask = x>x0
-            w_xy[mask] = x[mask]/(np.pi/2-x0[mask])+x0[mask]/(x0[mask]-np.pi/2)
-            return w_xy
+        # 4th-order central finite difference
+        def F_divs_4(fe,fn,fne,fnw,dy,dx_vec,dd_vec):
+            dfedx = np.full_like(fe,np.nan)
+            dfedx[:,2:-2] = (-fe[:,4:]+8*fe[:,3:-1]-8*fe[:,1:-3]+fe[:,0:-4])/\
+            (12*np.broadcast_to(dx_vec[:,np.newaxis],fe[:,2:-2].shape))
+
+            dfndy = np.full_like(fn,np.nan)
+            dfndy[2:-2,] = (-fn[4:,]+8*fn[3:-1,]-8*fn[1:-3,]+fn[0:-4,])/(12*dy)
+
+            dfnedr = np.full_like(fne,np.nan)
+            dfnedr[2:-2,2:-2] = (-fne[4:,4:]+8*fne[3:-1,3:-1]-8*fne[1:-3,1:-3]+fne[0:-4,0:-4])/\
+            (12*np.broadcast_to(dd_vec[2:-2,np.newaxis],fne[2:-2,2:-2].shape))
+
+            dfnwds = np.full_like(fnw,np.nan)
+            dfnwds[2:-2,2:-2] = (-fnw[4:,0:-4]+8*fnw[3:-1,1:-3]-8*fnw[1:-3,3:-1]+fnw[0:-4,4:])/\
+            (12*np.broadcast_to(dd_vec[2:-2,np.newaxis],fnw[2:-2,2:-2].shape))
+
+            div_xy = dfedx+dfndy
+            div_rs = dfnedr+dfnwds
+            return div_xy,div_rs
         
         # y-grid size in m
         dy = 111e3*self.grid_size
@@ -1714,42 +1741,42 @@ class Level3_Data(dict):
         dd_vec = np.sqrt(np.square(dx_vec)+dy**2)
         
         div_xy,div_rs = F_divs(self['flux_e'],self['flux_n'],self['flux_ne'],self['flux_nw'],dy,dx_vec,dd_vec)
-        
-        wind2e_angle = np.arctan(np.abs(self['flux_e']/self['flux_n']))
-        ne2e_angle = np.arctan(1/(np.cos(self['ymesh']/180*np.pi)))
-        
-        w_xy = F_w_xy(wind2e_angle,ne2e_angle)
-        w_rs = 1.-w_xy
-        
-        w_xy[np.isnan(div_xy)] = 0.
-        w_rs[np.isnan(div_xy)] = 1.
 
-        w_xy[np.isnan(div_rs)] = 1.
-        w_rs[np.isnan(div_rs)] = 0.
-
-        flux_div = np.nansum(np.array([div_xy*w_xy,div_rs*w_rs]),axis=0)
+        if finite_difference_order == 4:
+            div_xy_4,div_rs_4 = F_divs_4(self['flux_e'],self['flux_n'],self['flux_ne'],self['flux_nw'],dy,dx_vec,dd_vec)
+            div_xy[~np.isnan(div_xy_4)] = div_xy_4[~np.isnan(div_xy_4)]
+            div_rs[~np.isnan(div_rs_4)] = div_rs_4[~np.isnan(div_rs_4)]
+        
+        flux_div = np.nanmean(np.array([div_xy,div_rs]),axis=0)
         flux_div[np.isnan(div_xy) & np.isnan(div_rs)] = np.nan
         
+        # calculate wind divergence
+        if 'vcd' not in self.keys():
+            vcd = self['column_amount']
+        else:
+            vcd = self['vcd']
+        div_wind_xy,div_wind_rs = F_divs(self['flux_e']/vcd,self['flux_n']/vcd,
+                                         self['flux_ne']/vcd,self['flux_nw']/vcd,
+                                         dy,dx_vec,dd_vec)
+        
+        if finite_difference_order == 4:
+            div_wind_xy_4,div_wind_rs_4 = F_divs_4(self['flux_e']/vcd,self['flux_n']/vcd,self['flux_ne']/vcd,self['flux_nw']/vcd,dy,dx_vec,dd_vec)
+            div_wind_xy[~np.isnan(div_wind_xy_4)] = div_wind_xy_4[~np.isnan(div_wind_xy_4)]
+            div_wind_rs[~np.isnan(div_wind_rs_4)] = div_wind_rs_4[~np.isnan(div_wind_rs_4)]
+        
+        wind_div = np.nanmean(np.array([div_wind_xy,div_wind_rs]),axis=0)*vcd
+        wind_div[np.isnan(div_wind_xy) & np.isnan(div_wind_rs)] = np.nan
+        
         if remove_wind_div:
-            if 'vcd' not in self.keys():
-                vcd = self['column_amount']
-            else:
-                vcd = self['vcd']
-            div_wind_xy,div_wind_rs = F_divs(self['flux_e']/vcd,self['flux_n']/vcd,
-                                             self['flux_ne']/vcd,self['flux_nw']/vcd,
-                                             dy,dx_vec,dd_vec)
-            wind_div = np.nansum(np.array([div_wind_xy*w_xy,div_wind_rs*w_rs]),axis=0)*vcd
-            wind_div[np.isnan(div_wind_xy) & np.isnan(div_wind_rs)] = np.nan
             flux_div -= wind_div
         
         self['flux_div'] = flux_div
         if write_diagnostic:
             self['div_xy'] = div_xy
             self['div_rs'] = div_rs
-            if remove_wind_div:
-                self['wind_div'] = wind_div
-            self['w_xy'] = w_xy
-            self['w_rs'] = w_rs
+            self['wind_div'] = wind_div
+            self['div_wind_xy'] = div_wind_xy
+            self['div_wind_rs'] = div_wind_rs
         
     def remesh(self,xgrid,ygrid,xmesh=None,ymesh=None):
         from scipy.interpolate import RegularGridInterpolator
@@ -2147,7 +2174,7 @@ class Level3_Data(dict):
         self.check()
         if new_grid_size <= self.grid_size:
             self.logger.warning('provide a grid size larger than {}!'.format(self.grid_size))
-            return
+            return self
         from skimage.measure import block_reduce
         reduce_factor = np.int(np.rint(new_grid_size/self.grid_size))
         if reduce_factor == 1:
@@ -2263,9 +2290,9 @@ class Level3_Data(dict):
         if 'num_samples' in self.keys():
             plotdata[self['num_samples']<layer_threshold] = np.nan
         if self.proj is None and 'lonmesh' not in self.keys():
-            pc = ax.pcolormesh(xgrid,ygrid,plotdata,
+            pc = ax.pcolormesh(*F_center2edge(xgrid,ygrid),plotdata,
                            alpha=kwargs['alpha'],cmap=kwargs['cmap'],
-                           vmin=kwargs['vmin'],vmax=kwargs['vmax'],shading='gouraud')
+                           vmin=kwargs['vmin'],vmax=kwargs['vmax'])
         else:
             pc = ax.pcolormesh(self['lonmesh'],self['latmesh'],plotdata,
                            alpha=kwargs['alpha'],cmap=kwargs['cmap'],
@@ -2283,6 +2310,7 @@ class Level3_Data(dict):
         fig_output['cb'] = cb
         fig_output['pc'] = pc
         return fig_output
+    
     def plot(self,plot_field=None,
              existing_ax=None,draw_admin_level=1,
              layer_threshold=0.5,draw_colorbar=True,
@@ -2345,8 +2373,8 @@ class Level3_Data(dict):
         if 'num_samples' in self.keys():
             plotdata[self['num_samples']<layer_threshold] = np.nan
         if self.proj is None and 'lonmesh' not in self.keys():
-            pc = ax.pcolormesh(xgrid,ygrid,plotdata,transform=ccrs.PlateCarree(),
-                           alpha=kwargs['alpha'],cmap=kwargs['cmap'],vmin=kwargs['vmin'],vmax=kwargs['vmax'],shading='auto')
+            pc = ax.pcolormesh(*F_center2edge(xgrid,ygrid),plotdata,transform=ccrs.PlateCarree(),
+                           alpha=kwargs['alpha'],cmap=kwargs['cmap'],vmin=kwargs['vmin'],vmax=kwargs['vmax'])
         else:
             pc = ax.pcolormesh(self['lonmesh'],self['latmesh'],plotdata,transform=ccrs.PlateCarree(),
                            alpha=kwargs['alpha'],cmap=kwargs['cmap'],vmin=kwargs['vmin'],vmax=kwargs['vmax'],shading='auto')    
@@ -2776,23 +2804,31 @@ class popy(object):
     def F_calculate_horizontal_flux(self,x_wind_field,y_wind_field,
                                     func_to_get_vcd=None,
                                     unique_layer_identifier=None,
-                                    **interp_met_kw):
+                                    interp_met_kw=None,
+                                    calculate_flux_divergence_kw=None):
         '''add horizontal flux to l2g_data
         x/y_wind_field:
             key in l2g_data for east/north wind component, e.g., era5_u/v100
         func_to_get_vcd:
             function that takes in l2g_data dictionary and output vcd
-        interp_met_kw:
-            if x/y_wind_field are not in l2g_data, call self.F_interp_met to get those fields
         unique_layer_identifier:
             name of l2g_data to identify unique layers for flux div calculation. l2g_data will be divided to a list
             if it exists in l2g_data. each element will be a dict with a unique value of unique_layer_identifier
+        interp_met_kw:
+            if x/y_wind_field are not in l2g_data, call self.F_interp_met to get those fields
+        calculate_flux_divergence_kw:
+            arguments to Level3_Data().calculate_flux_divergence
         output:
             'flux_e','flux_n','flux_ne','flux_nw' added to l2g_data
         created on 2022/06/15
         '''
         if unique_layer_identifier is None:
             self.logger.warning('make sure your l2 data are not overlapping too much, otherwise provide unique_layer_identifier')
+        
+        interp_met_kw = interp_met_kw or {}
+        calculate_flux_divergence_kw = calculate_flux_divergence_kw or {}
+        self.calculate_flux_divergence_kw = calculate_flux_divergence_kw
+        
         # vcd should be in mol/m2
         if func_to_get_vcd is None:
             self.logger.warning('the function to calculate vcd is not provided. use column_amount')
@@ -3674,6 +3710,7 @@ class popy(object):
                            '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/viewing_zenith_angle',\
                            '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_albedo_nitrogendioxide_window',\
                            '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_pressure',\
+                           '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_altitude',\
                            '/PRODUCT/latitude',\
                            '/PRODUCT/longitude',\
                            '/PRODUCT/qa_value',\
@@ -3683,7 +3720,7 @@ class popy(object):
         if not data_fields_l2g:
             # standardized variable names in l2g file. should map one-on-one to data_fields
             data_fields_l2g = ['cloud_fraction','latitude_bounds','longitude_bounds','SolarZenithAngle',\
-                               'vza','albedo','surface_pressure','latc','lonc','qa_value','time_utc',\
+                               'vza','albedo','surface_pressure','surface_altitude','latc','lonc','qa_value','time_utc',\
                                'column_amount','column_uncertainty']
         self.logger.info('Read, subset, and store level 2 data to l2g_data')
         l2g_data = {}
@@ -4351,31 +4388,20 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
-    def F_subset_S5PCO(self,path,s5p_product='*',geos_interp_variables=None,
-                        geos_time_collection=''):
+    def F_subset_S5PCO(self,l2_list=None,l2_path_pattern=None,
+                       path=None,data_fields=None,data_fields_l2g=None,
+                       s5p_product='*',geos_interp_variables=None,
+                       geos_time_collection=''):
         """ 
         function to subset tropomi co level 2 data, calling self.F_read_S5P_nc
-        path:
-            l2 data directory, or path to control file
-        s5p_product:
-            choose from RPRO and OFFL, default is combining all (RPRO, OFFL, Near real time)
-        geos_interp_variables:
-            a list of variables (only 2d fields are supported now) to be 
-            resampled from geos fp (has to be subsetted/resaved into .mat). see
-            the geos class for geos fp data handling
-        geos_time_collection:
-            choose from inst3, tavg1, tavg3
         created on 2019/08/12 based on F_subset_S5PNO2
+        updated on 2022/06/24
         """    
         geos_interp_variables = geos_interp_variables or []
 
         # find out list of l2 files to subset
-        if os.path.isfile(path):
-            self.F_update_popy_with_control_file(path)
-            l2_list = self.l2_list
-            l2_dir = self.l2_dir
-        else:
-            import glob
+        if path is not None:
+            self.logger.warning('please use l2_list or l2_path_pattern instead')
             l2_dir = path
             l2_list = []
             cwd = os.getcwd()
@@ -4390,6 +4416,24 @@ class popy(object):
             os.chdir(cwd)
             self.l2_dir = l2_dir
             self.l2_list = l2_list
+        else:
+            if l2_list is None and l2_path_pattern is None:
+                self.logger.error('either l2_list or l2_path_pattern has to be provided!')
+                return
+            if l2_list is not None and l2_path_pattern is not None:
+                self.logger.info('both l2_list and l2_path_pattern are provided. l2_path_pattern will be overwritten')
+                l2_path_pattern = None
+            
+            if l2_list is None:
+                l2_list = []
+                start_date = self.start_python_datetime.date()
+                end_date = self.end_python_datetime.date()
+                days = (end_date-start_date).days+1
+                DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+                for DATE in DATES:
+                    flist = glob.glob(DATE.strftime(l2_path_pattern))
+                    l2_list = l2_list+flist                 
+            self.l2_list = l2_list
         
         maxsza = self.maxsza
         #maxcf = self.maxcf
@@ -4399,25 +4443,28 @@ class popy(object):
         north = self.north
         min_qa_value = self.min_qa_value
         
-        # absolute path of useful variables in the nc file
-        data_fields = ['/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/scattering_optical_thickness_SWIR',\
-                       '/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/water_total_column',\
-                       '/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/height_scattering_layer',\
-               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds',\
-               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds',\
-               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/solar_zenith_angle',\
-               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/viewing_zenith_angle',\
-               '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_pressure',\
-               '/PRODUCT/latitude',\
-               '/PRODUCT/longitude',\
-               '/PRODUCT/qa_value',\
-               '/PRODUCT/time_utc',\
-               '/PRODUCT/carbonmonoxide_total_column',\
-               '/PRODUCT/carbonmonoxide_total_column_precision']    
-        # standardized variable names in l2g file. should map one-on-one to data_fields
-        data_fields_l2g = ['scattering_OD','colh2o','scattering_height','latitude_bounds','longitude_bounds','SolarZenithAngle',\
-                           'vza','surface_pressure','latc','lonc','qa_value','time_utc',\
-                           'column_amount','column_uncertainty']
+        if not data_fields:
+            # absolute path of useful variables in the nc file
+            data_fields = ['/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/scattering_optical_thickness_SWIR',\
+                           '/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/water_total_column',\
+                           '/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/height_scattering_layer',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/solar_zenith_angle',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/viewing_zenith_angle',\
+                           '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_pressure',\
+                           '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_altitude',\
+                           '/PRODUCT/latitude',\
+                           '/PRODUCT/longitude',\
+                           '/PRODUCT/qa_value',\
+                           '/PRODUCT/time_utc',\
+                           '/PRODUCT/carbonmonoxide_total_column',\
+                           '/PRODUCT/carbonmonoxide_total_column_precision']    
+        if not data_fields_l2g:
+            # standardized variable names in l2g file. should map one-on-one to data_fields
+            data_fields_l2g = ['scattering_OD','colh2o','scattering_height','latitude_bounds','longitude_bounds','SolarZenithAngle',\
+                               'vza','surface_pressure','surface_altitude','latc','lonc','qa_value','time_utc',\
+                               'column_amount','column_uncertainty']
         self.logger.info('Read, subset, and store level 2 data to l2g_data')
         self.logger.info('Level 2 data are located at '+l2_dir)
         l2g_data = {}
@@ -4428,8 +4475,7 @@ class popy(object):
                 outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
             except Exception as e:
                 self.logger.warning(fn+' gives error:');
-                print(e)
-                input("Press Enter to continue...")
+                self.logger.warning(e)
                 continue
             if geos_interp_variables != []:
                 sounding_interp = F_interp_geos_mat(outp_nc['lonc'],outp_nc['latc'],outp_nc['UTC_matlab_datenum'],\
@@ -6116,7 +6162,7 @@ class popy(object):
             l3_object = Level3_Data(proj=self.proj,grid_size=self.flux_grid_size)
             for l2g in l2g_data:
                 l3_orbit = self.F_parallel_regrid(l2g,block_length,ncores).block_reduce(self.flux_grid_size)
-                l3_orbit.calculate_flux_divergence()
+                l3_orbit.calculate_flux_divergence(**self.calculate_flux_divergence_kw)
                 l3_object = l3_object.merge(l3_orbit)
             l3_object.check()
             return l3_object
@@ -7129,6 +7175,9 @@ class popy(object):
             only useful for geos fp. see F_interp_geos_mat
         created on 2020/03/04
         """
+        if self.nl2 == 0:
+            self.logger.warning('no l2 data to sample met')
+            return
         sounding_lon = self.l2g_data['lonc']
         sounding_lat = self.l2g_data['latc']
         sounding_datenum = self.l2g_data['UTC_matlab_datenum']
