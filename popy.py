@@ -327,6 +327,8 @@ def F_download_gesdisc_l2(txt_fn,
                 break
             try:
                 tmp = re.findall(re_pattern,l)
+                if len(tmp) == 0:
+                    continue
                 orbit_start_dt = dt.datetime.strptime(tmp[orbit_start_dt_idx],dt_pattern)
                 if orbit_end_dt_idx is not None:
                     orbit_end_dt = dt.datetime.strptime(tmp[orbit_end_dt_idx],dt_pattern)
@@ -913,7 +915,7 @@ def F_interp_hrrr_mat(sounding_lon,sounding_lat,sounding_datenum,
     days = (end_datetime-start_datetime).days+1
     DATES = [start_datetime + datetime.timedelta(days=d) for d in range(days)]
     hrrr_data = {}
-    iday = 0
+    
     for date in DATES:
         flist = glob.glob(date.strftime(file_pattern))
         if len(flist) == 0:
@@ -927,21 +929,19 @@ def F_interp_hrrr_mat(sounding_lon,sounding_lat,sounding_datenum,
             d = loadmat(fn,squeeze_me=True)
             hrrr_data['x'] = d['x']
             hrrr_data['y'] = d['y']
-            # how many hours are there in each daily file? have to be the same 
-            nhour = len(d['datetime'])
-            hrrr_data['datenum'] = np.zeros((nhour*(days)),dtype=np.float64)
-            hrrr_data['datenum'][iday*nhour:((iday+1)*nhour)] = d['datetime']
+            
+            hrrr_data['datenum'] = d['datenum']
             for field in interp_fields:
-                hrrr_data[field] = np.zeros((len(hrrr_data['x']),len(hrrr_data['y']),nhour*(days)))
                 # was read in as 3-d array in time, y, x; transpose to x, y, time
-                hrrr_data[field][...,iday*nhour:((iday+1)*nhour)] = d[field].transpose((2,1,0))
+                hrrr_data[field] = d[field].transpose((2,1,0))
+                
         else:
             d = loadmat(fn,squeeze_me=True)
-            hrrr_data['datenum'][iday*nhour:((iday+1)*nhour)] = d['datetime']
+            hrrr_data['datenum'] = np.append(hrrr_data['datenum'],d['datenum'])
             for field in interp_fields:
                 # was read in as 3-d array in time, y, x; transpose to x, y, time
-                hrrr_data[field][...,iday*nhour:((iday+1)*nhour)] = d[field].transpose((2,1,0))
-        iday += 1
+                hrrr_data[field] = np.append(hrrr_data[field],d[field].transpose((2,1,0)),axis=2)
+        
         
     sounding_interp = {}
     if not hrrr_data:
@@ -1688,7 +1688,7 @@ class Level3_Data(dict):
             self['lonmesh'] = lonmesh
             self['latmesh'] = latmesh
     
-    def calculate_flux_divergence(self,write_diagnostic=False,remove_wind_div=True,
+    def calculate_flux_divergence(self,write_diagnostic=False,remove_wind_div=False,
                                   finite_difference_order=2):
         if self.proj is not None:
             self.logger.error('projection is not supported in flux divergence calculation yet')
@@ -1770,11 +1770,27 @@ class Level3_Data(dict):
         if remove_wind_div:
             flux_div -= wind_div
         
+        # calculate terrain gradient dot wind term
+        if 'surface_altitude' in self.keys():
+            z0 = self['surface_altitude']
+        elif 'terrain_height' in self.keys():
+            z0 = self['terrain_height']
+        else:
+            self.logger.info('no surface altitude found, no wind dot terrain gradient calculation')
+            z0 = None
+        if z0 is not None:
+            dz0dx = np.full_like(z0,np.nan)
+            dz0dx[:,1:-1] = (z0[:,2:]-z0[:,0:-2])/(2*np.broadcast_to(dx_vec[:,np.newaxis],z0[:,1:-1].shape))
+
+            dz0dy = np.full_like(z0,np.nan)
+            dz0dy[1:-1,] = (z0[2:,]-z0[0:-2,])/(2*dy)
+            self['uv_dot_gradz0'] = dz0dx*self['flux_e']/vcd + dz0dy*self['flux_n']/vcd
+            
         self['flux_div'] = flux_div
+        self['wind_div'] = wind_div
         if write_diagnostic:
             self['div_xy'] = div_xy
             self['div_rs'] = div_rs
-            self['wind_div'] = wind_div
             self['div_wind_xy'] = div_wind_xy
             self['div_wind_rs'] = div_wind_rs
         
@@ -2551,19 +2567,19 @@ class popy(object):
             elif product in ['NO2']:
                 self.default_subset_function = 'F_subset_S5PNO2'
                 oversampling_list = ['column_amount','albedo',\
-                                     'cloud_fraction']
+                                     'surface_altitude']
             elif product in ['SO2']:
                 self.default_subset_function = 'F_subset_S5PSO2'
                 oversampling_list = ['column_amount','albedo',\
-                                     'cloud_fraction']
+                                     'surface_altitude']
             elif product in ['CO']:
                 self.default_subset_function = 'F_subset_S5PCO'
                 oversampling_list = ['column_amount','albedo',\
-                                     'cloud_fraction']
+                                     'surface_altitude']
             elif product in ['HCHO']:
                 self.default_subset_function = 'F_subset_S5PHCHO'
                 oversampling_list = ['column_amount','albedo',\
-                                     'cloud_fraction']
+                                     'surface_altitude']
             xmargin = 1.5
             ymargin = 1.5
             maxsza = 70
@@ -2810,7 +2826,8 @@ class popy(object):
         x/y_wind_field:
             key in l2g_data for east/north wind component, e.g., era5_u/v100
         func_to_get_vcd:
-            function that takes in l2g_data dictionary and output vcd
+            function that takes in l2g_data dictionary and output a new l2g_data dictionary (useful to hack l2g_data),
+            or the vcd array
         unique_layer_identifier:
             name of l2g_data to identify unique layers for flux div calculation. l2g_data will be divided to a list
             if it exists in l2g_data. each element will be a dict with a unique value of unique_layer_identifier
@@ -2834,7 +2851,17 @@ class popy(object):
             self.logger.warning('the function to calculate vcd is not provided. use column_amount')
             vcd = self.l2g_data['column_amount']
         else:
-            vcd = func_to_get_vcd(self.l2g_data)
+            tmp = func_to_get_vcd(self.l2g_data)
+            if isinstance(tmp,dict):
+                # self.l2g_data will be replaced by the output of func_to_get_vcd
+                self.l2g_data = func_to_get_vcd(self.l2g_data)
+                # preferably use the vcd field
+                if 'vcd' in self.l2g_data.keys():
+                    vcd = self.l2g_data['vcd']
+                else:
+                    vcd = self.l2g_data['column_amount']
+            else:
+                vcd = func_to_get_vcd(self.l2g_data)
         
         # wind should be in m/s
         if (x_wind_field not in self.l2g_data.keys()) or (y_wind_field not in self.l2g_data.keys()):
@@ -4192,7 +4219,9 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
 
-    def F_subset_S5PCH4(self,path,if_trop_xch4=False,s5p_product='*',
+    def F_subset_S5PCH4(self,l2_list=None,l2_path_pattern=None,
+                        path=None,data_fields=None,data_fields_l2g=None,
+                        if_trop_xch4=False,s5p_product='*',
                         merra2_interp_variables=None,
                         merra2_dir='./',
                         geos_interp_variables=None,geos_time_collection=''):
@@ -4200,8 +4229,17 @@ class popy(object):
         function to subset tropomi ch4 level 2 data, calling self.F_read_S5P_nc
         path: directory containing S5PCH4 level 2 files, OR path to control.txt
         for methane, many of auxiliary data are not saved as I trust qa_value
+        l2_list:
+            a list of level 2 file paths. If provided, l2_path_pattern will be ignored.
+        l2_path_pattern:
+            a format string indicating the path structure of level 2 data. e.g.,
+            r'C:/data/*O2-CH4_%Y%m%dT*CO2proxy.nc' 
         path:
             l2 data directory, or path to control file
+        data_fields:
+            a list of strings indicating which fields in the l2 file to keep
+        data_fields_l2g:
+            shortened data_fields used in the output dictionary l2g_data
         if_trop_xch4:
             if calculate tropospheric xch4
         s5p_product:
@@ -4219,16 +4257,14 @@ class popy(object):
         updated on 2019/05/08
         updated from 2019/05/24 to add tropospheric xch4
         updated on 2019/06/20 to include more interpolation options from geos fp
+        updated on 2022/06/26 to match other s5p functions
         """      
         from scipy.interpolate import interp1d
         merra2_interp_variables = merra2_interp_variables or ['TROPPT','PS','U50M','V50M']
         geos_interp_variables = geos_interp_variables or []
         # find out list of l2 files to subset
-        if os.path.isfile(path):
-            self.F_update_popy_with_control_file(path)
-            l2_list = self.l2_list
-            l2_dir = self.l2_dir
-        else:
+        if path is not None:
+            self.logger.warning('please use l2_list or l2_path_pattern instead')
             import glob
             l2_dir = path
             l2_list = []
@@ -4241,9 +4277,27 @@ class popy(object):
             for DATE in DATES:
                 flist = glob.glob('S5P_'+s5p_product+'_L2__CH4____'+DATE.strftime("%Y%m%d")+'T*.nc')
                 l2_list = l2_list+flist
-            
             os.chdir(cwd)
             self.l2_dir = l2_dir
+            self.l2_list = l2_list
+        else:
+            if l2_list is None and l2_path_pattern is None:
+                self.logger.error('either l2_list or l2_path_pattern has to be provided!')
+                return
+            if l2_list is not None and l2_path_pattern is not None:
+                self.logger.info('both l2_list and l2_path_pattern are provided. l2_path_pattern will be overwritten')
+                l2_path_pattern = None
+            
+            if l2_list is None:
+                import glob
+                l2_list = []
+                start_date = self.start_python_datetime.date()
+                end_date = self.end_python_datetime.date()
+                days = (end_date-start_date).days+1
+                DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+                for DATE in DATES:
+                    flist = glob.glob(DATE.strftime(l2_path_pattern))
+                    l2_list = l2_list+flist                 
             self.l2_list = l2_list
         
         #maxsza = self.maxsza 
@@ -4254,23 +4308,28 @@ class popy(object):
         north = self.north
         min_qa_value = self.min_qa_value
         
-        # absolute path of useful variables in the nc file
-        data_fields = ['/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds',\
-               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds',\
-               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/solar_zenith_angle',\
-               '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/viewing_zenith_angle',\
-               '/PRODUCT/latitude',\
-               '/PRODUCT/longitude',\
-               '/PRODUCT/qa_value',\
-               '/PRODUCT/time',\
-               '/PRODUCT/delta_time',\
-               '/PRODUCT/methane_mixing_ratio',\
-               '/PRODUCT/methane_mixing_ratio_bias_corrected',\
-               '/PRODUCT/methane_mixing_ratio_precision']    
-        # standardized variable names in l2g file. should map one-on-one to data_fields
-        data_fields_l2g = ['latitude_bounds','longitude_bounds','SolarZenithAngle',\
-                           'vza','latc','lonc','qa_value','time','delta_time',\
-                           'XCH4_no_bias_correction','XCH4','column_uncertainty']
+        if not data_fields:
+            # absolute path of useful variables in the nc file
+            data_fields = ['/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/solar_zenith_angle',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/viewing_zenith_angle',\
+                           '/PRODUCT/latitude',\
+                           '/PRODUCT/longitude',\
+                           '/PRODUCT/qa_value',\
+                           '/PRODUCT/time',\
+                           '/PRODUCT/delta_time',\
+                           '/PRODUCT/methane_mixing_ratio',\
+                           '/PRODUCT/methane_mixing_ratio_bias_corrected',\
+                           '/PRODUCT/methane_mixing_ratio_precision',
+                          '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_pressure',\
+                          '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_altitude']    
+        if not data_fields_l2g:
+            # standardized variable names in l2g file. should map one-on-one to data_fields
+            data_fields_l2g = ['latitude_bounds','longitude_bounds','SolarZenithAngle',\
+                               'vza','latc','lonc','qa_value','time','delta_time',\
+                               'XCH4_no_bias_correction','XCH4','column_uncertainty',
+                              'surface_pressure','surface_altitude']
         if if_trop_xch4:
              # absolute path of useful variables in the nc file
              data_fields = ['/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds',\
@@ -4298,17 +4357,16 @@ class popy(object):
                                 'XCH4_no_bias_correction','XCH4','column_uncertainty',\
                                 'albedo','surface_altitude']
         self.logger.info('Read, subset, and store level 2 data to l2g_data')
-        self.logger.info('Level 2 data are located at '+l2_dir)
+        
         l2g_data = {}
         for fn in l2_list:
-            fn_path = os.path.join(l2_dir,fn)
-            self.logger.info('Loading '+fn)
+            self.logger.info('Loading '+os.path.split(fn)[-1])
+            
             try:
-                outp_nc = self.F_read_S5P_nc(fn_path,data_fields,data_fields_l2g)
+                outp_nc = self.F_read_S5P_nc(fn,data_fields,data_fields_l2g)
             except Exception as e:
-                self.logger.warning(fn+' gives error:');
-                print(e)
-                input("Press Enter to continue...")
+                self.logger.warning(fn+' gives error:')
+                self.logger.warning(e)
                 continue
             
 #            if if_trop_xch4:
@@ -4466,13 +4524,12 @@ class popy(object):
                                'vza','surface_pressure','surface_altitude','latc','lonc','qa_value','time_utc',\
                                'column_amount','column_uncertainty']
         self.logger.info('Read, subset, and store level 2 data to l2g_data')
-        self.logger.info('Level 2 data are located at '+l2_dir)
+        
         l2g_data = {}
         for fn in l2_list:
-            fn_dir = os.path.join(l2_dir,fn)
-            self.logger.info('Loading '+fn)
+            self.logger.info('Loading '+os.path.split(fn)[-1])
             try:
-                outp_nc = self.F_read_S5P_nc(fn_dir,data_fields,data_fields_l2g)
+                outp_nc = self.F_read_S5P_nc(fn,data_fields,data_fields_l2g)
             except Exception as e:
                 self.logger.warning(fn+' gives error:');
                 self.logger.warning(e)
