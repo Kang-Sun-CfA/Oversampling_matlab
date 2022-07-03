@@ -1689,7 +1689,7 @@ class Level3_Data(dict):
             self['latmesh'] = latmesh
     
     def calculate_flux_divergence(self,write_diagnostic=False,remove_wind_div=False,
-                                  finite_difference_order=2):
+                                  finite_difference_order=2,calculate_wind_albedo=False):
         if self.proj is not None:
             self.logger.error('projection is not supported in flux divergence calculation yet')
             return
@@ -1770,13 +1770,39 @@ class Level3_Data(dict):
         if remove_wind_div:
             flux_div -= wind_div
         
-        # calculate terrain gradient dot wind term
+        # calculate wind-albedo term
+        if calculate_wind_albedo and 'albedo' in self.keys():
+            a0 = self['albedo']
+            
+            da0dx = np.full_like(a0,np.nan)
+            da0dx[:,1:-1] = (a0[:,2:]-a0[:,0:-2])/(2*np.broadcast_to(dx_vec[:,np.newaxis],a0[:,1:-1].shape))
+
+            da0dy = np.full_like(a0,np.nan)
+            da0dy[1:-1,] = (a0[2:,]-a0[0:-2,])/(2*dy)
+            wind_albedo_xy = da0dx*self['flux_e']/vcd + da0dy*self['flux_n']/vcd
+            
+            da0dr = np.full_like(a0,np.nan)
+            da0dr[1:-1,1:-1] = (a0[2:,2:]-a0[0:-2,0:-2])/(2*np.broadcast_to(dd_vec[1:-1,np.newaxis],a0[1:-1,1:-1].shape))
+
+            da0ds = np.full_like(a0,np.nan)
+            da0ds[1:-1,1:-1] = (a0[2:,0:-2]-a0[0:-2,2:])/(2*np.broadcast_to(dd_vec[1:-1,np.newaxis],a0[1:-1,1:-1].shape))
+            
+            ne2e_angle = np.arctan(1/(np.cos(self['ygrid']/180*np.pi)))
+            r_dot_s = np.broadcast_to(np.cos(np.pi-2*ne2e_angle)[:,np.newaxis],a0.shape)
+            wind_albedo_rs = da0dr*self['flux_ne']/vcd + da0ds*self['flux_nw']/vcd \
+            + r_dot_s*(da0dr*self['flux_nw']/vcd + da0ds*self['flux_ne']/vcd)
+            
+            wind_albedo = np.nanmean(np.array([wind_albedo_xy,wind_albedo_rs]),axis=0)
+            wind_albedo[np.isnan(wind_albedo_xy) & np.isnan(wind_albedo_rs)] = np.nan
+            self['wind_albedo'] = wind_albedo
+            
+        # calculate wind-topography term
         if 'surface_altitude' in self.keys():
             z0 = self['surface_altitude']
         elif 'terrain_height' in self.keys():
             z0 = self['terrain_height']
         else:
-            self.logger.info('no surface altitude found, no wind dot terrain gradient calculation')
+            self.logger.info('no surface altitude found, no wind-topography calculation')
             z0 = None
         if z0 is not None:
             dz0dx = np.full_like(z0,np.nan)
@@ -1784,15 +1810,36 @@ class Level3_Data(dict):
 
             dz0dy = np.full_like(z0,np.nan)
             dz0dy[1:-1,] = (z0[2:,]-z0[0:-2,])/(2*dy)
-            self['uv_dot_gradz0'] = dz0dx*self['flux_e']/vcd + dz0dy*self['flux_n']/vcd
+            wind_topo_xy = dz0dx*self['flux_e'] + dz0dy*self['flux_n']
+            
+            dz0dr = np.full_like(z0,np.nan)
+            dz0dr[1:-1,1:-1] = (z0[2:,2:]-z0[0:-2,0:-2])/(2*np.broadcast_to(dd_vec[1:-1,np.newaxis],z0[1:-1,1:-1].shape))
+
+            dz0ds = np.full_like(z0,np.nan)
+            dz0ds[1:-1,1:-1] = (z0[2:,0:-2]-z0[0:-2,2:])/(2*np.broadcast_to(dd_vec[1:-1,np.newaxis],z0[1:-1,1:-1].shape))
+            
+            ne2e_angle = np.arctan(1/(np.cos(self['ygrid']/180*np.pi)))
+            r_dot_s = np.broadcast_to(np.cos(np.pi-2*ne2e_angle)[:,np.newaxis],z0.shape)
+            wind_topo_rs = dz0dr*self['flux_ne'] + dz0ds*self['flux_nw'] \
+            + r_dot_s*(dz0dr*self['flux_nw'] + dz0ds*self['flux_ne'])
+            
+            wind_topo = np.nanmean(np.array([wind_topo_xy,wind_topo_rs]),axis=0)
+            wind_topo[np.isnan(wind_topo_xy) & np.isnan(wind_topo_rs)] = np.nan
+        else:
+            wind_topo = np.nan*flux_div
+            wind_topo_xy = np.nan*flux_div
+            wind_topo_rs = np.nan*flux_div
             
         self['flux_div'] = flux_div
         self['wind_div'] = wind_div
+        self['wind_topo'] = wind_topo
         if write_diagnostic:
             self['div_xy'] = div_xy
             self['div_rs'] = div_rs
             self['div_wind_xy'] = div_wind_xy
             self['div_wind_rs'] = div_wind_rs
+            self['wind_topo_xy'] = wind_topo_xy
+            self['wind_topo_rs'] = wind_topo_rs
         
     def remesh(self,xgrid,ygrid,xmesh=None,ymesh=None):
         from scipy.interpolate import RegularGridInterpolator
@@ -2561,9 +2608,10 @@ class popy(object):
                 oversampling_list = ['AI']
                 self.default_subset_function = 'F_subset_S5PAI'
             elif product in ['CH4']:
-                oversampling_list = ['XCH4','xch4']
+                oversampling_list = ['XCH4','albedo',\
+                                     'surface_altitude']
                 self.default_subset_function = 'F_subset_S5PCH4'
-                self.default_column_unit = 'mol/mol'
+                self.default_column_unit = 'nmol/mol'
             elif product in ['NO2']:
                 self.default_subset_function = 'F_subset_S5PNO2'
                 oversampling_list = ['column_amount','albedo',\
@@ -4322,14 +4370,16 @@ class popy(object):
                            '/PRODUCT/methane_mixing_ratio',\
                            '/PRODUCT/methane_mixing_ratio_bias_corrected',\
                            '/PRODUCT/methane_mixing_ratio_precision',
-                          '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_pressure',\
-                          '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_altitude']    
+                           '/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/water_total_column',
+                           '/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/surface_albedo_SWIR',
+                           '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_pressure',\
+                           '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_altitude']    
         if not data_fields_l2g:
             # standardized variable names in l2g file. should map one-on-one to data_fields
             data_fields_l2g = ['latitude_bounds','longitude_bounds','SolarZenithAngle',\
                                'vza','latc','lonc','qa_value','time','delta_time',\
                                'XCH4_no_bias_correction','XCH4','column_uncertainty',
-                              'surface_pressure','surface_altitude']
+                              'colh2o','albedo','surface_pressure','surface_altitude']
         if if_trop_xch4:
              # absolute path of useful variables in the nc file
              data_fields = ['/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds',\
