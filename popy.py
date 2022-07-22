@@ -49,7 +49,7 @@ def F_wrapper_l3(instrum,product,grid_size,
                  proj=None,
                  nudge_grid_origin=None,
                  k1=None,k2=None,k3=None,inflatex=None,inflatey=None,
-                 flux_kw=None,flux_grid_size=None):
+                 flux_kw=None,gradient_kw=None,flux_grid_size=None):
     '''
     instrum:
         instrument name
@@ -94,6 +94,8 @@ def F_wrapper_l3(instrum,product,grid_size,
         options to inflate level2 pixels across (x) and along (y) track
     flux_kw:
         arguments input to F_calculate_horizontal_flux function, will trigger flux calculation
+    gradient_kw:
+        arguments input to F_prepare_gradient function, will trigger flux calculation. it is preferred over flux_kw
     flux_grid_size:
         grid size on which to calculate flux divergence, should be >~ 1 l2 pixel size
     output:
@@ -103,11 +105,23 @@ def F_wrapper_l3(instrum,product,grid_size,
     subset_kw = subset_kw or {}
     plot_kw = plot_kw or {}
     if flux_kw is not None:
-        logging.info('flux calculation is enabled using wind fields {} and {}'.format(flux_kw['x_wind_field'],flux_kw['y_wind_field']))
+        logging.info('divergence-based flux calculation is enabled using wind fields {} and {}'.format(flux_kw['x_wind_field'],flux_kw['y_wind_field']))
         do_flux = True
+        do_div = True
         flux_grid_size = flux_grid_size or grid_size
     else:
+        do_div = False
+    if gradient_kw is not None:
+        logging.info('gradient-based flux calculation is enabled using wind fields {} and {}'.format(gradient_kw['x_wind_field'],gradient_kw['y_wind_field']))
+        do_flux = True
+        do_grad = True
+        flux_grid_size = flux_grid_size or grid_size
+    else:
+        do_grad = False
+    if flux_kw is None and gradient_kw is None:
         do_flux = False
+        do_div = False
+        do_grad = False
     
     if nudge_grid_origin is not None:
         step_grid_size = nudge_grid_origin*grid_size
@@ -187,8 +201,10 @@ def F_wrapper_l3(instrum,product,grid_size,
                 subset_kw['l2_list'] = l2_list
             
             getattr(o, subset_function)(**subset_kw)
-            if do_flux:
+            if do_div:
                 o.F_calculate_horizontal_flux(**flux_kw)
+            if do_grad:
+                o.F_prepare_gradient(**gradient_kw)
             # xch4 or xco2 products
             x_set = set(o.oversampling_list).intersection({'xch4','XCH4','XCO2','xco2'})
             if len(x_set)>0:
@@ -229,8 +245,10 @@ def F_wrapper_l3(instrum,product,grid_size,
                         logging.warning(l2g_path+' does not exist!')
                         continue
                     o.F_mat_reader(l2g_path)
-                    if do_flux:
+                    if do_div:
                         o.F_calculate_horizontal_flux(**flux_kw)
+                    if do_grad:
+                        o.F_prepare_gradient(**gradient_kw)
                     #kludge for CrIS
                     if instrum == 'CrIS':
                         mask = (o.l2g_data['column_amount'] > 0) & (o.l2g_data['column_uncertainty'] > 0)
@@ -264,10 +282,14 @@ def F_wrapper_l3(instrum,product,grid_size,
         l3_data = l3_data.merge(l3_data0)
     if hasattr(l3_data,'check'):
         l3_data.check()
-    if 'flux_div' not in l3_data.keys() and do_flux:
+    if 'flux_div' not in l3_data.keys() and do_div:
         if flux_grid_size > grid_size:
             l3_data = l3_data.block_reduce(flux_grid_size)
         l3_data.calculate_flux_divergence(**o.calculate_flux_divergence_kw)
+    if 'wind_column' not in l3_data.keys() and do_grad:
+        if flux_grid_size > grid_size:
+            l3_data = l3_data.block_reduce(flux_grid_size)
+        l3_data.calculate_gradient(**o.calculate_gradient_kw)
     if if_plot_l3 and hasattr(l3_data,'plot'):
         figout = l3_data.plot(existing_ax=existing_ax,**plot_kw)
     else:
@@ -1688,6 +1710,94 @@ class Level3_Data(dict):
             self['lonmesh'] = lonmesh
             self['latmesh'] = latmesh
     
+    def calculate_gradient(self,write_diagnostic=False,finite_difference_order=2,albedo_orders=None):
+        if self.proj is not None:
+            self.logger.error('projection is not supported in flux divergence calculation yet')
+            return
+        def F_grads(c,dy,dx_vec,dd_vec,finite_difference_order):
+            '''calculate gradient of scalar c in x, y, r, s directions
+            '''
+            dcdx = np.full_like(c,np.nan)
+            dcdy = np.full_like(c,np.nan)
+            dcdr = np.full_like(c,np.nan)
+            dcds = np.full_like(c,np.nan)
+            if finite_difference_order == 2:
+                dcdx[:,1:-1] = (c[:,2:]-c[:,0:-2])/(2*np.broadcast_to(dx_vec[:,np.newaxis],c[:,1:-1].shape))
+                dcdy[1:-1,] = (c[2:,]-c[0:-2,])/(2*dy)
+                dcdr[1:-1,1:-1] = (c[2:,2:]-c[0:-2,0:-2])/(2*np.broadcast_to(dd_vec[1:-1,np.newaxis],c[1:-1,1:-1].shape))
+                dcds[1:-1,1:-1] = (c[2:,0:-2]-c[0:-2,2:])/(2*np.broadcast_to(dd_vec[1:-1,np.newaxis],c[1:-1,1:-1].shape))
+            elif finite_difference_order == 4:
+                dcdx[:,2:-2] = (-c[:,4:]+8*c[:,3:-1]-8*c[:,1:-3]+c[:,0:-4])/\
+                (12*np.broadcast_to(dx_vec[:,np.newaxis],c[:,2:-2].shape))
+                dcdy[2:-2,] = (-c[4:,]+8*c[3:-1,]-8*c[1:-3,]+c[0:-4,])/(12*dy)
+                dcdr[2:-2,2:-2] = (-c[4:,4:]+8*c[3:-1,3:-1]-8*c[1:-3,1:-3]+c[0:-4,0:-4])/\
+                (12*np.broadcast_to(dd_vec[2:-2,np.newaxis],c[2:-2,2:-2].shape))
+                dcds[2:-2,2:-2] = (-c[4:,0:-4]+8*c[3:-1,1:-3]-8*c[1:-3,3:-1]+c[0:-4,4:])/\
+                (12*np.broadcast_to(dd_vec[2:-2,np.newaxis],c[2:-2,2:-2].shape))
+            return dcdx,dcdy,dcdr,dcds
+        
+        # y-grid size in m
+        dy = 111e3*self.grid_size
+        # x-grid size in m
+        dx_vec = np.cos(self['ygrid']/180*np.pi)*111e3*self.grid_size
+        # diagonal grid points distance in m
+        dd_vec = np.sqrt(np.square(dx_vec)+dy**2)
+        
+        if 'vcd' not in self.keys():
+            vcd = self['column_amount']
+        else:
+            vcd = self['vcd']
+        
+        ne2e_angle = np.arctan(1/(np.cos(self['ygrid']/180*np.pi)))
+        r_dot_s = np.broadcast_to(np.cos(np.pi-2*ne2e_angle)[:,np.newaxis],vcd.shape)
+        
+        ### grad(vcd) dot wind
+        dcdx,dcdy,dcdr,dcds = F_grads(vcd,dy,dx_vec,dd_vec,finite_difference_order)
+        wind_column_xy = dcdx*self['wind_e'] + dcdy*self['wind_n']
+        wind_column_rs = dcdr*self['wind_ne'] + dcds*self['wind_nw'] \
+            + r_dot_s*(dcdr*self['wind_nw'] + dcds*self['wind_ne'])
+        wind_column = np.nanmean(np.array([wind_column_xy,wind_column_rs]),axis=0)
+        wind_column[np.isnan(wind_column_xy) & np.isnan(wind_column_rs)] = np.nan
+        self['wind_column'] = wind_column
+        if write_diagnostic:
+            self['wind_column_xy'] = wind_column_xy
+            self['wind_column_rs'] = wind_column_rs
+        
+        ### vcd * (grad(z0) dot wind)
+        # calculate wind-topography term
+        if 'surface_altitude' in self.keys():
+            z0 = self['surface_altitude']
+        elif 'terrain_height' in self.keys():
+            z0 = self['terrain_height']
+        else:
+            self.logger.warning('no surface altitude found, no wind-topography calculation')
+            z0 = None
+        if z0 is not None:
+            dcdx,dcdy,dcdr,dcds = F_grads(z0,dy,dx_vec,dd_vec,finite_difference_order)
+            wind_topo_xy = vcd*(dcdx*self['wind_e'] + dcdy*self['wind_n'])
+            wind_topo_rs = vcd*(dcdr*self['wind_ne'] + dcds*self['wind_nw'] \
+                + r_dot_s*(dcdr*self['wind_nw'] + dcds*self['wind_ne']))
+            wind_topo = np.nanmean(np.array([wind_topo_xy,wind_topo_rs]),axis=0)
+            wind_topo[np.isnan(wind_topo_xy) & np.isnan(wind_topo_rs)] = np.nan
+            self['wind_topo'] = wind_topo
+            if write_diagnostic:
+                self['wind_topo_xy'] = wind_topo_xy
+                self['wind_topo_rs'] = wind_topo_rs
+        
+        if albedo_orders is not None and 'albedo' in self.keys():
+            a0 = self['albedo']
+            dcdx,dcdy,dcdr,dcds = F_grads(a0,dy,dx_vec,dd_vec,finite_difference_order)
+            wind_albedo_xy = dcdx*self['wind_e'] + dcdy*self['wind_n']
+            wind_albedo_rs = dcdr*self['wind_ne'] + dcds*self['wind_nw'] \
+                + r_dot_s*(dcdr*self['wind_nw'] + dcds*self['wind_ne'])
+            wind_albedo = np.nanmean(np.array([wind_albedo_xy,wind_albedo_rs]),axis=0)
+            wind_albedo[np.isnan(wind_albedo_xy) & np.isnan(wind_albedo_rs)] = np.nan
+            if write_diagnostic:
+                self['wind_albedo_xy'] = wind_albedo_xy
+                self['wind_albedo_rs'] = wind_albedo_rs
+            for order in albedo_orders:
+                self['wind_albedo_{}'.format(order)] = wind_albedo*np.power(a0,order-1)
+                
     def calculate_flux_divergence(self,write_diagnostic=False,remove_wind_div=False,
                                   finite_difference_order=2,calculate_wind_albedo=False):
         if self.proj is not None:
@@ -2864,6 +2974,98 @@ class popy(object):
         if boundary_polygon is not None:
             self.logger.info('boundary polygon provided, further filtering l2g pixels...')
             self.F_mask_l2g_with_boundary(boundary_polygon=boundary_polygon,center_only=False)
+    
+    def F_prepare_gradient(self,x_wind_field,y_wind_field,
+                           x_wind_field_sfc=None,y_wind_field_sfc=None,
+                           func_to_get_vcd=None,
+                           unique_layer_identifier=None,
+                           interp_met_kw=None,
+                           calculate_gradient_kw=None):
+        '''add horizontal flux to l2g_data
+        x/y_wind_field:
+            key in l2g_data for east/north wind component, e.g., era5_u/v100
+        x/y_wind_field_sfc:
+            key in l2g_data for east/north wind component near surface, e.g., era5_u/v10
+        func_to_get_vcd:
+            function that takes in l2g_data dictionary and output a new l2g_data dictionary (useful to hack l2g_data),
+            or the vcd array
+        unique_layer_identifier:
+            name of l2g_data to identify unique layers for flux div calculation. l2g_data will be divided to a list
+            if it exists in l2g_data. each element will be a dict with a unique value of unique_layer_identifier
+        interp_met_kw:
+            if x/y_wind_field are not in l2g_data, call self.F_interp_met to get those fields
+        calculate_gradient_kw:
+            arguments to Level3_Data().calculate_gradient
+        output:
+            'wind_e','wind_n','wind_ne','wind_nw' added to l2g_data, surface wind too if provided
+            'vcd' will be added if func_to_get_vcd is provided and outputs an array
+        created on 2022/07/20
+        '''
+        if unique_layer_identifier is None:
+            self.logger.warning('make sure your l2 data are not overlapping too much, otherwise provide unique_layer_identifier')
+        
+        interp_met_kw = interp_met_kw or {}
+        calculate_gradient_kw = calculate_gradient_kw or {}
+        self.calculate_gradient_kw = calculate_gradient_kw
+        
+        # vcd should be in mol/m2
+        if func_to_get_vcd is None:
+            self.logger.warning('the function to calculate vcd is not provided. use column_amount')
+            vcd = self.l2g_data['column_amount']
+        else:
+            tmp = func_to_get_vcd(self.l2g_data)
+            if isinstance(tmp,dict):
+                # self.l2g_data will be replaced by the output of func_to_get_vcd
+                self.l2g_data = tmp
+                # preferably use the vcd field
+                if 'vcd' in self.l2g_data.keys():
+                    vcd = self.l2g_data['vcd']
+                else:
+                    vcd = self.l2g_data['column_amount']
+            else:
+                vcd = tmp
+        
+        # wind should be in m/s
+        if (x_wind_field not in self.l2g_data.keys()) or (y_wind_field not in self.l2g_data.keys()):
+            self.logger.info('x/y_wind_field is unavailable in l2g_data. try sampling from met data')
+            self.F_interp_met(**interp_met_kw)
+        
+        # east wind, m/s
+        self.l2g_data['wind_e'] = self.l2g_data.pop(x_wind_field)
+        # north wind, m/s
+        self.l2g_data['wind_n'] = self.l2g_data.pop(y_wind_field)
+        ne2e_angle = np.arctan(1/(np.cos(self.l2g_data['latc']/180*np.pi)))
+        ne2e_cos = np.cos(ne2e_angle)
+        ne2e_sin = np.sin(ne2e_angle)
+        # northeast wind, mol/m/s
+        self.l2g_data['wind_ne'] = self.l2g_data['wind_e']*ne2e_cos+self.l2g_data['wind_n']*ne2e_sin
+        # northwest wind, mol/m/s
+        self.l2g_data['wind_nw'] = self.l2g_data['wind_e']*(-ne2e_cos)+self.l2g_data['wind_n']*ne2e_sin
+        
+        if x_wind_field_sfc is not None and y_wind_field_sfc is not None:
+            self.l2g_data['wind_sfc_e'] = self.l2g_data.pop(x_wind_field_sfc)
+            self.l2g_data['wind_sfc_n'] = self.l2g_data.pop(y_wind_field_sfc)
+            self.l2g_data['wind_sfc_ne'] = self.l2g_data['wind_sfc_e']*ne2e_cos+self.l2g_data['wind_sfc_n']*ne2e_sin
+            self.l2g_data['wind_sfc_nw'] = self.l2g_data['wind_sfc_e']*(-ne2e_cos)+self.l2g_data['wind_sfc_n']*ne2e_sin
+            
+        # add 'vcd' to the oversampling list if it is not column_amount, e.g., derived from xch4
+        if func_to_get_vcd is not None:
+            self.l2g_data['vcd'] = vcd
+            self.oversampling_list.append('vcd')
+        add_list = ['wind_e','wind_n','wind_ne','wind_nw']
+        for add_field in add_list:
+            if add_field not in self.oversampling_list:
+                self.oversampling_list.append(add_field)
+        if 'wind_sfc_e' in self.l2g_data.keys():
+            add_list = ['wind_sfc_e','wind_sfc_n','wind_sfc_ne','wind_sfc_nw']
+            for add_field in add_list:
+                if add_field not in self.oversampling_list:
+                    self.oversampling_list.append(add_field)
+        # last step, if there is a unique identifier, divide l2g_data from a dict to a list of dict
+        if unique_layer_identifier in self.l2g_data.keys():
+            self.logger.info('l2g_data will be divided into a list according to {}'.format(unique_layer_identifier))
+            unique_values,unique_idx = np.unique(self.l2g_data[unique_layer_identifier],return_inverse=True)
+            self.l2g_data = [{k:v[unique_idx==i,] for k,v in self.l2g_data.items()} for i in range(len(unique_values))]
     
     def F_calculate_horizontal_flux(self,x_wind_field,y_wind_field,
                                     func_to_get_vcd=None,
@@ -6269,7 +6471,10 @@ class popy(object):
             l3_object = Level3_Data(proj=self.proj,grid_size=self.flux_grid_size)
             for l2g in l2g_data:
                 l3_orbit = self.F_parallel_regrid(l2g,block_length,ncores).block_reduce(self.flux_grid_size)
-                l3_orbit.calculate_flux_divergence(**self.calculate_flux_divergence_kw)
+                if hasattr(self,'calculate_flux_divergence_kw'):
+                    l3_orbit.calculate_flux_divergence(**self.calculate_flux_divergence_kw)
+                if hasattr(self,'calculate_gradient_kw'):
+                    l3_orbit.calculate_gradient(**self.calculate_gradient_kw)
                 l3_object = l3_object.merge(l3_orbit)
             l3_object.check()
             return l3_object
