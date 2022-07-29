@@ -1988,6 +1988,26 @@ class Level3_Data(dict):
         l3_new.check()
         return l3_new
     
+    def average_by_mask(self,mask,fields_to_average=None):
+        result = {}
+        for key in set(['total_sample_weight','pres_total_sample_weight']).intersection(self.keys()):
+            result[key] = np.nansum(self[key][mask])
+        
+        for key in set(['num_samples','pres_num_samples']).intersection(self.keys()):
+            result[key] = np.nanmean(self[key][mask])
+        
+        if fields_to_average is None:
+            all_keys = self.keys()
+        else:
+            all_keys = set(fields_to_average).intersection(self.keys())
+        for key in all_keys:
+            if key in ['xgrid','ygrid','nrows','nrow','ncols','ncol','xmesh','ymesh','lonmesh','latmesh',
+                      'total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
+                continue
+            else:
+                result[key] = np.nansum(self[key][mask]*self['total_sample_weight'][mask])/result['total_sample_weight']
+        return result
+    
     def merge(self,l3_data1):
         if len(self.keys()) == 0:
             self.logger.info('orignial level 3 is empty. adopting attributes of the added level 3.')
@@ -4052,16 +4072,25 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
             
-    def F_subset_S5PHCHO(self,l2_path_pattern='S5P*L2__HCHO___%Y%m%dT*.nc',
+    def F_subset_S5PHCHO(self,l2_list=None,l2_path_pattern=None,
                          path=None,data_fields=None,data_fields_l2g=None,
                          s5p_product='*',geos_interp_variables=None,
                          geos_time_collection=''):
         """ 
-        function to subset tropomi hcho level 2 data, calling self.F_read_S5P_nc
+        function to subset tropomi no2 level 2 data, calling self.F_read_S5P_nc
+        l2_list:
+            a list of level 2 file paths. If provided, l2_path_pattern will be ignored.
+        l2_path_pattern:
+            a format string indicating the path structure of level 2 data. e.g.,
+            r'C:/data/*O2-CH4_%Y%m%dT*CO2proxy.nc' 
         path:
             l2 data directory, or path to control file
         s5p_product:
             choose from RPRO and OFFL, default '*' means all
+        data_fields:
+            a list of strings indicating which fields in the l2 file to keep
+        data_fields_l2g:
+            shortened data_fields used in the output dictionary l2g_data
         geos_interp_variables:
             a list of variables (only 2d fields are supported now) to be 
             resampled from geos fp (has to be subsetted/resaved into .mat). see
@@ -4071,11 +4100,12 @@ class popy(object):
         updated on 2019/04/30
         updated on 2019/06/20 to add s5p_product/geos_interp_variables option
         updated on 2020/01/15 to simplify to l2_path_pattern
+        updated on 2022/07/29 to match other s5p products
         """      
         geos_interp_variables = geos_interp_variables or []
         # find out list of l2 files to subset
         if path is not None:
-            self.logger.warning('please use l2_path_pattern instead')
+            self.logger.warning('please use l2_list or l2_path_pattern instead')
             import glob
             l2_dir = path
             l2_list = []
@@ -4092,15 +4122,23 @@ class popy(object):
             self.l2_dir = l2_dir
             self.l2_list = l2_list
         else:
-            import glob
-            l2_list = []
-            start_date = self.start_python_datetime.date()
-            end_date = self.end_python_datetime.date()
-            days = (end_date-start_date).days+1
-            DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
-            for DATE in DATES:
-                flist = glob.glob(DATE.strftime(l2_path_pattern))
-                l2_list = l2_list+flist
+            if l2_list is None and l2_path_pattern is None:
+                self.logger.error('either l2_list or l2_path_pattern has to be provided!')
+                return
+            if l2_list is not None and l2_path_pattern is not None:
+                self.logger.info('both l2_list and l2_path_pattern are provided. l2_path_pattern will be overwritten')
+                l2_path_pattern = None
+            
+            if l2_list is None:
+                import glob
+                l2_list = []
+                start_date = self.start_python_datetime.date()
+                end_date = self.end_python_datetime.date()
+                days = (end_date-start_date).days+1
+                DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+                for DATE in DATES:
+                    flist = glob.glob(DATE.strftime(l2_path_pattern))
+                    l2_list = l2_list+flist                 
             self.l2_list = l2_list
                 
         maxsza = self.maxsza
@@ -4115,23 +4153,27 @@ class popy(object):
         # not sure about cloud fraction
         if not data_fields:
             data_fields = ['/PRODUCT/SUPPORT_DATA/INPUT_DATA/cloud_fraction_crb',\
-                   '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds',\
-                   '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds',\
-                   '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/solar_zenith_angle',\
-                   '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/viewing_zenith_angle',\
-                   '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_albedo',\
-                   '/PRODUCT/latitude',\
-                   '/PRODUCT/longitude',\
-                   '/PRODUCT/qa_value',\
-                   '/PRODUCT/time',\
-                   '/PRODUCT/delta_time',\
-                   '/PRODUCT/formaldehyde_tropospheric_vertical_column',\
-                   '/PRODUCT/formaldehyde_tropospheric_vertical_column_precision']    
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/solar_zenith_angle',\
+                           '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/viewing_zenith_angle',\
+                           '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_albedo',\
+                           '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_pressure',\
+                           '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_altitude',\
+                           '/PRODUCT/latitude',\
+                           '/PRODUCT/longitude',\
+                           '/PRODUCT/qa_value',\
+                           '/PRODUCT/time',\
+                           '/PRODUCT/delta_time',\
+                           '/PRODUCT/formaldehyde_tropospheric_vertical_column',\
+                           '/PRODUCT/formaldehyde_tropospheric_vertical_column_precision',\
+                           '/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/fitted_slant_columns_win1_precision']    
         if not data_fields_l2g:
             # standardized variable names in l2g file. should map one-on-one to data_fields
             data_fields_l2g = ['cloud_fraction','latitude_bounds','longitude_bounds','SolarZenithAngle',\
-                               'vza','albedo','latc','lonc','qa_value','time','delta_time',\
-                               'column_amount','column_uncertainty']
+                               'vza','albedo','surface_pressure','surface_altitude',\
+                               'latc','lonc','qa_value','time','delta_time',\
+                               'column_amount','column_uncertainty_doubt','column_uncertainty']
         self.logger.info('Read, subset, and store level 2 data to l2g_data')
         l2g_data = {}
         for fn in l2_list:
@@ -4142,6 +4184,9 @@ class popy(object):
                 self.logger.warning(fn+' gives error:');
                 self.logger.warning(e)
                 continue
+            if outp_nc['column_uncertainty'].shape != outp_nc['column_amount'].shape:
+                self.logger.warning('SCD uncertainty is used!')
+                outp_nc['column_uncertainty'] = outp_nc['column_uncertainty'][...,6]
             if geos_interp_variables != []:
                 sounding_interp = F_interp_geos_mat(outp_nc['lonc'],outp_nc['latc'],outp_nc['UTC_matlab_datenum'],\
                                                 geos_dir='/mnt/Data2/GEOS/s5p_interp/',\
