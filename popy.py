@@ -205,29 +205,17 @@ def F_wrapper_l3(instrum,product,grid_size,
                 o.F_calculate_horizontal_flux(**flux_kw)
             if do_grad:
                 o.F_prepare_gradient(**gradient_kw)
-            # xch4 or xco2 products
-            x_set = set(o.oversampling_list).intersection({'xch4','XCH4','XCO2','xco2'})
-            if len(x_set)>0:
-                if o.default_column_unit == 'mol/mol' and column_unit in ['ppb','ppbv','nmol/mol']:
-                    for x_something in x_set:
-                        o.l2g_data[x_something] = o.l2g_data[x_something]*1e9
-                if o.default_column_unit == 'mol/mol' and column_unit in ['ppm','ppmv','umol/mol']:
-                    for x_something in x_set:
-                        o.l2g_data[x_something] = o.l2g_data[x_something]*1e6
-            if 'column_amount' in o.oversampling_list:
-                if o.default_column_unit == 'molec/cm2' and column_unit == 'mol/m2':
-                    o.l2g_data['column_amount'] = o.l2g_data['column_amount']/6.02214e19
-                elif o.default_column_unit == 'mol/m2' and column_unit == 'molec/cm2':
-                    o.l2g_data['column_amount'] = o.l2g_data['column_amount']*6.02214e19
-                if column_unit == 'umol/m2':
-                    if o.default_column_unit == 'molec/cm2':
-                        o.l2g_data['column_amount'] = o.l2g_data['column_amount']/6.02214e19*1e6
-                    if o.default_column_unit == 'mol/m2':
-                        o.l2g_data['column_amount'] = o.l2g_data['column_amount']*1e6
+            if column_unit is not None:
+                o.F_adjust_column_unit(column_unit)
             #kludge for CrIS
             if instrum == 'CrIS':
-                mask = (o.l2g_data['column_amount'] > 0) & (o.l2g_data['column_uncertainty'] > 0)
-                o.l2g_data = {k:v[mask,] for (k,v) in o.l2g_data.items()}
+                if isinstance(o.l2g_data,dict):
+                    mask = (o.l2g_data['column_amount'] > 0) & (o.l2g_data['column_uncertainty'] > 0)
+                    o.l2g_data = {k:v[mask,] for (k,v) in o.l2g_data.items()}
+                elif isinstance(o.l2g_data,list):
+                    for iorbit in range(len(o.l2g_data)):
+                        mask = (o.l2g_data[iorbit]['column_amount'] > 0) & (o.l2g_data[iorbit]['column_uncertainty'] > 0)
+                        o.l2g_data[iorbit] = {k:v[mask,] for (k,v) in o.l2g_data[iorbit].items()}
             if proj is not None:
                 l3_data0 = o.F_parallel_regrid_proj(ncores=ncores,block_length=block_length)
             else:
@@ -305,6 +293,7 @@ def F_download_gesdisc_l2(txt_fn,
                           orbit_start_dt_idx=0,orbit_end_dt_idx=None,
                           dt_pattern='%Y%m%dT%H%M%S',
                           l2_dir=None,tmp_txt_dir=None,
+                          tmp_txt_fn=None,
                           download_str=None,
                           if_delete_tmp_txt=True):
     '''
@@ -320,8 +309,8 @@ def F_download_gesdisc_l2(txt_fn,
         how to extract datetime from the sub string
     l2_dir:
         where to save level 2 files
-    tmp_txt_dir:
-        directory to write a temporary txt file
+    tmp_txt_dir/fn:
+        directory/path to write a temporary txt file
     download_str:
         usually wrapping wget
     2021/10/17
@@ -336,7 +325,7 @@ def F_download_gesdisc_l2(txt_fn,
     if tmp_txt_dir is None:
         logging.warning('use cwd to save temporary txt file')
         tmp_txt_dir = os.getcwd()
-    tmp_txt_fn = os.path.join(tmp_txt_dir,'tmp.txt')
+    tmp_txt_fn = tmp_txt_fn or os.path.join(tmp_txt_dir,'tmp.txt')
     if download_str is None:
         download_str = 'cd {}; wget -N -q --load-cookies ~/.urs_cookies\
         --save-cookies ~/.urs_cookies --auth-no-challenge=on --keep-session-cookies\
@@ -2694,7 +2683,7 @@ class popy(object):
             k3 = k3 or 1
             error_model = "linear"
             oversampling_list = ['column_amount','albedo',\
-                                 'amf','cloud_fraction','cloud_pressure','terrain_height']
+                                 'cloud_fraction','terrain_height']
             xmargin = 1.5
             ymargin = 1.5
             maxsza = 60
@@ -2994,6 +2983,48 @@ class popy(object):
         if boundary_polygon is not None:
             self.logger.info('boundary polygon provided, further filtering l2g pixels...')
             self.F_mask_l2g_with_boundary(boundary_polygon=boundary_polygon,center_only=False)
+    
+    def F_adjust_column_unit(self,column_unit,column_fields=None):
+        '''adjust column field in l2g_data to the specified unit
+        '''
+        if column_fields is None:
+            if self.product.lower() in ['ch4','co2']:
+                column_fields = [f for f in self.oversampling_list if 'xch4' in f.lower or 'xco2' in f.lower]
+            else:
+                column_fields = list(set(self.oversampling_list).intersection({'column_amount','vcd'}))
+        
+        if self.default_column_unit == 'mol/mol':
+            if column_unit.lower() in ['ppb','ppbv','nmol/mol']:
+                def unit_func(x):
+                    return x*1e9
+            elif column_unit.lower() in ['ppm','ppmv','umol/mol']:
+                def unit_func(x):
+                    return x*1e6
+        elif self.default_column_unit == 'molec/cm2':
+            if column_unit.lower() in ['mol/m2']:
+                def unit_func(x):
+                    return x/6.02214e19
+            elif column_unit.lower() in ['umol/m2']:
+                def unit_func(x):
+                    return x/6.02214e19*1e6
+        elif self.default_column_unit == 'mol/m2':
+            if column_unit.lower() in ['molec/cm2','molecules/cm2','molecule/cm2']:
+                def unit_func(x):
+                    return x*6.02214e19
+            elif column_unit.lower() in ['umol/m2']:
+                def unit_func(x):
+                    return x*1e6
+        else:
+            self.logger.warning('default unit {} and provided unit {} conversion not yet implemented!'.format(self.default_column_unit,column_unit))
+            return
+        
+        if isinstance(self.l2g_data,dict):
+            for column_field in column_fields:
+                self.l2g_data[column_field] = unit_func(self.l2g_data[column_field])
+        elif isinstance(self.l2g_data,list):
+            for iorbit in range(len(self.l2g_data)):
+                for column_field in column_fields:
+                    self.l2g_data[iorbit][column_field] = unit_func(self.l2g_data[iorbit][column_field])
     
     def F_prepare_gradient(self,x_wind_field,y_wind_field,
                            x_wind_field_sfc=None,y_wind_field_sfc=None,
@@ -3322,6 +3353,7 @@ class popy(object):
         
         outp['across_track_position'] = np.tile(np.arange(1.,outp['latc'].shape[1]+1),\
             (outp['latc'].shape[0],1)).astype(np.int16)
+        outp['orbit'] = np.full(outp['latc'].shape,ncid.OrbitNumber,dtype=int)
         return outp
     
     def F_read_BEHR_h5(self,fn,data_fields,data_fields_l2g=None):
@@ -3503,51 +3535,67 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
-    def F_subset_MEaSUREs(self,l2_path_pattern=None,path=None,l2_path_structure='%Y/%m/%d/',
+    def F_subset_MEaSUREs(self,l2_list=None,l2_path_pattern=None,
+                          path=None,data_fields=None,data_fields_l2g=None,
                           min_MDQF=0,max_MDQF=1):
         """ 
         function to subset MEaSUREs level 2 data, calling self.F_read_MEaSUREs_nc
+        l2_list:
+            a list of level 2 file paths. If provided, l2_path_pattern will be ignored.
         l2_path_pattern:
-            path of level 2 files recoganizable by glob.glob and datetime.date.strftime
+            a format string indicating the path structure of level 2 data. e.g.,
+            r'C:/data/*O2-CH4_%Y%m%dT*CO2proxy.nc' 
         path:
-            l2 data directory
-        l2_path_structure:
-            None indicates that individual files are directly under path;
-            '%Y/' if files are like l2_dir/2017/*.nc;
-            '%Y/%m/%d/' if files are like l2_dir/2017/05/01/*.nc
+            l2 data directory, or path to control file
+        data_fields:
+            a list of strings indicating which fields in the l2 file to keep
+        data_fields_l2g:
+            shortened data_fields used in the output dictionary l2g_data
+        min/max_MDQF:
+            bounds of /key_science_data/main_data_quality_flag
         created on 2021/04/07
+        updated on 2022/08/04 to match s5p subsetting functions
         """      
         # find out list of l2 files to subset
-        import glob
         instrum = self.instrum
         product = self.product
-        start_date = self.start_python_datetime.date()
-        end_date = self.end_python_datetime.date()
-        days = (end_date-start_date).days+1
-        DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
-        if l2_path_pattern is None:
-            self.logger.info('It is suggested to use l2_path_pattern for level 2 paths structure')
+        import glob
+        if path is not None:
+            self.logger.warning('please use l2_list or l2_path_pattern instead')
+            import glob
             l2_dir = path
             l2_list = []
             cwd = os.getcwd()
             os.chdir(l2_dir)
+            start_date = self.start_python_datetime.date()
+            end_date = self.end_python_datetime.date()
+            days = (end_date-start_date).days+1
+            DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
             for DATE in DATES:
-                if l2_path_structure == None:
-                    flist = glob.glob(str(instrum)+'-'+str(product)+'-L2_'+DATE.strftime("%Ym%m%d")+'t*.nc')
-                else:
-                    flist = glob.glob(DATE.strftime(l2_path_structure)+\
-                                        str(instrum)+'-'+str(product)+'-L2_'+DATE.strftime("%Ym%m%d")+'t*.nc')
+                flist = glob.glob(str(instrum)+'-'+str(product)+'-L2_'+DATE.strftime("%Ym%m%d")+'t*.nc')
                 l2_list = l2_list+flist
             os.chdir(cwd)
+            self.l2_dir = l2_dir
+            self.l2_list = l2_list
         else:
-            l2_dir = os.path.split(l2_path_pattern)[0]
-            l2_list = []
-            for DATE in DATES:
-                flist = glob.glob(DATE.strftime(l2_path_pattern))
-                l2_list = l2_list+flist
-        
-        self.l2_dir = l2_dir
-        self.l2_list = l2_list
+            if l2_list is None and l2_path_pattern is None:
+                self.logger.error('either l2_list or l2_path_pattern has to be provided!')
+                return
+            if l2_list is not None and l2_path_pattern is not None:
+                self.logger.info('both l2_list and l2_path_pattern are provided. l2_path_pattern will be overwritten')
+                l2_path_pattern = None
+            
+            if l2_list is None:
+                import glob
+                l2_list = []
+                start_date = self.start_python_datetime.date()
+                end_date = self.end_python_datetime.date()
+                days = (end_date-start_date).days+1
+                DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+                for DATE in DATES:
+                    flist = glob.glob(DATE.strftime(l2_path_pattern))
+                    l2_list = l2_list+flist                 
+            self.l2_list = l2_list
         
         maxsza = self.maxsza
         maxcf = self.maxcf
@@ -3555,35 +3603,33 @@ class popy(object):
         east = self.east
         south = self.south
         north = self.north
-#        max_MDQF = self.max_MDQF
-#        min_MDQF = self.min_MDQF
-         
-        # absolute path of useful variables in the nc file
-        data_fields = ['/support_data/cloud_fraction',\
-                       '/support_data/cloud_pressure',\
-               '/geolocation/latitude_bounds',\
-               '/geolocation/longitude_bounds',\
-               '/geolocation/solar_zenith_angle',\
-               '/geolocation/viewing_zenith_angle',\
-               '/support_data/albedo',\
-               '/geolocation/latitude',\
-               '/geolocation/longitude',\
-               '/key_science_data/main_data_quality_flag',\
-               '/geolocation/time',\
-               '/key_science_data/column_amount',\
-               '/key_science_data/column_uncertainty']    
-        # standardized variable names in l2g file. should map one-on-one to data_fields
-        data_fields_l2g = ['cloud_fraction','cloud_pressure','latitude_bounds','longitude_bounds','SolarZenithAngle',\
-                           'vza','albedo','latc','lonc','main_data_quality_flag','time',\
-                           'column_amount','column_uncertainty']
+        if not data_fields:
+            # default, absolute path of useful variables in the nc file
+            data_fields = ['/support_data/cloud_fraction',\
+                           '/geolocation/latitude_bounds',\
+                           '/geolocation/longitude_bounds',\
+                           '/geolocation/solar_zenith_angle',\
+                           '/geolocation/viewing_zenith_angle',\
+                           '/support_data/albedo',\
+                           '/geolocation/latitude',\
+                           '/geolocation/longitude',\
+                           '/key_science_data/main_data_quality_flag',\
+                           '/geolocation/time',\
+                           '/key_science_data/column_amount',\
+                           '/key_science_data/column_uncertainty',\
+                           '/geolocation/terrain_height',\
+                           '/support_data/surface_pressure']    
+        if not data_fields_l2g:
+            # standardized variable names in l2g file. should map one-on-one to data_fields
+            data_fields_l2g = ['cloud_fraction','latitude_bounds','longitude_bounds','SolarZenithAngle',\
+                               'vza','albedo','latc','lonc','main_data_quality_flag','time',\
+                               'column_amount','column_uncertainty','terrain_height','surface_pressure']
         self.logger.info('Read, subset, and store level 2 data to l2g_data')
-        self.logger.info('Level 2 data are located at '+l2_dir)
         l2g_data = {}
         for fn in l2_list:
-            fn_dir = os.path.join(l2_dir,fn)
-            self.logger.info('Loading '+fn)
+            self.logger.info('Loading '+os.path.split(fn)[-1])
             try:
-                outp_nc = self.F_read_MEaSUREs_nc(fn_dir,data_fields,data_fields_l2g)
+                outp_nc = self.F_read_MEaSUREs_nc(fn,data_fields,data_fields_l2g)
             except:
                 self.logger.warning(fn+' gives error!');
                 continue
@@ -3601,7 +3647,6 @@ class popy(object):
             validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
             self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
             l2g_data0 = {}
-            # yep it's indeed messed up
             Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][:,:,0])[validmask]
             Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][:,:,3])[validmask]
             Lat_lowerright = np.squeeze(outp_nc['latitude_bounds'][:,:,1])[validmask]
@@ -4185,7 +4230,7 @@ class popy(object):
                 self.logger.warning(e)
                 continue
             if outp_nc['column_uncertainty'].shape != outp_nc['column_amount'].shape:
-                self.logger.warning('SCD uncertainty is used!')
+                self.logger.info('SCD uncertainty is used!')
                 outp_nc['column_uncertainty'] = outp_nc['column_uncertainty'][...,6]
             if geos_interp_variables != []:
                 sounding_interp = F_interp_geos_mat(outp_nc['lonc'],outp_nc['latc'],outp_nc['UTC_matlab_datenum'],\
