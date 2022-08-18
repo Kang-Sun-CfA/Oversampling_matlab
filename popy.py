@@ -2723,6 +2723,14 @@ class popy(object):
             k2 = k2 or 2
             k3 = k3 or 1
             error_model = "linear"
+            self.min_qa_value = 0.5
+            xmargin = 1.5
+            ymargin = 1.5
+            maxsza = 70
+            maxcf = 0.3
+            self.pixel_shape = 'quadrilateral'
+            self.default_column_unit = 'mol/m2'
+            
             if product in ['AI']:
                 oversampling_list = ['AI']
                 self.default_subset_function = 'F_subset_S5PAI'
@@ -2735,6 +2743,9 @@ class popy(object):
                 self.default_subset_function = 'F_subset_S5PNO2'
                 oversampling_list = ['column_amount','albedo',\
                                      'surface_altitude']
+                self.min_qa_value = 0.75
+                maxsza = 75
+                maxcf = 0.5
             elif product in ['SO2']:
                 self.default_subset_function = 'F_subset_S5PSO2'
                 oversampling_list = ['column_amount','albedo',\
@@ -2747,13 +2758,7 @@ class popy(object):
                 self.default_subset_function = 'F_subset_S5PHCHO'
                 oversampling_list = ['column_amount','albedo',\
                                      'surface_altitude']
-            xmargin = 1.5
-            ymargin = 1.5
-            maxsza = 70
-            maxcf = 0.3
-            self.min_qa_value = 0.5
-            self.pixel_shape = 'quadrilateral'
-            self.default_column_unit = 'mol/m2'
+            
         elif(instrum == "IASI"):
             k1 = k1 or 2
             k2 = k2 or 2
@@ -3077,7 +3082,9 @@ class popy(object):
                 vcd = tmp
         
         # wind should be in m/s
-        if (x_wind_field not in self.l2g_data.keys()) or (y_wind_field not in self.l2g_data.keys()):
+        if (x_wind_field not in self.l2g_data.keys()) or (y_wind_field not in self.l2g_data.keys()) \
+        or ((x_wind_field_sfc is not None) and (x_wind_field not in self.l2g_data.keys()))\
+        or ((y_wind_field_sfc is not None) and (y_wind_field not in self.l2g_data.keys())):
             self.logger.info('x/y_wind_field is unavailable in l2g_data. try sampling from met data')
             self.F_interp_met(**interp_met_kw)
         
@@ -4058,12 +4065,15 @@ class popy(object):
                            '/PRODUCT/qa_value',\
                            '/PRODUCT/time_utc',\
                            '/PRODUCT/nitrogendioxide_tropospheric_column',\
-                           '/PRODUCT/nitrogendioxide_tropospheric_column_precision']    
+                           '/PRODUCT/nitrogendioxide_tropospheric_column_precision',
+                           '/PRODUCT/averaging_kernel',
+                           '/PRODUCT/air_mass_factor_troposphere',
+                           '/PRODUCT/air_mass_factor_total']    
         if not data_fields_l2g:
             # standardized variable names in l2g file. should map one-on-one to data_fields
             data_fields_l2g = ['cloud_fraction','latitude_bounds','longitude_bounds','SolarZenithAngle',\
                                'vza','albedo','surface_pressure','surface_altitude','latc','lonc','qa_value','time_utc',\
-                               'column_amount','column_uncertainty']
+                               'column_amount','column_uncertainty','avk','amf_trop','amf_total']
         self.logger.info('Read, subset, and store level 2 data to l2g_data')
         l2g_data = {}
         for fn in l2_list:
@@ -4096,6 +4106,10 @@ class popy(object):
             validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
             self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
             l2g_data0 = {}
+            # calculate surface avk
+            # https://sentinels.copernicus.eu/documents/247904/2474726/Sentinel-5P-Level-2-Product-User-Manual-Nitrogen-Dioxide.pdf, section 8.8
+            if 'avk' in outp_nc.keys():
+                l2g_data0['avk0'] = outp_nc['avk'][...,-1][validmask]
             # yep it's indeed messed up
             Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][:,:,0])[validmask]
             Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][:,:,3])[validmask]
@@ -4108,7 +4122,8 @@ class popy(object):
             l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
             l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
             for key in outp_nc.keys():
-                if key not in {'latitude_bounds','longitude_bounds','time_utc','time','delta_time'}:
+                if key not in {'latitude_bounds','longitude_bounds','time_utc','time','delta_time',\
+                               'avk'}:
                     l2g_data0[key] = outp_nc[key][validmask]
             l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
         self.l2g_data = l2g_data
@@ -6104,7 +6119,7 @@ class popy(object):
         return pc,fig,ax,m,cb
     
     def F_plot_l2g_cartopy(self,plot_field='column_amount',
-                           max_day=1,l2g_data=None,
+                           max_day=1,l2g_data=None,draw_colorbar=True,
                            x_wind_field=None,y_wind_field=None,
                            existing_ax=None,draw_admin_level=1,
                            **kwargs):
@@ -6170,7 +6185,10 @@ class popy(object):
             ax.add_feature(cfeature.BORDERS)
             ax.add_feature(cfeature.STATES,edgecolor='gray')
         ax.add_collection(collection)
-        cb = plt.colorbar(collection,ax=ax,label=plot_field,shrink=kwargs['shrink'])
+        if draw_colorbar:
+            cb = plt.colorbar(collection,ax=ax,label=plot_field,shrink=kwargs['shrink'])
+        else:
+            cb = None
         if x_wind_field != None:
             quiver=ax.quiver(l2g_data['lonc'][plot_index[0]],l2g_data['latc'][plot_index[0]],
                              l2g_data[x_wind_field][plot_index[0]],l2g_data[y_wind_field][plot_index[0]],
