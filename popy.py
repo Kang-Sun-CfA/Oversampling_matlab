@@ -2723,7 +2723,7 @@ class popy(object):
             k2 = k2 or 2
             k3 = k3 or 1
             error_model = "linear"
-            self.min_qa_value = 0.5
+            self.min_qa_value = 0.499
             xmargin = 1.5
             ymargin = 1.5
             maxsza = 70
@@ -2743,7 +2743,7 @@ class popy(object):
                 self.default_subset_function = 'F_subset_S5PNO2'
                 oversampling_list = ['column_amount','albedo',\
                                      'surface_altitude']
-                self.min_qa_value = 0.75
+                self.min_qa_value = 0.749
                 maxsza = 75
                 maxcf = 0.5
             elif product in ['SO2']:
@@ -4109,7 +4109,7 @@ class popy(object):
             # calculate surface avk
             # https://sentinels.copernicus.eu/documents/247904/2474726/Sentinel-5P-Level-2-Product-User-Manual-Nitrogen-Dioxide.pdf, section 8.8
             if 'avk' in outp_nc.keys():
-                l2g_data0['avk0'] = outp_nc['avk'][...,-1][validmask]
+                l2g_data0['avk0'] = outp_nc['avk'][...,0][validmask]/outp_nc['amf_trop'][validmask]*outp_nc['amf_total'][validmask]
             # yep it's indeed messed up
             Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][:,:,0])[validmask]
             Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][:,:,3])[validmask]
