@@ -3277,6 +3277,22 @@ class popy(object):
         from netCDF4 import Dataset
         ncid = Dataset(fn,'r')
         outp = {}
+        # special treatment for s5pco due to product inconsistency
+        scale_s5pco_avk = False
+        if self.instrum == 'TROPOMI' and self.product == 'CO':
+            # s5pco files before 2021/07/01 have no /PRODUCT/carbonmonoxide_total_column_corrected field
+            if ('carbonmonoxide_total_column_corrected' not in ncid['PRODUCT'].variables.keys()) and\
+            ('/PRODUCT/carbonmonoxide_total_column_corrected' in data_fields):
+                self.logger.warning('old s5pco files, no destriped co column field!')
+                data_fields.remove('/PRODUCT/carbonmonoxide_total_column_corrected')
+                if data_fields_l2g is not None:
+                    data_fields_l2g.remove('column_amount_uncorrected')
+            # s5pco files before 2022/07/17 use meter as avk unit
+            if ('/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/column_averaging_kernel' in data_fields) and \
+            ncid['/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/column_averaging_kernel'].units == 'm':
+                self.logger.warning('old s5pco files, avk in m, not 1')
+                scale_s5pco_avk = True
+        
         for i in range(len(data_fields)):
             tmp = ncid[data_fields[i]]
             tmpdtype = tmp.dtype
@@ -3288,6 +3304,9 @@ class popy(object):
                 outp[varname] = tmp[:]
             else:
                 outp[varname] = np.squeeze(tmp[:],axis=0)
+            if scale_s5pco_avk and data_fields[i] == '/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/column_averaging_kernel':
+                outp[varname] = outp[varname]/(ncid['PRODUCT/layer'][-2]-ncid['PRODUCT/layer'][-1])
+            
         if 'time_utc' in outp.keys():
             UTC_matlab_datenum = np.zeros((len(outp['time_utc']),1),dtype=np.float64)
             for i in range(len(outp['time_utc'])):
@@ -4874,12 +4893,14 @@ class popy(object):
                            '/PRODUCT/qa_value',\
                            '/PRODUCT/time_utc',\
                            '/PRODUCT/carbonmonoxide_total_column',\
-                           '/PRODUCT/carbonmonoxide_total_column_precision']    
+                           '/PRODUCT/carbonmonoxide_total_column_corrected',\
+                           '/PRODUCT/carbonmonoxide_total_column_precision',\
+                           '/PRODUCT/SUPPORT_DATA/DETAILED_RESULTS/column_averaging_kernel']    
         if not data_fields_l2g:
             # standardized variable names in l2g file. should map one-on-one to data_fields
             data_fields_l2g = ['scattering_OD','colh2o','scattering_height','latitude_bounds','longitude_bounds','SolarZenithAngle',\
                                'vza','surface_pressure','surface_altitude','latc','lonc','qa_value','time_utc',\
-                               'column_amount','column_uncertainty']
+                               'column_amount_uncorrected','column_amount','column_uncertainty','avk']
         self.logger.info('Read, subset, and store level 2 data to l2g_data')
         
         l2g_data = {}
@@ -4913,7 +4934,10 @@ class popy(object):
             validmask = f1 & f3 & f4 & f5 & f6 & f7 & f8 & f9
             self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
             l2g_data0 = {}
-            # yep it's indeed messed up
+            # calculate surface avk
+            # https://sentinels.copernicus.eu/documents/247904/2474726/Sentinel-5P-Level-2-Product-User-Manual-Carbon-Monoxide.pdf
+            if 'avk' in outp_nc.keys():
+                l2g_data0['avk0'] = outp_nc['avk'][...,-1][validmask]
             Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][:,:,0])[validmask]
             Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][:,:,3])[validmask]
             Lat_lowerright = np.squeeze(outp_nc['latitude_bounds'][:,:,1])[validmask]
@@ -4925,7 +4949,7 @@ class popy(object):
             l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
             l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
             for key in outp_nc.keys():
-                if key not in {'latitude_bounds','longitude_bounds','time_utc','time','delta_time'}:
+                if key not in {'latitude_bounds','longitude_bounds','time_utc','time','delta_time','avk'}:
                     l2g_data0[key] = outp_nc[key][validmask]
             l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
         self.l2g_data = l2g_data
