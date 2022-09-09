@@ -2723,7 +2723,7 @@ class popy(object):
             k2 = k2 or 2
             k3 = k3 or 1
             error_model = "linear"
-            self.min_qa_value = 0.499
+            self.min_qa_value = 0.5
             xmargin = 1.5
             ymargin = 1.5
             maxsza = 70
@@ -2743,13 +2743,15 @@ class popy(object):
                 self.default_subset_function = 'F_subset_S5PNO2'
                 oversampling_list = ['column_amount','albedo',\
                                      'surface_altitude']
-                self.min_qa_value = 0.749
+                self.min_qa_value = 0.75
                 maxsza = 75
                 maxcf = 0.5
             elif product in ['SO2']:
                 self.default_subset_function = 'F_subset_S5PSO2'
                 oversampling_list = ['column_amount','albedo',\
                                      'surface_altitude']
+                maxsza = 60
+                maxcf = 0.3 # see https://sentinel.esa.int/documents/247904/3541451/Sentinel-5P-Sulphur-Dioxide-Readme.pdf, section 3.1
             elif product in ['CO']:
                 self.default_subset_function = 'F_subset_S5PCO'
                 oversampling_list = ['column_amount','albedo',\
@@ -3110,7 +3112,7 @@ class popy(object):
         if func_to_get_vcd is not None:
             self.l2g_data['vcd'] = vcd
             self.oversampling_list.append('vcd')
-        add_list = ['wind_e','wind_n','wind_ne','wind_nw']
+        add_list = ['wind_e','wind_n','wind_ne','wind_nw','avk0']
         for add_field in add_list:
             if add_field not in self.oversampling_list:
                 self.oversampling_list.append(add_field)
@@ -3905,22 +3907,30 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
-    def F_subset_S5PSO2(self,
-                        l2_path_pattern='S5P*L2__SO2____%Y%m%dT*.nc',
+    def F_subset_S5PSO2(self,l2_list=None,
+                        l2_path_pattern=None,
                         data_fields=None,
                         data_fields_l2g=None):
         '''
-        l2_path_pattern=r'C:\research\S5PSO2\L2\S5P*L2__SO2____%Y%m%dT*.nc'
+        function to subset tropomi so2 level 2 data
+        updated to match no2/co on 2022/09/09
         '''
-        import glob
-        l2_list = []
-        start_date = self.start_python_datetime.date()
-        end_date = self.end_python_datetime.date()
-        days = (end_date-start_date).days+1
-        DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
-        for DATE in DATES:
-            flist = glob.glob(DATE.strftime(l2_path_pattern))
-            l2_list = l2_list+flist
+        if l2_list is None and l2_path_pattern is None:
+            self.logger.error('either l2_list or l2_path_pattern has to be provided!')
+            return
+        if l2_list is not None and l2_path_pattern is not None:
+            self.logger.info('both l2_list and l2_path_pattern are provided. l2_path_pattern will be overwritten')
+            l2_path_pattern = None
+
+        if l2_list is None:
+            l2_list = []
+            start_date = self.start_python_datetime.date()
+            end_date = self.end_python_datetime.date()
+            days = (end_date-start_date).days+1
+            DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+            for DATE in DATES:
+                flist = glob.glob(DATE.strftime(l2_path_pattern))
+                l2_list = l2_list+flist       
         self.l2_list = l2_list
         maxsza = self.maxsza
         maxcf = self.maxcf
@@ -3938,6 +3948,7 @@ class popy(object):
                            '/PRODUCT/SUPPORT_DATA/GEOLOCATIONS/viewing_zenith_angle',\
                            '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_albedo_328nm',\
                            '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_pressure',\
+                           '/PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_altitude',\
                            '/PRODUCT/latitude',\
                            '/PRODUCT/longitude',\
                            '/PRODUCT/qa_value',\
@@ -3948,7 +3959,7 @@ class popy(object):
         if not data_fields_l2g:
             # standardized variable names in l2g file. should map one-on-one to data_fields
             data_fields_l2g = ['cloud_fraction','latitude_bounds','longitude_bounds','SolarZenithAngle',\
-                               'vza','albedo','surface_pressure','latc','lonc','qa_value','time','delta_time',\
+                               'vza','albedo','surface_pressure','surface_altitude','latc','lonc','qa_value','time','delta_time',\
                                'column_amount','column_uncertainty']
         self.logger.info('Read, subset, and store level 2 data to l2g_data')
         l2g_data = {}
