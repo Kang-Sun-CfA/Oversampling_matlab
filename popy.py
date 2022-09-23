@@ -1977,6 +1977,132 @@ class Level3_Data(dict):
         l3_new.check()
         return l3_new
     
+    def trim(self,west,east,south,north):
+        l3_new = Level3_Data(instrum=self.instrum,product=self.product,
+                             start_python_datetime=self.start_python_datetime,
+                             end_python_datetime=self.end_python_datetime,
+                             proj=self.proj,oversampling_list=self.oversampling_list)
+        if len(self.keys()) == 0:
+            self.logger.info('empty l3. returning')
+            return l3_new
+        xmask = (self['xgrid'] >= west) & (self['xgrid'] <= east)
+        ymask = (self['ygrid'] >= south) & (self['ygrid'] <= north)
+        self.logger.info('l3 trimed from {}, {} to {}, {}'.format(len(self['xgrid']),len(self['ygrid']),np.sum(xmask),np.sum(ymask)))
+        for key in self.keys():
+            if key == 'xgrid':
+                l3_new[key] = self[key][xmask]
+            elif key == 'ygrid':
+                l3_new[key] = self[key][ymask]
+            elif self[key].ndim == 2:
+                l3_new[key] = self[key][np.ix_(ymask,xmask)]
+        l3_new.check()
+        return l3_new
+    
+    def get_emission_precision(self,mask):
+        '''calculate the random error in the wind column term
+        '''
+        if 'wind_column_xy' not in self.keys() or 'wind_column_rs' not in self.keys():
+            self.logger.error('xy and rs components not available for uncertainty calculation!')
+            return
+        precision = 0.5*np.nanstd((self['wind_column_xy']-self['wind_column_rs'])[mask].ravel())
+        return precision
+    
+    def fit_topography(self,mask=None,min_windtopo=None,max_windtopo=None,max_iter=None,outlier_std=None):
+        '''infer scale height for the wind-topography term
+        '''
+        import statsmodels.formula.api as smf
+        import pandas as pd
+        if self.instrum == 'TROPOMI' and self.product == 'NO2':
+            min_windtopo = min_windtopo or 0.001
+            max_windtopo = max_windtopo or 0.1
+            max_iter = max_iter or 5
+            outlier_std = outlier_std or 2
+        else:
+            self.logger.warning('not supported for this product')
+            
+        wt = np.abs(self['wind_topo']/self['column_amount'])
+        topo_mask = (wt >= min_windtopo) & (wt <= max_windtopo)
+        if mask is not None:
+            topo_mask = topo_mask & mask
+        count = 0
+        try:
+            precision=self.get_emission_precision(mask=topo_mask)
+            self.logger.info('emission random error is {:.3e}'.format(precision))
+        except Exception as e:
+            self.logger.warning(e)
+            self.logger.warning('error in precision calculation')
+        while count < max_iter:
+            if count > 0:
+                topo_mask = topo_mask & (np.abs(topo_residual) < outlier_std*np.nanstd(topo_fit.resid))
+            self.logger.warning('{} total grids, fitting X using {} ({:.2%}) grids'.format(
+                len(self['xgrid'])*len(self['ygrid']),np.sum(topo_mask),
+                np.sum(topo_mask)/(len(self['xgrid'])*len(self['ygrid']))))
+            df = pd.DataFrame({'y':self['wind_column'][topo_mask],'wt':self['wind_topo'][topo_mask],
+                                  'chem':self['column_amount'][topo_mask]}).dropna()
+            topo_fit = smf.ols('y ~ wt + chem', data=df).fit()
+            self.logger.info('iter {}, r2 {:.3f}'.format(count,topo_fit.rsquared))
+            self.logger.info('iter {}, rmse {:.3e}'.format(count,np.sqrt(topo_fit.mse_resid)))
+            self.logger.info('iter {}, lifetime {:.3f}h'.format(count,-1/(topo_fit.params['chem'])/3600))
+            self.logger.info('iter {}, scale height {:.3f} km'.format(count,-1/(topo_fit.params['wt'])/1000))
+            topo_residual = np.full_like(self['num_samples'],np.nan)
+            topo_residual[topo_mask] = topo_fit.resid
+            wc_topo = self['wind_column']-topo_fit.params['wt']*self['wind_topo']
+            count += 1
+        self.topo_fit = topo_fit
+        self['topo_residual'] = topo_residual
+        self['wind_column_topo'] = wc_topo
+    
+    def fit_chemistry(self,mask=None,min_windtopo=None,max_windtopo=None,
+                      max_wind_column=None,max_iter=None,outlier_std=None):
+        '''infer lifetime for the chemical loss term
+        '''
+        import statsmodels.formula.api as smf
+        import pandas as pd
+        if self.instrum == 'TROPOMI' and self.product == 'NO2':
+            min_windtopo = min_windtopo or 0.
+            max_windtopo = max_windtopo or 0.001
+            max_wind_column = max_wind_column or 0.5e-9
+            max_iter = max_iter or 5
+            outlier_std = outlier_std or 2
+        else:
+            self.logger.warning('not supported for this product')
+            
+        wt = np.abs(self['wind_topo']/self['column_amount'])
+        if 'wind_column_topo' not in self.keys():
+            self.logger.warning('run fit_topography first!')
+            wc = self['wind_column']
+        else:
+            wc = self['wind_column_topo']
+        chem_mask = (wt >= min_windtopo) & (wt <= max_windtopo) & (wc <= max_wind_column)
+        if mask is not None:
+            chem_mask = chem_mask & mask
+        count = 0
+        try:
+            precision=self.get_emission_precision(mask=chem_mask)
+            self.logger.info('emission random error is {:.3e}'.format(precision))
+        except:
+            self.logger.warning('error in precision calculation')
+        while count < max_iter:
+            if count > 0:
+                chem_mask = chem_mask & (np.abs(chem_residual) < outlier_std*np.nanstd(chem_fit.resid)) &\
+                (wc_chem <= max_wind_column)
+            self.logger.warning('{} total grids, fitting tau using {} ({:.2%}) grids'.format(
+                len(self['xgrid'])*len(self['ygrid']),np.sum(chem_mask),
+                np.sum(chem_mask)/(len(self['xgrid'])*len(self['ygrid']))))
+            df = pd.DataFrame({'y':wc[chem_mask],'wt':self['wind_topo'][chem_mask],
+                                  'chem':self['column_amount'][chem_mask]}).dropna()
+            chem_fit = smf.ols('y ~ chem', data=df).fit()
+            self.logger.info('iter {}, r2 {:.3f}'.format(count,chem_fit.rsquared))
+            self.logger.info('iter {}, rmse {:.3e}'.format(count,np.sqrt(chem_fit.mse_resid)))
+            self.logger.info('iter {}, lifetime {:.3f}h'.format(count,-1/(chem_fit.params['chem'])/3600))
+            chem_residual = np.full_like(self['num_samples'],np.nan)
+            chem_residual[chem_mask] = chem_fit.resid
+            wc_chem = wc-chem_fit.params['chem']*self['column_amount']
+            count += 1
+        self.chem_fit = chem_fit
+        self['chem_residual'] = chem_residual
+        self['wind_column_topo_chem'] = wc_chem
+    
     def average_by_mask(self,mask,fields_to_average=None):
         result = {}
         for key in set(['total_sample_weight','pres_total_sample_weight']).intersection(self.keys()):
