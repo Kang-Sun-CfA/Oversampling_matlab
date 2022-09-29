@@ -1998,13 +1998,16 @@ class Level3_Data(dict):
         l3_new.check()
         return l3_new
     
-    def get_emission_precision(self,mask):
+    def get_emission_precision(self,mask=None):
         '''calculate the random error in the wind column term
         '''
         if 'wind_column_xy' not in self.keys() or 'wind_column_rs' not in self.keys():
             self.logger.error('xy and rs components not available for uncertainty calculation!')
             return
-        precision = 0.5*np.nanstd((self['wind_column_xy']-self['wind_column_rs'])[mask].ravel())
+        if mask is None:
+            precision = 0.5*np.nanstd((self['wind_column_xy']-self['wind_column_rs']).ravel())
+        else:
+            precision = 0.5*np.nanstd((self['wind_column_xy']-self['wind_column_rs'])[mask].ravel())
         return precision
     
     def fit_topography(self,mask=None,min_windtopo=None,max_windtopo=None,max_iter=None,outlier_std=None):
@@ -4729,7 +4732,99 @@ class popy(object):
             self.nl2 = 0
         else:
             self.nl2 = len(l2g_data['latc'])
-
+    
+    def F_subset_S5PCH4_SRON(self,l2_list,data_fields=None,data_fields_l2g=None):
+        '''
+        subsetting sron data at https://ftp.sron.nl/open-access-data-2/TROPOMI/tropomi/ch4/18_17/
+        '''
+        from netCDF4 import Dataset
+        self.l2_list = l2_list
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        min_qa_value = self.min_qa_value
+        
+        if not data_fields:
+            # absolute path of useful variables in the nc file
+            data_fields = ['/instrument/latitude_corners', \
+                           '/instrument/longitude_corners',\
+                           '/instrument/solar_zenith_angle',\
+                           '/instrument/viewing_zenith_angle',\
+                           '/instrument/latitude_center',\
+                           '/instrument/longitude_center',\
+                           '/diagnostics/qa_value',\
+                           '/instrument/time',\
+                           '/target_product/xch4',\
+                           '/target_product/xch4_corrected',\
+                           '/target_product/xch4_precision',\
+                           '/side_product/h2o_column',\
+                           '/side_product/surface_albedo',\
+                           '/meteo/surface_pressure',\
+                           '/meteo/surface_altitude',\
+                           '/instrument/glintflag',\
+                           '/instrument/ground_pixel']  
+        if not data_fields_l2g:
+            # standardized variable names in l2g file. should map one-on-one to data_fields
+            data_fields_l2g = ['latitude_bounds','longitude_bounds','SolarZenithAngle',\
+                               'vza','latc','lonc','qa_value','time',\
+                               'XCH4_no_bias_correction','XCH4','column_uncertainty',
+                               'colh2o','albedo','surface_pressure','surface_altitude','glintflag','across_track_position']
+        
+        self.logger.info('Read, subset, and store level 2 data to l2g_data')
+        
+        l2g_data = {}
+        for fn in l2_list:
+            self.logger.info('Loading '+os.path.split(fn)[-1])
+            nc = Dataset(fn,'r')
+            outp_nc = {dn:nc[dnc][:].filled(np.nan) for dnc,dn in zip(data_fields,data_fields_l2g)}
+            orbit = int(''.join([s.decode("utf-8") for s in nc['instrument/l1b_file'][:]])[52:57])
+            outp_nc['orbit'] = np.full(outp_nc['latc'].shape,orbit,dtype=int)
+            outp_nc['across_track_position'][outp_nc['across_track_position']==-1] = 214
+            outp_nc['across_track_position'] += 1
+            # swir band albedo
+            outp_nc['albedo'] = outp_nc['albedo'][...,1]
+            # why give qa a filled value?! And the 9.96921e+36 is not provided in the variable property
+            validmask = (outp_nc['qa_value'] >= min_qa_value) & (outp_nc['qa_value'] < 2)
+            outp_nc = {k:v[validmask,] for k,v in outp_nc.items()}
+            outp_nc['UTC_matlab_datenum'] = np.array([datetime2datenum(datetime.datetime(*d)) for d in outp_nc['time']])
+            # further filtering by space/time              
+            f4 = outp_nc['latc'] >= south
+            f5 = outp_nc['latc'] <= north
+            tmplon = outp_nc['lonc']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp_nc['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp_nc['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            validmask = f4 & f5 & f6 & f7 & f8 & f9
+            self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            l2g_data0 = {}
+            if np.sum(validmask) == 0:
+                continue
+            Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][...,0])[validmask]
+            Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][...,3])[validmask]
+            Lat_lowerright = np.squeeze(outp_nc['latitude_bounds'][...,1])[validmask]
+            Lat_upperright = np.squeeze(outp_nc['latitude_bounds'][...,2])[validmask]
+            Lon_lowerleft = np.squeeze(outp_nc['longitude_bounds'][...,0])[validmask]
+            Lon_upperleft = np.squeeze(outp_nc['longitude_bounds'][...,3])[validmask]
+            Lon_lowerright = np.squeeze(outp_nc['longitude_bounds'][...,1])[validmask]
+            Lon_upperright = np.squeeze(outp_nc['longitude_bounds'][...,2])[validmask]
+            l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
+            l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+            for key in outp_nc.keys():
+                if key not in {'latitude_bounds','longitude_bounds','time_utc','time','delta_time'}:
+                    l2g_data0[key] = outp_nc[key][validmask]
+            # sron inconsistent with official data
+            l2g_data0['colh2o'] = l2g_data0['colh2o']/6.022141e19       
+            l2g_data0['surface_pressure'] = l2g_data0['surface_pressure']*100.0
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
+    
     def F_subset_S5PCH4(self,l2_list=None,l2_path_pattern=None,
                         path=None,data_fields=None,data_fields_l2g=None,
                         if_trop_xch4=False,s5p_product='*',
