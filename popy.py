@@ -2010,7 +2010,7 @@ class Level3_Data(dict):
             precision = 0.5*np.nanstd((self['wind_column_xy']-self['wind_column_rs'])[mask].ravel())
         return precision
     
-    def fit_topography(self,mask=None,min_windtopo=None,max_windtopo=None,max_iter=None,outlier_std=None):
+    def fit_topography(self,mask=None,min_windtopo=None,max_windtopo=None,max_iter=None,outlier_std=None,fit_chem=None):
         '''infer scale height for the wind-topography term
         '''
         import statsmodels.formula.api as smf
@@ -2020,10 +2020,34 @@ class Level3_Data(dict):
             max_windtopo = max_windtopo or 0.1
             max_iter = max_iter or 5
             outlier_std = outlier_std or 2
+            fit_chem = fit_chem or True
+        elif self.instrum == 'TROPOMI' and self.product == 'SO2':
+            min_windtopo = min_windtopo or 0.001
+            max_windtopo = max_windtopo or 0.1
+            max_iter = max_iter or 2
+            outlier_std = outlier_std or 2
+            fit_chem = fit_chem or True
+        elif self.instrum == 'TROPOMI' and self.product == 'CH4':
+            min_windtopo = min_windtopo or 0.001
+            max_windtopo = max_windtopo or 0.1
+            max_iter = max_iter or 2
+            outlier_std = outlier_std or 2
+            fit_chem = fit_chem or False
+        elif self.instrum == 'TROPOMI' and self.product == 'CO':
+            min_windtopo = min_windtopo or 0.001
+            max_windtopo = max_windtopo or 0.1
+            max_iter = max_iter or 2
+            outlier_std = outlier_std or 2
+            fit_chem = fit_chem or False
         else:
             self.logger.warning('not supported for this product')
             
-        wt = np.abs(self['wind_topo']/self['column_amount'])
+        if 'column_amount' in self.keys():
+            vcd = self['column_amount']
+        else:
+            vcd = self['vcd']
+        
+        wt = np.abs(self['wind_topo']/vcd)
         topo_mask = (wt >= min_windtopo) & (wt <= max_windtopo)
         if mask is not None:
             topo_mask = topo_mask & mask
@@ -2041,11 +2065,15 @@ class Level3_Data(dict):
                 len(self['xgrid'])*len(self['ygrid']),np.sum(topo_mask),
                 np.sum(topo_mask)/(len(self['xgrid'])*len(self['ygrid']))))
             df = pd.DataFrame({'y':self['wind_column'][topo_mask],'wt':self['wind_topo'][topo_mask],
-                                  'chem':self['column_amount'][topo_mask]}).dropna()
-            topo_fit = smf.ols('y ~ wt + chem', data=df).fit()
+                                  'chem':vcd[topo_mask]}).dropna()
+            if fit_chem:
+                topo_fit = smf.ols('y ~ wt + chem', data=df).fit()
+            else:
+                topo_fit = smf.ols('y ~ wt', data=df).fit()
             self.logger.info('iter {}, r2 {:.3f}'.format(count,topo_fit.rsquared))
             self.logger.info('iter {}, rmse {:.3e}'.format(count,np.sqrt(topo_fit.mse_resid)))
-            self.logger.info('iter {}, lifetime {:.3f}h'.format(count,-1/(topo_fit.params['chem'])/3600))
+            if fit_chem:
+                self.logger.info('iter {}, lifetime {:.3f}h'.format(count,-1/(topo_fit.params['chem'])/3600))
             self.logger.info('iter {}, scale height {:.3f} km'.format(count,-1/(topo_fit.params['wt'])/1000))
             topo_residual = np.full_like(self['num_samples'],np.nan)
             topo_residual[topo_mask] = topo_fit.resid
@@ -4819,6 +4847,7 @@ class popy(object):
             l2g_data0['colh2o'] = l2g_data0['colh2o']/6.022141e19       
             l2g_data0['surface_pressure'] = l2g_data0['surface_pressure']*100.0
             l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+            nc.close()
         self.l2g_data = l2g_data
         if not l2g_data:
             self.nl2 = 0
