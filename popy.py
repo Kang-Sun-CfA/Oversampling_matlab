@@ -2134,6 +2134,61 @@ class Level3_Data(dict):
         self['chem_residual'] = chem_residual
         self['wind_column_topo_chem'] = wc_chem
     
+    def average_by_finerMask(self,tif_dict=None,tif_fn=None,fields_to_average=None):
+        '''average l3 using a mask that does not match the l3 grid, and finer. the mask
+        can be read from geotif file at tif_fn
+        '''
+        if tif_dict is None and tif_fn is None:
+            self.logger.error('provide either tif dictionary or tif file path!')
+            return
+        if tif_dict is None:
+            import rasterio
+            with rasterio.open(tif_fn) as src:
+                tif_dict={}
+                tif_dict['data'] = src.read().squeeze(axis=0)==1
+                xres = src.transform[1]
+                yres = src.transform[5]
+                xorig = src.transform[0]
+                yorig = src.transform[3]
+                tif_dict['xgrid'] = xorig+np.arange(0,src.width)*xres
+                tif_dict['ygrid'] = yorig+np.arange(0,src.height)*yres
+                tif_dict['xres'] = xres
+                tif_dict['yres'] = yres
+        
+        l3 =self.trim(west=tif_dict['xgrid'].min()-np.abs(tif_dict['xres']),
+                      east=tif_dict['xgrid'].max()+np.abs(tif_dict['xres']),
+                      south=tif_dict['ygrid'].min()-np.abs(tif_dict['yres']),
+                      north=tif_dict['ygrid'].max()+np.abs(tif_dict['yres']))
+        mask = np.zeros(l3['num_samples'].shape)
+        for ix,x in enumerate(l3['xgrid']):
+            for iy,y in enumerate(l3['ygrid']):
+                l3xmask = (tif_dict['xgrid']>=x-l3.grid_size/2) & (tif_dict['xgrid']<=x+l3.grid_size/2)
+                l3ymask = (tif_dict['ygrid']>=y-l3.grid_size/2) & (tif_dict['ygrid']<=y+l3.grid_size/2)
+                mask[iy,ix] = np.nansum(tif_dict['data'][np.ix_(l3ymask,l3xmask)])
+        return l3.average_by_nonBinaryMask(mask,fields_to_average)
+    
+    def average_by_nonBinaryMask(self,mask,fields_to_average=None):
+        '''similar to average_by_mask but add the values in the mask matrix as part of the weight
+        '''
+        result = {}
+        for key in set(['total_sample_weight','pres_total_sample_weight']).intersection(self.keys()):
+            result[key] = np.nansum(self[key]*mask)
+        
+        for key in set(['num_samples','pres_num_samples']).intersection(self.keys()):
+            result[key] = np.nanmean(self[key][mask>0]*mask[mask>0])
+        
+        if fields_to_average is None:
+            all_keys = self.keys()
+        else:
+            all_keys = set(fields_to_average).intersection(self.keys())
+        for key in all_keys:
+            if key in ['xgrid','ygrid','nrows','nrow','ncols','ncol','xmesh','ymesh','lonmesh','latmesh',
+                      'total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
+                continue
+            else:
+                result[key] = np.nansum(self[key]*mask*self['total_sample_weight'])/result['total_sample_weight']
+        return result
+    
     def average_by_mask(self,mask,fields_to_average=None):
         result = {}
         for key in set(['total_sample_weight','pres_total_sample_weight']).intersection(self.keys()):
