@@ -22,6 +22,7 @@ Created on Sat Jan 26 15:50:30 2019
 2022/05/22: start adding l2_list (list of l2 paths) besides l2_path_pattern
 2022/06/07: updates for MethaneAIR level3 (merging, inflation)
 2022/06/20: flux divergence 2.0
+2022/10/16: Level3_List class
 """
 
 import numpy as np
@@ -31,6 +32,10 @@ import os, sys, glob
 import logging
 import inspect
 from calendar import monthrange
+try:
+    import pandas as pd
+except:
+    logging.warning('Level3_List requires Pandas')
 
 def F_wrapper_l3(instrum,product,grid_size,
                  start_year=None,start_month=None,end_year=None,end_month=None,
@@ -2061,7 +2066,7 @@ class Level3_Data(dict):
         while count < max_iter:
             if count > 0:
                 topo_mask = topo_mask & (np.abs(topo_residual) < outlier_std*np.nanstd(topo_fit.resid))
-            self.logger.warning('{} total grids, fitting X using {} ({:.2%}) grids'.format(
+            self.logger.info('{} total grids, fitting X using {} ({:.2%}) grids'.format(
                 len(self['xgrid'])*len(self['ygrid']),np.sum(topo_mask),
                 np.sum(topo_mask)/(len(self['xgrid'])*len(self['ygrid']))))
             df = pd.DataFrame({'y':self['wind_column'][topo_mask],'wt':self['wind_topo'][topo_mask],
@@ -2117,7 +2122,7 @@ class Level3_Data(dict):
             if count > 0:
                 chem_mask = chem_mask & (np.abs(chem_residual) < outlier_std*np.nanstd(chem_fit.resid)) &\
                 (wc_chem <= max_wind_column)
-            self.logger.warning('{} total grids, fitting tau using {} ({:.2%}) grids'.format(
+            self.logger.info('{} total grids, fitting tau using {} ({:.2%}) grids'.format(
                 len(self['xgrid'])*len(self['ygrid']),np.sum(chem_mask),
                 np.sum(chem_mask)/(len(self['xgrid'])*len(self['ygrid']))))
             df = pd.DataFrame({'y':wc[chem_mask],'wt':self['wind_topo'][chem_mask],
@@ -2134,10 +2139,12 @@ class Level3_Data(dict):
         self['chem_residual'] = chem_residual
         self['wind_column_topo_chem'] = wc_chem
     
-    def average_by_finerMask(self,tif_dict=None,tif_fn=None,fields_to_average=None):
+    def average_by_finerMask(self,tif_dict=None,tif_fn=None,tif_mask=None,fields_to_average=None):
         '''average l3 using a mask that does not match the l3 grid, and finer. the mask
         can be read from geotif file at tif_fn
         '''
+        if tif_mask is not None:
+            return self.average_by_nonBinaryMask(tif_mask,fields_to_average)
         if tif_dict is None and tif_fn is None:
             self.logger.error('provide either tif dictionary or tif file path!')
             return
@@ -2155,16 +2162,21 @@ class Level3_Data(dict):
                 tif_dict['xres'] = xres
                 tif_dict['yres'] = yres
         
-        l3 =self.trim(west=tif_dict['xgrid'].min()-np.abs(tif_dict['xres']),
-                      east=tif_dict['xgrid'].max()+np.abs(tif_dict['xres']),
-                      south=tif_dict['ygrid'].min()-np.abs(tif_dict['yres']),
-                      north=tif_dict['ygrid'].max()+np.abs(tif_dict['yres']))
+        gwest = tif_dict['xgrid'].min()-np.abs(tif_dict['xres'])
+        geast = tif_dict['xgrid'].max()+np.abs(tif_dict['xres'])
+        gsouth = tif_dict['ygrid'].min()-np.abs(tif_dict['yres'])
+        gnorth = tif_dict['ygrid'].max()+np.abs(tif_dict['yres'])
+        l3 = self.trim(west=gwest,east=geast,south=gsouth,north=gnorth)
+        xmask = (self['xgrid'] >= gwest) & (self['xgrid'] <= geast)
+        ymask = (self['ygrid'] >= gsouth) & (self['ygrid'] <= gnorth)
+        self.tif_mask = np.zeros(self['num_samples'].shape)
         mask = np.zeros(l3['num_samples'].shape)
         for ix,x in enumerate(l3['xgrid']):
             for iy,y in enumerate(l3['ygrid']):
                 l3xmask = (tif_dict['xgrid']>=x-l3.grid_size/2) & (tif_dict['xgrid']<=x+l3.grid_size/2)
                 l3ymask = (tif_dict['ygrid']>=y-l3.grid_size/2) & (tif_dict['ygrid']<=y+l3.grid_size/2)
                 mask[iy,ix] = np.nansum(tif_dict['data'][np.ix_(l3ymask,l3xmask)])
+        self.tif_mask[np.ix_(ymask,xmask)] = mask
         return l3.average_by_nonBinaryMask(mask,fields_to_average)
     
     def average_by_nonBinaryMask(self,mask,fields_to_average=None):
@@ -2782,6 +2794,125 @@ class Level3_Data(dict):
         fig_output['cb'] = cb
         fig_output['pc'] = pc
         return fig_output
+
+class Level3_List(list):
+    '''a list of Level3_Data objects
+    started on 2022/10/12
+    '''
+    def __init__(self,dt_array,west=-180,east=180,south=-90,north=90):
+        '''
+        dt_array:
+            preferably a pandas PeriodIndex object
+        '''
+        self.logger = logging.getLogger(__name__)
+        self.dt_array = dt_array
+        self.df = pd.DataFrame({'count':range(len(dt_array))},index=dt_array)
+        self.west = west
+        self.east = east
+        self.south = south
+        self.north = north
+    
+    def read_nc_pattern(self,l3_path_pattern=None,l3_list=None,fields_name=None):
+        fields_name = fields_name or ['column_amount','surface_altitude','wind_topo','wind_column']
+        if l3_list is None and l3_path_pattern is None:
+            self.logger.error('either l3_list or l3_path_pattern has to be provided!')
+            return
+        if l3_list is not None and l3_path_pattern is not None:
+            self.logger.info('both l3_list and l3_path_pattern are provided. l3_path_pattern will be overwritten')
+            l3_path_pattern = None
+
+        if l3_list is None:
+            l3_list = [dt0.strftime(l3_path_pattern) for dt0 in self.dt_array]
+            
+        for l3_fn in l3_list:
+            self.logger.info('loading {}'.format(l3_fn))
+            l3 = Level3_Data().read_nc(l3_filename=l3_fn,fields_name=fields_name)
+            self.add(l3)
+    
+    def add(self,l3):
+        self.append(l3.trim(west=self.west,east=self.east,south=self.south,north=self.north))
+    
+    def resample(self,rule='month_of_year'):
+        if rule == 'month_of_year':
+            resampler = self.df.groupby(by=self.df.index.month)
+        else:
+            resampler = self.df.resample(rule,label='right')
+        
+        l3s_resampled = Level3_List(resampler.indices.keys(),west=self.west,east=self.east,south=self.south,north=self.north)
+        for ind,sub_df in resampler.__iter__():
+            l3 = Level3_Data()
+            for irow,row in sub_df.iterrows():
+                l3 = l3.merge(self[int(row['count'])])
+            l3s_resampled.add(l3)
+        return l3s_resampled,resampler
+    
+    def fit_topography(self,resample_rule=None,return_resampled=False,**kwargs):
+        if resample_rule is None:
+            for l3 in self:
+                l3.fit_topography(**kwargs)
+        else:
+            l3s_resampled,resampler = self.resample(rule=resample_rule)
+            for l3,(ind,sub_df) in zip(l3s_resampled,resampler.__iter__()):
+                l3.fit_topography(**kwargs)
+                for irow,row in sub_df.iterrows():
+                    self[int(row['count'])].topo_fit = l3.topo_fit
+                    self[int(row['count'])]['wind_column_topo'] = \
+                    self[int(row['count'])]['wind_column']\
+                    -l3.topo_fit.params['wt']*self[int(row['count'])]['wind_topo']
+        
+        self.df['topo_scale_height'] = [-1/l3.topo_fit.params['wt'] for l3 in self]
+        self.df['topo_rmse'] = [np.sqrt(l3.topo_fit.mse_resid) for l3 in self]
+        self.df['topo_r2'] = [l3.topo_fit.rsquared for l3 in self]
+        if resample_rule is not None and return_resampled:
+            return l3s_resampled
+    
+    def fit_chemistry(self,resample_rule=None,return_resampled=False,**kwargs):
+        if resample_rule is None:
+            for l3 in self:
+                l3.fit_chemistry(**kwargs)
+        else:
+            l3s_resampled,resampler = self.resample(rule=resample_rule)
+            for l3,(ind,sub_df) in zip(l3s_resampled,resampler.__iter__()):
+                l3.fit_chemistry(**kwargs)
+                for irow,row in sub_df.iterrows():
+                    self[int(row['count'])].chem_fit = l3.chem_fit
+                    self[int(row['count'])]['wind_column_topo_chem'] = \
+                    self[int(row['count'])]['wind_column_topo']\
+                    -l3.chem_fit.params['chem']*self[int(row['count'])]['column_amount']
+        
+        self.df['chem_lifetime'] = [-1/(l3.chem_fit.params['chem'])/3600 for l3 in self]
+        self.df['chem_rmse'] = [np.sqrt(l3.chem_fit.mse_resid) for l3 in self]
+        self.df['chem_r2'] = [l3.chem_fit.rsquared for l3 in self]
+        if resample_rule is not None and return_resampled:
+            return l3s_resampled
+    
+    def aggregate(self):
+        l3 = Level3_Data()
+        for l in self:
+            l3 = l3.merge(l)
+        return l3
+    
+    def average_by_finerMask(self,tif_dict):
+        '''
+        tif_dict: a Geo_Raster object
+        '''
+        if hasattr(tif_dict,'name'):
+            mask_name = tif_dict.name
+        else:
+            mask_name = 'unknown_mask'
+        averaged = []
+        averaged.append(self[0].average_by_finerMask(tif_dict=tif_dict))
+        for l3 in self[1:]:
+            averaged.append(l3.average_by_finerMask(tif_mask=self[0].tif_mask))
+        
+        if 'wind_column_topo_chem' in self[0].keys():
+            self.df['{}_wind_column_topo_chem'.format(mask_name)] = [m['wind_column_topo_chem'] for m in averaged]
+        if 'wind_column_topo' in self[0].keys():
+            self.df['{}_wind_column_topo'.format(mask_name)] = [m['wind_column_topo'] for m in averaged]
+        if 'wind_column' in self[0].keys():
+            self.df['{}_wind_column'.format(mask_name)] = [m['wind_column'] for m in averaged]
+        
+        self.df['{}_coverage'.format(mask_name)] = [m['num_samples'] for m in averaged]
 
 class popy(object):
     
@@ -5268,6 +5399,9 @@ class popy(object):
                 if key not in {'latitude_bounds','longitude_bounds','time_utc','time','delta_time','avk'}:
                     l2g_data0[key] = outp_nc[key][validmask]
             l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        # the inconsistency causes trouble in 2021/07 when the transition happened, just remove uncorrected vcd
+        if 'column_amount_uncorrected' in l2g_data.keys():
+            l2g_data.pop('column_amount_uncorrected');
         self.l2g_data = l2g_data
         if not l2g_data:
             self.nl2 = 0
