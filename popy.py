@@ -2183,11 +2183,13 @@ class Level3_Data(dict):
         '''similar to average_by_mask but add the values in the mask matrix as part of the weight
         '''
         result = {}
+        mask = mask/np.nanmax(mask)# otherwise num_samples do not make sense
         for key in set(['total_sample_weight','pres_total_sample_weight']).intersection(self.keys()):
             result[key] = np.nansum(self[key]*mask)
         
         for key in set(['num_samples','pres_num_samples']).intersection(self.keys()):
             result[key] = np.nanmean(self[key][mask>0]*mask[mask>0])
+            result['sum_'+key] = np.nansum(self[key][mask>0]*mask[mask>0])
         
         if fields_to_average is None:
             all_keys = self.keys()
@@ -2195,19 +2197,23 @@ class Level3_Data(dict):
             all_keys = set(fields_to_average).intersection(self.keys())
         for key in all_keys:
             if key in ['xgrid','ygrid','nrows','nrow','ncols','ncol','xmesh','ymesh','lonmesh','latmesh',
-                      'total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
+                      'total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples',
+                      'sum_num_samples','sum_pres_num_samples']:
                 continue
             else:
                 result[key] = np.nansum(self[key]*mask*self['total_sample_weight'])/result['total_sample_weight']
         return result
     
-    def average_by_mask(self,mask,fields_to_average=None):
+    def average_by_mask(self,mask=None,fields_to_average=None):
+        if mask is None:
+            mask = np.ones(self['num_samples'].shape,dtype=bool)
         result = {}
         for key in set(['total_sample_weight','pres_total_sample_weight']).intersection(self.keys()):
             result[key] = np.nansum(self[key][mask])
         
         for key in set(['num_samples','pres_num_samples']).intersection(self.keys()):
             result[key] = np.nanmean(self[key][mask])
+            result['sum_'+key] = np.nansum(self[key][mask>0]*mask[mask>0])
         
         if fields_to_average is None:
             all_keys = self.keys()
@@ -2772,10 +2778,10 @@ class Level3_Data(dict):
                            np.min(self['latmesh']),np.max(self['latmesh'])], ccrs.Geodetic())
         ax.add_feature(cfeature.COASTLINE)
         if draw_admin_level == 0:
-            ax.add_feature(cfeature.BORDERS, edgecolor='gray')
+            ax.add_feature(cfeature.BORDERS, edgecolor='k',linewidth=0.5)
         elif draw_admin_level == 1:
             ax.add_feature(cfeature.BORDERS)
-            ax.add_feature(cfeature.STATES,edgecolor='gray')
+            ax.add_feature(cfeature.STATES,edgecolor='k',linewidth=0.5)
         if 'num_samples' in self.keys():
             plotdata[self['num_samples']<layer_threshold] = np.nan
         if self.proj is None and 'lonmesh' not in self.keys():
@@ -2839,13 +2845,17 @@ class Level3_List(list):
             resampler = self.df.resample(rule,label='right')
         
         l3s_resampled = Level3_List(resampler.indices.keys(),west=self.west,east=self.east,south=self.south,north=self.north)
-        for ind,sub_df in resampler.__iter__():
+        for k,v in resampler.indices.items():
             l3 = Level3_Data()
-            for irow,row in sub_df.iterrows():
-                l3 = l3.merge(self[int(row['count'])])
+            for v0 in v:
+                l3 = l3.merge(self[int(v0)])
             l3s_resampled.add(l3)
         return l3s_resampled,resampler
     
+    def get_emission_precision(self,mask=None):
+        self.df['wind_column_precision'] = [l3.get_emission_precision(mask=mask) for l3 in self]
+        self.df['wind_column_precision_singleLayer'] = self.df['wind_column_precision']\
+        *np.sqrt(np.array([l3.average_by_mask(mask=mask,fields_to_average=['num_samples'])['num_samples'] for l3 in self]))
     def fit_topography(self,resample_rule=None,return_resampled=False,**kwargs):
         if resample_rule is None:
             for l3 in self:
@@ -2892,7 +2902,7 @@ class Level3_List(list):
             l3 = l3.merge(l)
         return l3
     
-    def average_by_finerMask(self,tif_dict):
+    def average_by_finerMask(self,tif_dict,fields_to_average=None):
         '''
         tif_dict: a Geo_Raster object
         '''
@@ -2900,19 +2910,26 @@ class Level3_List(list):
             mask_name = tif_dict.name
         else:
             mask_name = 'unknown_mask'
+        if fields_to_average is None:
+            fields_to_average = ['wind_column','wind_column_topo','wind_column_topo_chem','column_amount','num_samples']
+        if 'num_samples' in fields_to_average and 'sum_num_samples' not in fields_to_average:
+            fields_to_average.append('sum_num_samples')
         averaged = []
         averaged.append(self[0].average_by_finerMask(tif_dict=tif_dict))
-        for l3 in self[1:]:
-            averaged.append(l3.average_by_finerMask(tif_mask=self[0].tif_mask))
         
-        if 'wind_column_topo_chem' in self[0].keys():
-            self.df['{}_wind_column_topo_chem'.format(mask_name)] = [m['wind_column_topo_chem'] for m in averaged]
-        if 'wind_column_topo' in self[0].keys():
-            self.df['{}_wind_column_topo'.format(mask_name)] = [m['wind_column_topo'] for m in averaged]
-        if 'wind_column' in self[0].keys():
-            self.df['{}_wind_column'.format(mask_name)] = [m['wind_column'] for m in averaged]
+        if len(self) > 1:
+            for l3 in self[1:]:
+                averaged.append(l3.average_by_finerMask(tif_mask=self[0].tif_mask))
         
-        self.df['{}_coverage'.format(mask_name)] = [m['num_samples'] for m in averaged]
+        for f in fields_to_average:
+            self.df['{}_{}'.format(mask_name,f)] = [m[f] if f in m.keys() else np.nan for m in averaged]
+        if 'wind_column_precision_singleLayer' not in self.df.keys():
+            return
+        try:
+            self.df['{}_wind_column_precision'.format(mask_name)] = self.df['wind_column_precision_singleLayer']/np.sqrt(self.df['{}_sum_num_samples'.format(mask_name)])
+        except Exception as e:
+            self.logger.warning('cannot estimate emission error:')
+            self.logger.warning(e)
 
 class popy(object):
     
@@ -3411,7 +3428,7 @@ class popy(object):
         
         # vcd should be in mol/m2
         if func_to_get_vcd is None:
-            self.logger.warning('the function to calculate vcd is not provided. use column_amount')
+            self.logger.info('the function to calculate vcd is not provided. use column_amount')
             vcd = self.l2g_data['column_amount']
         else:
             tmp = func_to_get_vcd(self.l2g_data)
@@ -5950,11 +5967,17 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
-    def F_subset_IASINH3(self,path,which_metop='A',
+    def F_subset_IASINH3(self,l2_list=None,l2_path_pattern=None,
+                         path=None,which_metop='A',
                          l2_path_structure=None,
                          ellipse_lut_path='daysss.mat'):
         '''
         function to subset IASI NH3 level2 files
+        l2_list:
+            a list of level 2 file paths. If provided, l2_path_pattern will be ignored.
+        l2_path_pattern:
+            a format string indicating the path structure of level 2 data. e.g.,
+            r'C:/data/*O2-CH4_%Y%m%dT*CO2proxy.nc'
         path:
             l2 data root directory, only flat l2 file structure is supported
         which_metop:
@@ -5966,30 +5989,49 @@ class popy(object):
         ellipse_lut_path:
             path to a look up table storing u, v, and t data to reconstruct IASI pixel ellipsis
         created on 2021/04/01 based on CrIS subset and matlab-based iasi subset function, work for iasi v3
+        updated 2022/11/09
         '''
-        # find out list of l2 files to subset
-        import glob
         from scipy.io import loadmat
         from scipy.interpolate import RegularGridInterpolator
-        l2_dir = path
-        l2_list = []
-        cwd = os.getcwd()
-        os.chdir(l2_dir)
-        start_date = self.start_python_datetime.date()
-        end_date = self.end_python_datetime.date()
-        days = (end_date-start_date).days+1
-        DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
-        for DATE in DATES:
-            if l2_path_structure == None:
-                flist = glob.glob('IASI_METOP'+which_metop+'_L2_NH3_'+DATE.strftime("%Y%m%d")+'*.nc')
-            else:
-                flist = glob.glob(DATE.strftime(l2_path_structure)+\
-                                  'IASI_METOP'+which_metop+'_L2_NH3_'+DATE.strftime("%Y%m%d")+'*.nc')
-            l2_list = l2_list+flist
-        
-        os.chdir(cwd)
-        self.l2_dir = l2_dir
-        self.l2_list = l2_list
+        if path is not None:
+            self.logger.warning('please use l2_list or l2_path_pattern instead')
+            l2_dir = path
+            l2_list = []
+            cwd = os.getcwd()
+            os.chdir(l2_dir)
+            start_date = self.start_python_datetime.date()
+            end_date = self.end_python_datetime.date()
+            days = (end_date-start_date).days+1
+            DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+            for DATE in DATES:
+                if l2_path_structure == None:
+                    flist = glob.glob('IASI_METOP'+which_metop+'_L2_NH3_'+DATE.strftime("%Y%m%d")+'*.nc')
+                else:
+                    flist = glob.glob(DATE.strftime(l2_path_structure)+\
+                                      'IASI_METOP'+which_metop+'_L2_NH3_'+DATE.strftime("%Y%m%d")+'*.nc')
+                l2_list = l2_list+flist
+
+            os.chdir(cwd)
+            self.l2_dir = l2_dir
+            self.l2_list = l2_list
+        else:
+            if l2_list is None and l2_path_pattern is None:
+                self.logger.error('either l2_list or l2_path_pattern has to be provided!')
+                return
+            if l2_list is not None and l2_path_pattern is not None:
+                self.logger.info('both l2_list and l2_path_pattern are provided. l2_path_pattern will be overwritten')
+                l2_path_pattern = None
+            
+            if l2_list is None:
+                l2_list = []
+                start_date = self.start_python_datetime.date()
+                end_date = self.end_python_datetime.date()
+                days = (end_date-start_date).days+1
+                DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+                for DATE in DATES:
+                    flist = glob.glob(DATE.strftime(l2_path_pattern))
+                    l2_list = l2_list+flist                 
+            self.l2_list = l2_list
         
         varnames = ['time','latitude','longitude','solar_zenith_angle',
                     'pixel_number','cloud_coverage','AMPM',
@@ -6005,10 +6047,9 @@ class popy(object):
         f_ttt = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,121)),pixel_lut['ttt4']) 
         ref_dt = datetime.datetime(2007,1,1,0,0,0)
         for fn in l2_list:
-            file_path = os.path.join(l2_dir,fn)
-            self.logger.info('loading '+fn)
+            self.logger.info('Loading '+os.path.split(fn)[-1])
             try:
-                outp = F_ncread_selective(file_path,varnames)
+                outp = F_ncread_selective(fn,varnames)
             except:
                 self.logger.warning(fn+' cannot be read!')
                 continue
