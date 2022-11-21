@@ -41,7 +41,7 @@ def F_wrapper_l3(instrum,product,grid_size,
                  start_year=None,start_month=None,end_year=None,end_month=None,
                  start_day=None,end_day=None,
                  west=None,east=None,south=None,north=None,
-                 column_unit='umol/m2',
+                 column_unit=None,
                  if_use_presaved_l2g=True,
                  subset_function=None,
                  l2_list=None,
@@ -3359,7 +3359,8 @@ class popy(object):
                 column_fields = [f for f in self.oversampling_list if 'xch4' in f.lower or 'xco2' in f.lower]
             else:
                 column_fields = list(set(self.oversampling_list).intersection({'column_amount','vcd'}))
-        
+        def unit_func(x):
+            return x
         if self.default_column_unit == 'mol/mol':
             if column_unit.lower() in ['ppb','ppbv','nmol/mol']:
                 def unit_func(x):
@@ -6714,6 +6715,7 @@ class popy(object):
         fig_output['fig'] = fig
         fig_output['ax'] = ax
         fig_output['cb'] = cb
+        fig_output['collection'] = collection
         fig_output['quiver'] =quiver
         return fig_output
     
