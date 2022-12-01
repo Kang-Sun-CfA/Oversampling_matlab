@@ -54,7 +54,8 @@ def F_wrapper_l3(instrum,product,grid_size,
                  proj=None,
                  nudge_grid_origin=None,
                  k1=None,k2=None,k3=None,inflatex=None,inflatey=None,
-                 flux_kw=None,gradient_kw=None,flux_grid_size=None):
+                 flux_kw=None,gradient_kw=None,flux_grid_size=None,
+                 oversampling_list=None,error_model=None):
     '''
     instrum:
         instrument name
@@ -71,7 +72,9 @@ def F_wrapper_l3(instrum,product,grid_size,
     if_use_presaved_l2g:
         if True, use presaved .mat files, otherwise read/subset raw level 2 files
     subset_function:
-        function name in popy object to subset level 2 data. should be string like "F_subset_S5PNO2"
+        function name in popy object to subset level 2 data. subset_kw below provides inputs
+        if is a string like "F_subset_S5PNO2", calls built-in function like popy.F_subset_S5PNO2
+        can also be a user-supplied callable, which should return a l2g_data dict
     l2_list:
         a list of level 2 file paths. If provided, l2_path_pattern will be ignored.
     l2_path_pattern:
@@ -103,6 +106,11 @@ def F_wrapper_l3(instrum,product,grid_size,
         arguments input to F_prepare_gradient function, will trigger flux calculation. it is preferred over flux_kw
     flux_grid_size:
         grid size on which to calculate flux divergence, should be >~ 1 l2 pixel size
+    oversampling_list:
+        a list of variables to generate level3. if None, use instrument-specific default
+    error_model:
+        how to weight using retrieval uncertainties {'linear','square','log','ones'}. 
+        if None, use instrument-specific default
     output:
         if if_plot_l3 is False, return a Level3_Data object. otherwise return a dictionary containing the 
         Level3_Data object and the figout dictionary
@@ -188,12 +196,16 @@ def F_wrapper_l3(instrum,product,grid_size,
                  end_year=end_dt.year,end_month=end_dt.month,end_day=end_dt.day,
                  end_hour=end_dt.hour,end_minute=end_dt.minute,end_second=end_dt.second,
                  west=west,east=east,south=south,north=north,proj=proj,
-                 k1=k1,k2=k2,k3=k3,inflatex=inflatex,inflatey=inflatey,flux_grid_size=flux_grid_size)
+                 k1=k1,k2=k2,k3=k3,inflatex=inflatex,inflatey=inflatey,flux_grid_size=flux_grid_size,
+                 oversampling_list=oversampling_list,error_model=error_model)
         if not if_use_presaved_l2g:
             if subset_function is None:
                 subset_function = o.default_subset_function
             
-            subset_arg_list = inspect.getfullargspec(getattr(o,subset_function)).args
+            if callable(subset_function):
+                subset_arg_list = inspect.getfullargspec(subset_function).args
+            else:
+                subset_arg_list = inspect.getfullargspec(getattr(o,subset_function)).args
             
             if 'l2_path_pattern' in subset_arg_list and \
                 'l2_path_pattern' not in subset_kw.keys() and \
@@ -205,7 +217,11 @@ def F_wrapper_l3(instrum,product,grid_size,
                 l2_list is not None:
                 subset_kw['l2_list'] = l2_list
             
-            getattr(o, subset_function)(**subset_kw)
+            if callable(subset_function):
+                o.l2g_data = subset_function(**subset_kw)
+            else:
+                getattr(o, subset_function)(**subset_kw)
+            
             if do_div:
                 o.F_calculate_horizontal_flux(**flux_kw)
             if do_grad:
@@ -1534,8 +1550,13 @@ def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
         uncertainty_weight = l2g_data['column_uncertainty']**2
     elif error_model == "log":
         uncertainty_weight = np.log10(l2g_data['column_uncertainty'])
-    else:
+    elif error_model == 'linear':
         uncertainty_weight = l2g_data['column_uncertainty']
+    elif error_model == 'ones':
+        uncertainty_weight = np.ones(l2g_data['latc'].shape)
+    else:
+        logging.error('error_model has to be linear, square, log, or ones')
+        return
     # Cloud Fraction
     if 'cloud_fraction' in oversampling_list:
         cloud_fraction = l2g_data['cloud_fraction']
@@ -2940,7 +2961,7 @@ class popy(object):
                  end_year=2100,end_month=12,end_day=31,\
                  end_hour=23,end_minute=59,end_second=59,verbose=False,
                  proj=None,k1=None,k2=None,k3=None,inflatex=None,inflatey=None,
-                 flux_grid_size=None):
+                 flux_grid_size=None,oversampling_list=None,error_model=None):
         
         self.instrum = instrum
         self.product = product
@@ -2951,8 +2972,8 @@ class popy(object):
             k1 = k1 or 4
             k2 = k2 or 2
             k3 = k3 or 1
-            error_model = "linear"
-            oversampling_list = ['column_amount','albedo',\
+            error_model = error_model or "linear"
+            oversampling_list = oversampling_list or ['column_amount','albedo',\
                                  'cloud_fraction','cloud_pressure','terrain_height']
             xmargin = 1.5
             ymargin = 2
@@ -2971,8 +2992,8 @@ class popy(object):
             k1 = k1 or 4
             k2 = k2 or 2
             k3 = k3 or 1
-            error_model = "linear"
-            oversampling_list = ['column_amount','albedo',\
+            error_model = error_model or "linear"
+            oversampling_list = oversampling_list or ['column_amount','albedo',\
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
             xmargin = 1.5
             ymargin = 1.5
@@ -2985,8 +3006,8 @@ class popy(object):
             k1 = k1 or 4
             k2 = k2 or 2
             k3 = k3 or 1
-            error_model = "linear"
-            oversampling_list = ['column_amount','albedo',\
+            error_model = error_model or "linear"
+            oversampling_list = oversampling_list or ['column_amount','albedo',\
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
             xmargin = 1.5
             ymargin = 1.5
@@ -2999,8 +3020,8 @@ class popy(object):
             k1 = k1 or 4
             k2 = k2 or 2
             k3 = k3 or 1
-            error_model = "linear"
-            oversampling_list = ['column_amount','albedo',\
+            error_model = error_model or "linear"
+            oversampling_list = oversampling_list or ['column_amount','albedo',\
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
             xmargin = 1.5
             ymargin = 1.5
@@ -3013,8 +3034,8 @@ class popy(object):
             k1 = k1 or 4
             k2 = k2 or 2
             k3 = k3 or 1
-            error_model = "linear"
-            oversampling_list = ['column_amount','albedo',\
+            error_model = error_model or "linear"
+            oversampling_list = oversampling_list or ['column_amount','albedo',\
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
             xmargin = 1.5
             ymargin = 1.5
@@ -3027,8 +3048,8 @@ class popy(object):
             k1 = k1 or 6
             k2 = k2 or 2
             k3 = k3 or 3
-            error_model = "linear"
-            oversampling_list = ['column_amount','albedo',\
+            error_model = error_model or "linear"
+            oversampling_list = oversampling_list or ['column_amount','albedo',\
                                  'amf','cloud_fraction','cloud_pressure','terrain_height']
             xmargin = 1.5
             ymargin = 1.5
@@ -3041,8 +3062,8 @@ class popy(object):
             k1 = k1 or 4
             k2 = k2 or 2
             k3 = k3 or 1
-            error_model = "linear"
-            oversampling_list = ['column_amount','albedo',\
+            error_model = error_model or "linear"
+            oversampling_list = oversampling_list or ['column_amount','albedo',\
                                  'cloud_fraction','terrain_height']
             xmargin = 1.5
             ymargin = 1.5
@@ -3056,8 +3077,8 @@ class popy(object):
             k1 = k1 or 4
             k2 = k2 or 2
             k3 = k3 or 1
-            error_model = "linear"
-            oversampling_list = ['XCH4','XCO2','terrain_height']
+            error_model = error_model or "linear"
+            oversampling_list = oversampling_list or ['XCH4','XCO2','terrain_height']
             xmargin = 1.5
             ymargin = 1.5
             maxsza = 60
@@ -3069,8 +3090,8 @@ class popy(object):
             k1 = k1 or 2
             k2 = k2 or 2
             k3 = k3 or 1
-            error_model = "linear"
-            oversampling_list = ['XCH4','XCO2','terrain_height']
+            error_model = error_model or "linear"
+            oversampling_list = oversampling_list or ['XCH4','XCO2','terrain_height']
             xmargin = 1.5
             ymargin = 1.5
             maxsza = 60
@@ -3082,7 +3103,7 @@ class popy(object):
             k1 = k1 or 4
             k2 = k2 or 2
             k3 = k3 or 1
-            error_model = "linear"
+            error_model = error_model or "linear"
             self.min_qa_value = 0.5
             xmargin = 1.5
             ymargin = 1.5
@@ -3092,41 +3113,41 @@ class popy(object):
             self.default_column_unit = 'mol/m2'
             
             if product in ['AI']:
-                oversampling_list = ['AI']
+                oversampling_list = oversampling_list or ['AI']
                 self.default_subset_function = 'F_subset_S5PAI'
             elif product in ['CH4']:
-                oversampling_list = ['XCH4','albedo',\
+                oversampling_list = oversampling_list or ['XCH4','albedo',\
                                      'surface_altitude']
                 self.default_subset_function = 'F_subset_S5PCH4'
                 self.default_column_unit = 'nmol/mol'
             elif product in ['NO2']:
                 self.default_subset_function = 'F_subset_S5PNO2'
-                oversampling_list = ['column_amount','albedo',\
+                oversampling_list = oversampling_list or ['column_amount','albedo',\
                                      'surface_altitude']
                 self.min_qa_value = 0.75
                 maxsza = 75
                 maxcf = 0.5
             elif product in ['SO2']:
                 self.default_subset_function = 'F_subset_S5PSO2'
-                oversampling_list = ['column_amount','albedo',\
+                oversampling_list = oversampling_list or ['column_amount','albedo',\
                                      'surface_altitude']
                 maxsza = 60
                 maxcf = 0.3 # see https://sentinel.esa.int/documents/247904/3541451/Sentinel-5P-Sulphur-Dioxide-Readme.pdf, section 3.1
             elif product in ['CO']:
                 self.default_subset_function = 'F_subset_S5PCO'
-                oversampling_list = ['column_amount','albedo',\
+                oversampling_list = oversampling_list or ['column_amount','albedo',\
                                      'surface_altitude']
             elif product in ['HCHO']:
                 self.default_subset_function = 'F_subset_S5PHCHO'
-                oversampling_list = ['column_amount','albedo',\
+                oversampling_list = oversampling_list or ['column_amount','albedo',\
                                      'surface_altitude']
             
         elif(instrum == "IASI"):
             k1 = k1 or 2
             k2 = k2 or 2
             k3 = k3 or 9
-            error_model = "square"
-            oversampling_list = ['column_amount']
+            error_model = error_model or "square"
+            oversampling_list = oversampling_list or ['column_amount']
             xmargin = 2
             ymargin = 2
             maxsza = 90
@@ -3138,8 +3159,8 @@ class popy(object):
             k1 = k1 or 2
             k2 = k2 or 2
             k3 = k3 or 4
-            error_model = "log"
-            oversampling_list = ['column_amount']
+            error_model = error_model or "log"
+            oversampling_list = oversampling_list or ['column_amount']
             xmargin = 2
             ymargin = 2
             maxsza = 90
@@ -3153,8 +3174,8 @@ class popy(object):
             k1 = k1 or 4
             k2 = k2 or 4
             k3 = k3 or 1
-            error_model = "log"
-            oversampling_list = ['column_amount']
+            error_model = error_model or "log"
+            oversampling_list = oversampling_list or ['column_amount']
             xmargin = 2
             ymargin = 2
             maxsza = 90
@@ -3167,8 +3188,8 @@ class popy(object):
             k1 = k1 or 2
             k2 = k2 or 2
             k3 = k3 or 1
-            error_model = "linear"
-            oversampling_list = ['column_amount']
+            error_model = error_model or "linear"
+            oversampling_list = oversampling_list or ['column_amount']
             xmargin = 2
             ymargin = 2
             maxsza = 60
@@ -3430,7 +3451,10 @@ class popy(object):
         # vcd should be in mol/m2
         if func_to_get_vcd is None:
             self.logger.info('the function to calculate vcd is not provided. use column_amount')
-            vcd = self.l2g_data['column_amount']
+            if 'column_amount' in self.l2g_data.keys():
+                vcd = self.l2g_data['column_amount']
+            else:
+                vcd = self.l2g_data['vcd']
         else:
             tmp = func_to_get_vcd(self.l2g_data)
             if isinstance(tmp,dict):
