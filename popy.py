@@ -2066,7 +2066,7 @@ class Level3_Data(dict):
             outlier_std = outlier_std or 2
             fit_chem = fit_chem or False
         else:
-            self.logger.warning('not supported for this product')
+            self.logger.debug('not supported for this product')
             
         if 'column_amount' in self.keys():
             vcd = self['column_amount']
@@ -2122,7 +2122,7 @@ class Level3_Data(dict):
             max_iter = max_iter or 5
             outlier_std = outlier_std or 2
         else:
-            self.logger.warning('not supported for this product')
+            self.logger.debug('not supported for this product')
             
         wt = np.abs(self['wind_topo']/self['column_amount'])
         if 'wind_column_topo' not in self.keys():
@@ -2847,7 +2847,14 @@ class Level3_List(list):
         if l3_list is not None and l3_path_pattern is not None:
             self.logger.info('both l3_list and l3_path_pattern are provided. l3_path_pattern will be overwritten')
             l3_path_pattern = None
-
+        if l3_path_pattern is not None:
+            if_exist = np.array([os.path.exists(d.strftime(l3_path_pattern)) for d in self.dt_array])
+            if not all(if_exist):
+                self.logger.warning('Not all l3 files exist for the pattern!')
+                dt_len = len(self.dt_array)
+                self.dt_array = self.dt_array.delete(np.arange(dt_len)[~if_exist])
+                self.df = pd.DataFrame({'count':range(len(self.dt_array))},index=self.dt_array)
+                self.logger.warning('self.dt_array length is reduced from {} to {}'.format(dt_len,len(self.dt_array)))
         if l3_list is None:
             l3_list = [dt0.strftime(l3_path_pattern) for dt0 in self.dt_array]
             
