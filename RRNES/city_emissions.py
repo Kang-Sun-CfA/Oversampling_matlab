@@ -129,7 +129,7 @@ class Region(dict):
         region_raster:
             a Geo_Raster object covering the entire region and indicating city coverage
         city_names:
-            specify city names to include
+            specify city names to include. a list of city_ascii strings or dict for cities with non-unique names
         max_ncity:
             from the largest, max number of cities to include
         box_km:
@@ -140,8 +140,17 @@ class Region(dict):
         for k,v in self.items():
             loc_filter = (all_city_df['lat']>=v['south']+lat_margin)&(all_city_df['lat']<=v['north']-lat_margin)\
             &(all_city_df['lng']>=v['west']+lon_margin)&(all_city_df['lng']<=v['east']-lon_margin)
+            city_filter = np.zeros(loc_filter.shape,dtype=bool)
             if city_names is not None:
-                loc_filter = loc_filter & all_city_df['city_ascii'].isin(city_names)
+                for city_name in city_names:
+                    if isinstance(city_name,str):
+                        city_filter = city_filter | all_city_df['city_ascii'].isin([city_name])
+                    elif isinstance(city_name,dict):
+                        dict_filter = np.ones(loc_filter.shape,dtype=bool)
+                        for k1,v1 in city_name.items():
+                            dict_filter = dict_filter & all_city_df[k1].isin([v1])
+                        city_filter = city_filter | dict_filter
+                loc_filter = loc_filter & city_filter
             v['city_df'] = all_city_df.loc[loc_filter].\
             sort_values('population',ascending=False).\
             iloc[:max_ncity].reset_index(drop=True)
@@ -173,6 +182,8 @@ class Region(dict):
         '''
         for i,(k,v) in enumerate(self.items()):
             df = v['city_df']
+            # skip subregion if the city is not in it
+            if not np.isin(city_name,df['city_ascii']):continue
             # update city box size
             if isinstance(lon_box_km,list):
                 xleft = lon_box_km[0]
@@ -229,12 +240,13 @@ class Region(dict):
                                        for city_raster in v['city_raster_list']];
             v['l3s'] = l3s            
         
-    def plot_city_emission(self,subregion_name,min_D=1):
+    def plot_city_emission(self,subregion_name,nrow=3,ncol=3,figsize=None,min_D=2,xlim=None,ylim=None):
         '''plot the time series of city emissions per subregion'''
         import matplotlib.dates as mdates
+        figsize = figsize or (12,5)
         v = self[subregion_name]
         
-        fig,axs = plt.subplots(3,3,figsize=(12,5),sharex=True,sharey=True,constrained_layout=True)
+        fig,axs = plt.subplots(nrow,ncol,figsize=figsize,sharex=True,sharey=True,constrained_layout=True)
         axs = axs.ravel()
         for iax,(ax,city_name) in enumerate(zip(axs,v['city_df']['city_ascii'])):
             df = v['l3s'].df
@@ -247,10 +259,14 @@ class Region(dict):
             xdata = df.index.start_time+dt.timedelta(days=15)
             ydata = df['{}_wind_column_topo_chem'.format(city_name)] *1.32e9
             mask = df['{}_num_samples'.format(city_name)]>=min_D
+            # if one month in 2019-22 is invalid, discard this month for all years
+            for month in range(1,13):
+                if not all(mask[(df.index.month == month) & (df.index.year>2018)]):
+                    mask[df.index.month == month] = False
             xdata = xdata[mask]
             ydata = ydata[mask]
             y2019 = y2019[mask]
-            ax.plot(xdata,ydata,'r',xdata,y2019,':')
+            ax.plot(xdata,ydata,'r-o',xdata,y2019,':',markersize=3,mec=(1,0,0,0.5),mfc=(1,0,0,0.3))
             ax.fill_between(xdata,ydata,y2019,
                             where=(ydata<=y2019),
                             facecolor='b', alpha=0.25,interpolate=True)
@@ -258,7 +274,10 @@ class Region(dict):
                             where=(ydata>=y2019),
                             facecolor='r', alpha=0.25,interpolate=True)
             ax.grid()
-            ax.set_xlim([dt.datetime(2018,5,1),dt.datetime(2022,10,1)]);
+            if xlim is not None:
+                ax.set_xlim(xlim);
+            if ylim is not None:
+                ax.set_ylim(ylim);
             ax.set_title('({}) {}'.format(chr(iax+97),city_name))
         axs[3].set_ylabel(r'Emission [nmol m$^{-2}$ s$^{-1}$]');
         for ax in axs[-3:]:
@@ -268,8 +287,29 @@ class Region(dict):
                 label.set(rotation=30, horizontalalignment='right')
         return {'fig':fig,'axs':axs}
     
+    def get_annual_df(self,subregion_name,min_D=2):
+        '''get annual df from monthly df self[subregion_name]['l3s'].df
+        min_D:
+            if num_samples of a city in a month is below this value, the wind_column* 
+            in this month of all years for this city will be np.nan
+        '''
+        v = self[subregion_name]
+        df = v['l3s'].df.copy()
+        for irow,row in v['city_df'].iterrows():
+            city_name = row.city_ascii
+            mask = df['{}_num_samples'.format(city_name)]>=min_D
+            # if one month in 2019-22 is invalid, discard this month for all years
+            for month in range(1,13):
+                if not all(mask[(df.index.month == month) & (df.index.year>2018)]):
+                    mask[df.index.month == month] = False
+            df.loc[~mask,'{}_wind_column_topo_chem'.format(city_name)] = np.nan
+            df.loc[~mask,'{}_wind_column_topo'.format(city_name)] = np.nan
+            df.loc[~mask,'{}_wind_column'.format(city_name)] = np.nan
+        annual_df = df.resample('Y').mean()[dt.datetime(2019,1,1):]
+        return annual_df
+    
     def map_pie_annual_emission(self,subregion_name,figsize=None,size_func=None,
-                                labels_city_name=None,pie_offset_df=None):
+                                labels_city_name=None,pie_offset_df=None,min_D=2):
         '''plot annual emission as pie charts on a map
         size_func:
             callable to project mean annual emission to pie radius. default is natural log
@@ -277,10 +317,12 @@ class Region(dict):
             one city to label the wedges
         pie_offset_df:
             a dataframe, with fields city_ascii, dx, and dy, to specify cities with offset pie to avoid overlapping
+        min_D:
+            input to get_annual_df
         '''
         figsize = figsize or (15,5)
         v = self[subregion_name]
-        annual_df = v['l3s'].df.resample('Y').mean()[dt.datetime(2019,1,1):]
+        annual_df = self.get_annual_df(subregion_name,min_D)
         fig,ax = plt.subplots(1,1,figsize=figsize,subplot_kw={"projection": ccrs.PlateCarree()})
         ax.coastlines(resolution='50m', color='black', linewidth=1)
         ax.add_feature(cfeature.RIVERS.with_scale('50m'), facecolor='None', edgecolor='blue', 
