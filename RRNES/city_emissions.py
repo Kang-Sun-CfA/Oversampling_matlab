@@ -14,6 +14,10 @@ GeoAxes._pcolormesh_patched = Axes.pcolormesh
 from matplotlib.colors import LogNorm
 from scipy.io import loadmat
 import rasterio
+from matplotlib.patches import Rectangle
+from matplotlib.patches import ConnectionPatch
+from matplotlib import path 
+from scipy.io import loadmat
 
 class Geo_Raster(dict):
     '''class based on dict, representing a geospatial raster'''
@@ -22,7 +26,7 @@ class Geo_Raster(dict):
         self.name = name
     
     def read_mat(self,mat_fn):
-        from scipy.io import loadmat
+        
         d = loadmat(mat_fn,squeeze_me=True)
         self['xgrid'] = d['xgrid']
         self['ygrid'] = d['ygrid']
@@ -45,7 +49,7 @@ class Geo_Raster(dict):
     
     def trim_by_polygon(self,boundary_x,boundary_y,
                         in_boundary_value=None,out_boundary_value=None,name=None):
-        from matplotlib import path 
+        
         boundary_polygon = path.Path([(bx,by) for (bx,by) in zip(boundary_x,boundary_y)])
         name = name or self.name
         new = Geo_Raster(name)
@@ -108,7 +112,7 @@ class Region(dict):
         self.north = north
     def plot(self,ax=None):
         '''overview subregions'''
-        from matplotlib.patches import Rectangle
+        
         if ax is None:
             fig,ax = plt.subplots(1,1,figsize=(10,5),subplot_kw={"projection": ccrs.PlateCarree()})
         for k,v in self.items():
@@ -240,6 +244,97 @@ class Region(dict):
                                        for city_raster in v['city_raster_list']];
             v['l3s'] = l3s            
         
+    def plot_monthly_emission(self,subregion_name,nrow=3,ncol=3,hspace=0.39,wspace=0.15,
+                              figsize=None,min_D=2,xlim=None,abs_ylim=None,rel_ylim=None,
+                              label_ax_idx=None):
+        '''next generation of plot_city_emission, add relative value panels'''
+        import matplotlib.dates as mdates
+        # import matplotlib.ticker as mtick
+        figsize = figsize or (12,5)
+        v = self[subregion_name]
+        abs_ylim = abs_ylim or [-2,30]
+        rel_ylim = rel_ylim or [0,2.5]
+        xlim = xlim or [dt.datetime(2018,5,1),dt.datetime(2023,1,1)]
+        label_ax_idx = label_ax_idx or (0,1,0)
+        fig = plt.figure(figsize=figsize, constrained_layout=False)
+        outer_grid = fig.add_gridspec(nrow, ncol, hspace=hspace,wspace=wspace)
+        axss = np.empty((nrow,ncol,2),dtype=np.object)
+        df = v['l3s'].df
+
+        icity = 0
+        for a in range(nrow):
+            for b in range(ncol):
+                city_name = v['city_df']['city_ascii'].iloc[icity]
+                y2019 = np.zeros_like(df['{}_wind_column'.format(city_name)])
+                for month in range(1,13):
+                    y2019[df.index.month==month] = \
+                    df['{}_wind_column_topo_chem'.format(city_name)].loc[(df.index.month==month) & (df.index.year==2019)]
+                y2019 = y2019*1.32e9
+                xdata = df.index.start_time+dt.timedelta(days=15)
+                ydata = df['{}_wind_column_topo_chem'.format(city_name)] *1.32e9
+                mask = df['{}_num_samples'.format(city_name)]>=min_D
+                # remove negative months (saw in autumn Milan)
+                mask = mask & (ydata>=0)
+                # if one month in 2019-22 is invalid, discard this month for all years
+                for month in range(1,13):
+                    if not all(mask[(df.index.month == month) & (df.index.year>2018)]):
+                        mask[df.index.month == month] = False
+                xdata = xdata[mask]
+                ydata = ydata[mask]
+                y2019 = y2019[mask]
+
+                # gridspec inside gridspec
+                inner_grid = outer_grid[a, b].subgridspec(2, 1, wspace=0, hspace=0)
+                axs = inner_grid.subplots(sharex=True)  # Create all subplots for the inner grid.
+                lines = np.empty(2,dtype=np.object)
+                ax = axs[0]
+                lines[0] = ax.plot(xdata,ydata,'r-o',xdata,y2019,':',markersize=3,mec=(1,0,0,0.5),mfc=(1,0,0,0.3))
+                ax.fill_between(xdata,ydata,y2019,
+                                where=(ydata<=y2019),
+                                facecolor='b', alpha=0.25,interpolate=True)
+                ax.fill_between(xdata,ydata,y2019,
+                                where=(ydata>=y2019),
+                                facecolor='r', alpha=0.25,interpolate=True)
+                ax.set_ylim(abs_ylim)
+                ax.set_xlim(xlim)
+                ax.set_title('({}) {}'.format(chr(icity+97),city_name))
+                ax.grid()
+
+                ax = axs[1]
+                lines[1] = ax.plot(xdata,ydata/y2019,'r-o',xdata,y2019/y2019,':',markersize=3,mec=(1,0,0,0.5),mfc=(1,0,0,0.3))
+                ax.fill_between(xdata,ydata/y2019,y2019/y2019,
+                                where=(ydata<=y2019),
+                                facecolor='b', alpha=0.25,interpolate=True)
+                ax.fill_between(xdata,ydata/y2019,y2019/y2019,
+                                where=(ydata>=y2019),
+                                facecolor='r', alpha=0.25,interpolate=True)
+                ax.set_ylim(rel_ylim)
+                ax.set_xlim(xlim)
+                trimmask = ydata/y2019>rel_ylim[1]
+                for x,y in zip(xdata[trimmask],(ydata/y2019)[trimmask]):
+                    self.logger.warning('{} relative emission is {} in {}'.format(city_name,y,x.strftime('%Y%m')))
+                ax.grid()
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%b'))
+        #         ax.yaxis.set_major_formatter(mtick.PercentFormatter())
+                # Rotates and right-aligns the x labels so they don't crowd each other.
+                for label in ax.get_xticklabels(which='major'):
+                    label.set(rotation=30, horizontalalignment='right')
+
+                axs[1].yaxis.tick_right()
+                axs[1].yaxis.set_label_position("right")
+                if label_ax_idx is not None:
+                    if a == label_ax_idx[0] and b == label_ax_idx[1]:
+                        idx = label_ax_idx[2]
+                        axs[idx].legend(lines[idx],['Monthly emissions','Repeated 2019 emissions'])
+                axss[a,b,:] = axs
+
+                icity += 1
+        for ax in axss[:,0,0]:
+            ax.set_ylabel(r'nmol m$^{-2}$ s$^{-1}$');
+        for ax in axss[:,-1,1]:
+            ax.set_ylabel('Relative values to 2019');
+        return {'fig':fig,'axss':axss}
+    
     def plot_city_emission(self,subregion_name,nrow=3,ncol=3,figsize=None,min_D=2,xlim=None,ylim=None):
         '''plot the time series of city emissions per subregion'''
         import matplotlib.dates as mdates
@@ -287,7 +382,7 @@ class Region(dict):
                 label.set(rotation=30, horizontalalignment='right')
         return {'fig':fig,'axs':axs}
     
-    def get_annual_df(self,subregion_name,min_D=2):
+    def get_annual_df(self,subregion_name,min_D=2,min_wind_column_topo_chem=0):
         '''get annual df from monthly df self[subregion_name]['l3s'].df
         min_D:
             if num_samples of a city in a month is below this value, the wind_column* 
@@ -297,7 +392,8 @@ class Region(dict):
         df = v['l3s'].df.copy()
         for irow,row in v['city_df'].iterrows():
             city_name = row.city_ascii
-            mask = df['{}_num_samples'.format(city_name)]>=min_D
+            mask = (df['{}_num_samples'.format(city_name)]>=min_D) &\
+            (df['{}_wind_column_topo_chem'.format(city_name)]>=min_wind_column_topo_chem)
             # if one month in 2019-22 is invalid, discard this month for all years
             for month in range(1,13):
                 if not all(mask[(df.index.month == month) & (df.index.year>2018)]):
@@ -462,3 +558,154 @@ class Region(dict):
                 ax.set_xlim(xlim);ax.set_ylim(ylim)
             ax.set_title('({}) {}'.format(chr(iax+97),city_name))
         return {'fig':fig,'axs':axs}
+    
+    def plot_AMS_pie(self,city_names,city_order=None,
+                     figsize=None,nrow=5,ncol=6,GridSpec_kw=None,
+                     plot_field=None,l3_path_pattern=None,period_range=None,
+                     grid_size=None,west=None,east=None,south=None,north=None,pcolormesh_kw=None,
+                     labels_city_name=None,size_func=None,min_D=2,colorbar_kw=None,pctdistance_df=None):
+        '''plot Aerosol Mass Spectrometry-tyle pie/map
+        city_names:
+            names of cities to plot as pies
+        city_order:
+            order of cities around the border, range(len(city_names)) by default
+        figsize:
+            size of figure
+        nrow,ncol:
+            numbers of rows and columns input to GridSpec. the edge panels (2*nrow+2*ncol-4) host the pies.
+            to plot 18 cities, nrow + ncol has to be at least 11
+        GridSpec_kw:
+            keyword arguments to GridSpec
+        plot_field:
+            Level3_Data field to pcolormesh on the central map. plot bare cartopy map if None
+        period_range:
+            time input to Level3_List
+        l3_path_pattern:
+            l3 file locations
+        grid_size:
+            block_reduce the l3 grid size if provided
+        west/east/south/north:
+            trim the region if provided
+        pcolormesh_kw:
+            keyword arguments to pcolormesh
+        size_func:
+            callable to project mean annual emission to pie radius. default is natural log
+        lables_city_name:
+            one city to label the wedges
+        min_D:
+            input to get_annual_df
+        colorbar_kw:
+            keyword arguments related to the colorbar. if not None, has to contain bounds,
+            label, color, orientation
+        pctdistance_df:
+            if specified, should be a df of city_ascii and pctdistance to the corresponding pie
+        '''
+        if plot_field is not None:
+            west = west or self.west
+            east = east or self.east
+            south = south or self.south
+            north = north or self.north
+            if not hasattr(self,'l3'):
+                l3s = Level3_List(period_range,west=west,east=east,south=south,north=north)
+                l3s.read_nc_pattern(l3_path_pattern=l3_path_pattern,
+                                    fields_name=['column_amount','surface_altitude','wind_topo',
+                                                 'wind_column','wind_column_xy','wind_column_rs'])
+                l3s.fit_topography()
+                l3s.fit_chemistry(resample_rule='month_of_year',return_resampled=False)
+                l3 = l3s.aggregate()
+            else:
+                self.logger.warning('use existing self.l3')
+                l3 = self.l3
+            if grid_size is not None:
+                l3 = l3.block_reduce(grid_size)
+            self.l3 = l3
+        
+        default_pctdistance = 0.6
+        figsize= figsize or (12,10)
+        size_func = size_func or (lambda x:np.log(x)/2)
+        GridSpec_kw = GridSpec_kw or dict(hspace=0.5, wspace=0.5)
+        city_order = city_order or range(len(city_names))
+        def pct_func(pct, allvals):
+            absolute = (pct/100.*np.sum(allvals))
+            return "{:.1f}".format(absolute)
+        fig = plt.figure(figsize=figsize)
+        grid = plt.GridSpec(nrow, ncol, **GridSpec_kw)
+        ax = fig.add_subplot(grid[1:-1,1:-1],projection=ccrs.PlateCarree())
+        ax.coastlines(resolution='50m', color='black', linewidth=1)
+#         ax.add_feature(cfeature.RIVERS.with_scale('50m'), facecolor='None', edgecolor='blue', 
+#                        linestyle='-.',zorder=0,lw=0.5)
+#         ax.add_feature(cfeature.LAKES.with_scale('50m'), facecolor='None',
+#                        edgecolor='blue', zorder=0, linestyle='-',lw=0.5)
+        cb = None;pc = None
+        if plot_field is not None:
+            if 'wind_column' in plot_field:
+                plotdata = l3[plot_field]*1.32e9
+            else:
+                plotdata = l3[plot_field]
+            pc = ax.pcolormesh(*F_center2edge(l3['xgrid'],l3['ygrid']),plotdata,
+                               **pcolormesh_kw)
+            if colorbar_kw is not None:
+                cax = ax.inset_axes(colorbar_kw['bounds'])
+                cb = fig.colorbar(pc,ax=ax,cax=cax,orientation=colorbar_kw['orientation'])
+                cb.set_label(label=colorbar_kw['label'],size=10,color=colorbar_kw['color'])
+                cb.outline.set_edgecolor(colorbar_kw['color'])
+                cb.ax.yaxis.set_tick_params(color=colorbar_kw['color'], labelcolor=colorbar_kw['color'])
+                cb.ax.xaxis.set_tick_params(color=colorbar_kw['color'], labelcolor=colorbar_kw['color'])
+                cb.ax.tick_params(labelsize=10)
+                cb.ax.tick_params(axis=u'both', which=u'both',length=0)
+        
+        ax.set_xlim([west,east])
+        ax.set_ylim([south,north])
+        city_pie_df = pd.DataFrame({'city_ascii':city_names,
+                                   'order':city_order})
+        pie_rows = np.hstack((np.arange(0,nrow),np.ones(ncol-1)*nrow-1,
+                              np.arange(nrow-2,-1,-1),np.zeros(ncol-2))).astype(int)
+        pie_cols = np.hstack((np.zeros(nrow),np.arange(1,ncol),
+                              np.ones(nrow-1)*-1,np.arange(ncol-2,0,-1))).astype(int)
+        city_pie_df['row'] = pie_rows[city_pie_df['order']]
+        city_pie_df['col'] = pie_cols[city_pie_df['order']]
+        if pctdistance_df is not None:
+            city_pie_df = city_pie_df.merge(pctdistance_df,on='city_ascii',how='outer')
+            city_pie_df['pctdistance'].fillna(default_pctdistance,inplace=True)
+        for k,v in self.items():
+            ax.add_patch(Rectangle((v['west'],v['south']),
+                                  v['east']-v['west'],v['north']-v['south'],
+                                 fc='none',color='r',linewidth=1,linestyle='--'))
+            annual_df = self.get_annual_df(k,min_D=min_D)
+            for irow,row in city_pie_df.iterrows():
+                if not np.isin(row.city_ascii,v['city_df']['city_ascii']):continue
+                ax_sub = fig.add_subplot(grid[row.row,row.col])
+                ax_sub.set_aspect("equal")
+                annual_nmol = annual_df[f'{row.city_ascii}_wind_column_topo_chem']*1.32e9
+                total_nmol = np.nanmean(annual_nmol)
+                size = size_func(total_nmol)
+                if hasattr(row,'pctdistance'):
+                    pctdistance = row.pctdistance
+                else:
+                    pctdistance = default_pctdistance
+                if row['city_ascii'] == labels_city_name:
+                    wedges, texts, autotexts = ax_sub.pie(annual_nmol,radius=size,startangle=90,counterclock=False,
+                           wedgeprops={'alpha':0.95,'edgecolor':'none'},
+                          autopct=lambda pct: pct_func(pct, annual_nmol),pctdistance=pctdistance,
+                          textprops={'color':'k','fontsize':8},labels=range(2019,2023))
+
+                else:
+                    wedges, texts, autotexts = ax_sub.pie(annual_nmol,radius=size,startangle=90,counterclock=False,
+                           wedgeprops={'alpha':0.95,'edgecolor':'none'},pctdistance=pctdistance,
+                          autopct=lambda pct: pct_func(pct, annual_nmol),
+                          textprops={'color':'k','fontsize':8})
+                for w in wedges:
+                    w.set_zorder(2)
+                for t in texts:
+                    t.set_color('k')
+                city_row = v['city_df'].loc[v['city_df']['city_ascii']==row.city_ascii]
+                con = ConnectionPatch(xyA=(0,0), xyB=(city_row.lng.squeeze(),city_row.lat.squeeze()), coordsA="data", 
+                                      coordsB=ax.transData,
+                                      axesA=ax_sub, axesB=ax,
+                                      arrowstyle="->",zorder=1,color='k')
+                ax_sub.add_artist(con)
+                if row.row in [-1,nrow-1] and row.col not in [0,ncol-1,-1]:
+                    ax_sub.set_title('{}, {:.1f}'.format(row.city_ascii,total_nmol),fontsize=10,y=-0.05)
+                else:
+                    ax_sub.set_title('{}, {:.1f}'.format(row.city_ascii,total_nmol),fontsize=10)
+        return {'fig':fig,'ax':ax}

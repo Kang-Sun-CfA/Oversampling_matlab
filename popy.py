@@ -6292,7 +6292,7 @@ class popy(object):
             l2g_data0['v'] = f_vvv((l2g_data0['latc'],l2g_data0['ifov']))
             l2g_data0['t'] = f_ttt((l2g_data0['latc'],l2g_data0['ifov']))
             l2g_data0['column_amount'] = outp['nh3_total_column'][validmask]
-            l2g_data0['column_uncertainty'] = outp['nh3_total_column_uncertainty'][validmask]/100*outp['nh3_total_column'][validmask]
+            l2g_data0['column_uncertainty'] = np.abs(outp['nh3_total_column_uncertainty'][validmask]/100*outp['nh3_total_column'][validmask])
             l2g_data0['UTC_matlab_datenum'] = outp['UTC_matlab_datenum'][validmask]
             l2g_data0['SolarZenithAngle'] = outp['solar_zenith_angle'][validmask]
             l2g_data0['cloud_fraction'] = outp['cloud_coverage'][validmask]/100
