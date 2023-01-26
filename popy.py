@@ -2078,12 +2078,12 @@ class Level3_Data(dict):
         if mask is not None:
             topo_mask = topo_mask & mask
         count = 0
-        try:
-            precision=self.get_emission_precision(mask=topo_mask)
-            self.logger.info('emission random error is {:.3e}'.format(precision))
-        except Exception as e:
-            self.logger.warning(e)
-            self.logger.warning('error in precision calculation')
+#         try:
+#             precision=self.get_emission_precision(mask=topo_mask)
+#             self.logger.info('emission random error is {:.3e}'.format(precision))
+#         except Exception as e:
+#             self.logger.warning(e)
+#             self.logger.warning('error in precision calculation')
         while count < max_iter:
             if count > 0:
                 topo_mask = topo_mask & (np.abs(topo_residual) < outlier_std*np.nanstd(topo_fit.resid))
@@ -2134,11 +2134,11 @@ class Level3_Data(dict):
         if mask is not None:
             chem_mask = chem_mask & mask
         count = 0
-        try:
-            precision=self.get_emission_precision(mask=chem_mask)
-            self.logger.info('emission random error is {:.3e}'.format(precision))
-        except:
-            self.logger.warning('error in precision calculation')
+#         try:
+#             precision=self.get_emission_precision(mask=chem_mask)
+#             self.logger.info('emission random error is {:.3e}'.format(precision))
+#         except:
+#             self.logger.warning('error in precision calculation')
         while count < max_iter:
             if count > 0:
                 chem_mask = chem_mask & (np.abs(chem_residual) < outlier_std*np.nanstd(chem_fit.resid)) &\
@@ -2749,6 +2749,9 @@ class Level3_Data(dict):
              layer_threshold=0.5,draw_colorbar=True,
              func=None,**kwargs):
         import matplotlib.pyplot as plt
+        import warnings
+        import matplotlib.cbook
+        warnings.filterwarnings("ignore",category=matplotlib.cbook.mplDeprecation)
         import cartopy.crs as ccrs
         import cartopy.feature as cfeature
         # workaround for cartopy 0.16
