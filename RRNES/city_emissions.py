@@ -222,13 +222,28 @@ class Region(dict):
             self[k]['city_raster_list'][df.loc[df['city_ascii']==city_name].index[0]] = new_raster
             self[k]['city_df'] = df
         
-    def get_city_emission(self,period_range,l3_path_pattern):
+    def get_city_emission(self,period_range,l3_path_pattern,fit_topo_kw=None,fit_chem_kw=None,
+                          chem_min_column_amount=None,chem_max_wind_column=None):
         '''work with the Level3_List class to get time-resolved emissions for each city
         period_range:
             time input to Level3_List
         l3_path_pattern:
             l3 file locations 
+        fit_topo_kw:
+            keyword argument to fit_topography function
+        fit_chem_kw:
+            keyword argument to fit_chemistry function
+        chem_min_column_amount:
+            min column amount allowed in fit_chem
+        chem_max_wind_column:
+            max wind_column allowed in fit_chem
         '''
+        fit_topo_kw = fit_topo_kw or {}
+        fit_chem_kw = fit_chem_kw or dict(resample_rule='month_of_year',return_resampled=True)
+        if 'resample_rule' not in fit_chem_kw.keys():
+            fit_chem_kw['resample_rule'] = 'month_of_year'
+        if 'return_resampled' not in fit_chem_kw.keys():
+            fit_chem_kw['return_resampled'] = True
         for i,(k,v) in enumerate(self.items()):
             if isinstance(l3_path_pattern,(list, tuple, np.ndarray)):
                 l3p = l3_path_pattern[i]
@@ -238,8 +253,16 @@ class Region(dict):
             l3s.read_nc_pattern(l3_path_pattern=l3p,
                                fields_name=['column_amount','surface_altitude','wind_topo',
                                         'wind_column','wind_column_xy','wind_column_rs'])
-            l3s.fit_topography()
-            l3s_m = l3s.fit_chemistry(resample_rule='month_of_year',return_resampled=True)
+            l3s.fit_topography(**fit_topo_kw)
+            if chem_min_column_amount is not None or chem_max_wind_column is not None:
+                l3 = l3s.aggregate()
+                mask = np.ones(l3['column_amount'].shape,dtype=bool)
+                if chem_min_column_amount is not None:
+                    mask = mask & (l3['column_amount']>=chem_min_column_amount)
+                if chem_max_wind_column is not None:
+                    mask = mask & (l3['wind_column']<=chem_max_wind_column)
+                fit_chem_kw['mask'] = mask
+            l3s_m = l3s.fit_chemistry(**fit_chem_kw)
             [l3s.average_by_finerMask(tif_dict=city_raster) \
                                        for city_raster in v['city_raster_list']];
             v['l3s'] = l3s            

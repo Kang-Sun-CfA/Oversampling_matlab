@@ -2869,7 +2869,7 @@ class Level3_List(list):
     def add(self,l3):
         self.append(l3.trim(west=self.west,east=self.east,south=self.south,north=self.north))
     
-    def resample(self,rule='month_of_year'):
+    def resample(self,rule='month_of_year',half_running_window=0):
         if rule == 'month_of_year':
             resampler = self.df.groupby(by=self.df.index.month)
         else:
@@ -2879,7 +2879,9 @@ class Level3_List(list):
         for k,v in resampler.indices.items():
             l3 = Level3_Data()
             for v0 in v:
-                l3 = l3.merge(self[int(v0)])
+                for v00 in np.arange(v0-half_running_window,v0+half_running_window+1):
+                    if v00 >=0 and v00 < len(self):
+                        l3 = l3.merge(self[int(v00)])
             l3s_resampled.add(l3)
         return l3s_resampled,resampler
     
@@ -2887,12 +2889,13 @@ class Level3_List(list):
         self.df['wind_column_precision'] = [l3.get_emission_precision(mask=mask) for l3 in self]
         self.df['wind_column_precision_singleLayer'] = self.df['wind_column_precision']\
         *np.sqrt(np.array([l3.average_by_mask(mask=mask,fields_to_average=['num_samples'])['num_samples'] for l3 in self]))
-    def fit_topography(self,resample_rule=None,return_resampled=False,**kwargs):
+    
+    def fit_topography(self,resample_rule=None,half_running_window=0,return_resampled=False,**kwargs):
         if resample_rule is None:
             for l3 in self:
                 l3.fit_topography(**kwargs)
         else:
-            l3s_resampled,resampler = self.resample(rule=resample_rule)
+            l3s_resampled,resampler = self.resample(rule=resample_rule,half_running_window=half_running_window)
             for l3,(ind,sub_df) in zip(l3s_resampled,resampler.__iter__()):
                 l3.fit_topography(**kwargs)
                 for irow,row in sub_df.iterrows():
@@ -2907,12 +2910,12 @@ class Level3_List(list):
         if resample_rule is not None and return_resampled:
             return l3s_resampled
     
-    def fit_chemistry(self,resample_rule=None,return_resampled=False,**kwargs):
+    def fit_chemistry(self,resample_rule=None,half_running_window=0,return_resampled=False,**kwargs):
         if resample_rule is None:
             for l3 in self:
                 l3.fit_chemistry(**kwargs)
         else:
-            l3s_resampled,resampler = self.resample(rule=resample_rule)
+            l3s_resampled,resampler = self.resample(rule=resample_rule,half_running_window=half_running_window)
             for l3,(ind,sub_df) in zip(l3s_resampled,resampler.__iter__()):
                 l3.fit_chemistry(**kwargs)
                 for irow,row in sub_df.iterrows():
