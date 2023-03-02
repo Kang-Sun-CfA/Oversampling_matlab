@@ -277,7 +277,7 @@ class Region(dict):
         v = self[subregion_name]
         abs_ylim = abs_ylim or [-2,30]
         rel_ylim = rel_ylim or [0,2.5]
-        xlim = xlim or [dt.datetime(2018,5,1),dt.datetime(2023,1,1)]
+        xlim = xlim or [dt.datetime(2018,5,1),dt.datetime(2023,2,1)]
         label_ax_idx = label_ax_idx or (0,1,0)
         fig = plt.figure(figsize=figsize, constrained_layout=False)
         outer_grid = fig.add_gridspec(nrow, ncol, hspace=hspace,wspace=wspace)
@@ -293,14 +293,14 @@ class Region(dict):
                     y2019[df.index.month==month] = \
                     df['{}_wind_column_topo_chem'.format(city_name)].loc[(df.index.month==month) & (df.index.year==2019)]
                 y2019 = y2019*1.32e9
-                xdata = df.index.start_time+dt.timedelta(days=15)
+                xdata = df.index.start_time+dt.timedelta(days=0)
                 ydata = df['{}_wind_column_topo_chem'.format(city_name)] *1.32e9
                 mask = df['{}_num_samples'.format(city_name)]>=min_D
                 # remove negative months (saw in autumn Milan)
                 mask = mask & (ydata>=0)
                 # if one month in 2019-22 is invalid, discard this month for all years
                 for month in range(1,13):
-                    if not all(mask[(df.index.month == month) & (df.index.year>2018)]):
+                    if not all(mask[(df.index.month == month) & (df.index.year>2018) & (df.index.year<2023)]):
                         mask[df.index.month == month] = False
                 xdata = xdata[mask]
                 ydata = ydata[mask]
@@ -419,12 +419,14 @@ class Region(dict):
             (df['{}_wind_column_topo_chem'.format(city_name)]>=min_wind_column_topo_chem)
             # if one month in 2019-22 is invalid, discard this month for all years
             for month in range(1,13):
-                if not all(mask[(df.index.month == month) & (df.index.year>2018)]):
+                if not all(mask[(df.index.month == month) & (df.index.year>2018) & (df.index.year<2023)]):
                     mask[df.index.month == month] = False
             df.loc[~mask,'{}_wind_column_topo_chem'.format(city_name)] = np.nan
             df.loc[~mask,'{}_wind_column_topo'.format(city_name)] = np.nan
             df.loc[~mask,'{}_wind_column'.format(city_name)] = np.nan
-        annual_df = df.resample('Y').mean()[dt.datetime(2019,1,1):]
+        annual_df = df.resample('Y').mean()
+        annual_df = annual_df.loc[(annual_df.index.start_time>=dt.datetime(2019,1,1))\
+                                  &(annual_df.index.start_time<dt.datetime(2023,1,1))]
         return annual_df
     
     def map_pie_annual_emission(self,subregion_name,figsize=None,size_func=None,

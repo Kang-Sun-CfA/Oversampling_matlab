@@ -1800,18 +1800,29 @@ class Level3_Data(dict):
                 self['wind_topo_rs'] = wind_topo_rs
         
         if albedo_orders is not None and 'albedo' in self.keys():
+            ps = self['surface_pressure']
+            # d ps/dx, d ps/dy
+            dpdx,dpdy,dpdr,dpds = F_grads(ps,dy,dx_vec,dd_vec,finite_difference_order)
+            # grad(ps) dot wind
+            wind_ps_xy = dpdx*self['wind_e'] + dpdy*self['wind_n']
+            wind_ps_rs = dpdr*self['wind_ne'] + dpds*self['wind_nw'] \
+                + r_dot_s*(dpdr*self['wind_nw'] + dpds*self['wind_ne'])
+            wind_ps = np.nanmean(np.array([wind_ps_xy,wind_ps_rs]),axis=0)
+            wind_ps[np.isnan(wind_ps_xy) & np.isnan(wind_ps_rs)] = np.nan
+            
             a0 = self['albedo']
+            # d albedo/dx, d albedo/dy
             dcdx,dcdy,dcdr,dcds = F_grads(a0,dy,dx_vec,dd_vec,finite_difference_order)
+            # grad(albedo) dot wind
             wind_albedo_xy = dcdx*self['wind_e'] + dcdy*self['wind_n']
             wind_albedo_rs = dcdr*self['wind_ne'] + dcds*self['wind_nw'] \
                 + r_dot_s*(dcdr*self['wind_nw'] + dcds*self['wind_ne'])
             wind_albedo = np.nanmean(np.array([wind_albedo_xy,wind_albedo_rs]),axis=0)
             wind_albedo[np.isnan(wind_albedo_xy) & np.isnan(wind_albedo_rs)] = np.nan
-            if write_diagnostic:
-                self['wind_albedo_xy'] = wind_albedo_xy
-                self['wind_albedo_rs'] = wind_albedo_rs
+            
             for order in albedo_orders:
-                self['wind_albedo_{}'.format(order)] = wind_albedo*np.power(a0,order-1)
+                self['wind_albedo_{}'.format(order)] = order*ps*wind_albedo*np.power(a0,order-1)\
+                +np.power(a0,order)*wind_ps
                 
     def calculate_flux_divergence(self,write_diagnostic=False,remove_wind_div=False,
                                   finite_difference_order=2,calculate_wind_albedo=False):
@@ -2035,7 +2046,7 @@ class Level3_Data(dict):
         else:
             precision = 0.5*np.nanstd((self['wind_column_xy']-self['wind_column_rs'])[mask].ravel())
         return precision
-    
+        
     def fit_topography(self,mask=None,min_windtopo=None,max_windtopo=None,max_iter=None,outlier_std=None,fit_chem=None):
         '''infer scale height for the wind-topography term
         '''
@@ -2159,6 +2170,71 @@ class Level3_Data(dict):
         self.chem_fit = chem_fit
         self['chem_residual'] = chem_residual
         self['wind_column_topo_chem'] = wc_chem
+    
+    def fit_albedo(self,albedo_fields=None,albedo_orders=None,
+                   mask=None,min_windtopo=None,max_windtopo=None,max_iter=None,outlier_std=None,fit_topo=True):
+        '''infer albedo-related bias
+        '''
+        import statsmodels.formula.api as smf
+        import pandas as pd
+        min_windtopo = min_windtopo or 0.
+        max_windtopo = max_windtopo or 0.001
+        max_iter = max_iter or 2
+        outlier_std = outlier_std or 2
+        if albedo_fields is None:
+            albedo_fields = [k for k in self.keys() if 'wind_albedo' in k]
+        # assuming fields defined like ['wind_albedo_1','wind_albedo_2']
+        if albedo_orders is None:
+            albedo_orders = np.array([float(f.split('_')[-1]) for f in albedo_fields])
+        # replace '-' by 'm' to support negative power
+        albedo_fields_minus2m = [f.replace('-','m') for f in albedo_fields]
+        if 'column_amount' in self.keys():
+            vcd = self['column_amount']
+        else:
+            vcd = self['vcd']
+        
+        if 'wind_column_topo' not in self.keys():
+            self.logger.warning('run fit_topography first!')
+            wc = self['wind_column']
+        else:
+            wc = self['wind_column_topo']
+        
+        wt = np.abs(self['wind_topo']/vcd)
+        alb_mask = (wt >= min_windtopo) & (wt <= max_windtopo)
+        if mask is not None:
+            alb_mask = alb_mask & mask
+        count = 0
+        while count < max_iter:
+            if count > 0:
+                alb_mask = alb_mask & (np.abs(alb_residual) < outlier_std*np.nanstd(alb_fit.resid))
+            self.logger.info('{} total grids, fitting X using {} ({:.2%}) grids'.format(
+                len(self['xgrid'])*len(self['ygrid']),np.sum(alb_mask),
+                np.sum(alb_mask)/(len(self['xgrid'])*len(self['ygrid']))))
+            df_dict = {'y':self['wind_column'][alb_mask],'wt':self['wind_topo'][alb_mask]}
+            df_dict.update({km:self[k][alb_mask] for k,km in zip(albedo_fields,albedo_fields_minus2m)})
+            df = pd.DataFrame(df_dict).dropna()
+            
+            if fit_topo:
+                reg_formula = 'y ~ wt'
+            else:
+                reg_formula = 'y ~'
+            for f in albedo_fields_minus2m:
+                reg_formula += ' + '+f
+            
+            alb_fit = smf.ols(reg_formula, data=df).fit()
+            self.logger.info('iter {}, r2 {:.3f}'.format(count,alb_fit.rsquared))
+            self.logger.info('iter {}, rmse {:.3e}'.format(count,np.sqrt(alb_fit.mse_resid)))
+            if fit_topo:
+                self.logger.info('iter {}, scale height {:.3f} km'.format(count,-1/(alb_fit.params['wt'])/1000))
+            alb_residual = np.full_like(self['num_samples'],np.nan)
+            alb_residual[alb_mask] = alb_fit.resid
+            wc_alb = wc
+            for f,fm,order in zip(albedo_fields,albedo_fields_minus2m,albedo_orders):
+                wc_alb -= alb_fit.params[fm]*self[f]
+            count += 1
+        self.alb_fit = alb_fit
+        self['alb_residual'] = alb_residual
+        self['wind_column_topo_alb'] = wc_alb
     
     def average_by_finerMask(self,tif_dict=None,tif_fn=None,tif_mask=None,fields_to_average=None):
         '''average l3 using a mask that does not match the l3 grid, and finer. the mask
@@ -2930,9 +3006,47 @@ class Level3_List(list):
         if resample_rule is not None and return_resampled:
             return l3s_resampled
     
-    def aggregate(self):
+    def fit_albedo(self,resample_rule=None,half_running_window=0,return_resampled=False,
+                   albedo_fields=None,albedo_orders=None,**kwargs):
+        if albedo_fields is None:
+            albedo_fields = [k for k in self.keys() if 'wind_albedo' in k]
+        # assuming fields defined like ['wind_albedo_1','wind_albedo_2']
+        if albedo_orders is None:
+            albedo_orders = np.array([float(f.split('_')[-1]) for f in albedo_fields])
+        # replace '-' by 'm' to support negative power
+        albedo_fields_minus2m = [f.replace('-','m') for f in albedo_fields]
+        
+        if resample_rule is None:
+            for l3 in self:
+                l3.fit_albedo(albedo_fields=albedo_fields,albedo_orders=albedo_orders,**kwargs)
+        else:
+            l3s_resampled,resampler = self.resample(rule=resample_rule,half_running_window=half_running_window)
+            for l3,(ind,sub_df) in zip(l3s_resampled,resampler.__iter__()):
+                l3.fit_albedo(albedo_fields=albedo_fields,albedo_orders=albedo_orders,**kwargs)
+                for irow,row in sub_df.iterrows():
+                    self[int(row['count'])].alb_fit = l3.alb_fit
+                    
+                    wc_alb = self[int(row['count'])]['wind_column_topo'].copy()
+                    for f,fm,order in zip(albedo_fields,albedo_fields_minus2m,albedo_orders):
+                        wc_alb -= l3.alb_fit.params[fm]*self[int(row['count'])][f]
+                    self[int(row['count'])]['wind_column_topo_alb'] = wc_alb
+        
+        self.df['alb_rmse'] = [np.sqrt(l3.alb_fit.mse_resid) for l3 in self]
+        self.df['alb_r2'] = [l3.alb_fit.rsquared for l3 in self]
+        self.albedo_fields = albedo_fields
+        self.albedo_orders = albedo_orders
+        if resample_rule is not None and return_resampled:
+            return l3s_resampled
+    
+    def aggregate(self,start_dt=None,end_dt=None):
         l3 = Level3_Data()
         for l in self:
+            if start_dt is not None:
+                if l.end_python_datetime <= start_dt:
+                    continue
+            if end_dt is not None:
+                if l.start_python_datetime >= end_dt:
+                    continue
             l3 = l3.merge(l)
         return l3
     
@@ -3091,7 +3205,7 @@ class popy(object):
             k2 = k2 or 2
             k3 = k3 or 1
             error_model = error_model or "linear"
-            oversampling_list = oversampling_list or ['XCH4','XCO2','terrain_height']
+            oversampling_list = oversampling_list or ['XCH4','XCO2','terrain_height','surface_pressure']
             xmargin = 1.5
             ymargin = 1.5
             maxsza = 60
@@ -3104,7 +3218,7 @@ class popy(object):
             k2 = k2 or 2
             k3 = k3 or 1
             error_model = error_model or "linear"
-            oversampling_list = oversampling_list or ['XCH4','XCO2','terrain_height']
+            oversampling_list = oversampling_list or ['XCH4','XCO2','terrain_height','surface_pressure']
             xmargin = 1.5
             ymargin = 1.5
             maxsza = 60
@@ -3130,7 +3244,7 @@ class popy(object):
                 self.default_subset_function = 'F_subset_S5PAI'
             elif product in ['CH4']:
                 oversampling_list = oversampling_list or ['XCH4','albedo',\
-                                     'surface_altitude']
+                                     'surface_altitude','surface_pressure']
                 self.default_subset_function = 'F_subset_S5PCH4'
                 self.default_column_unit = 'nmol/mol'
             elif product in ['NO2']:
@@ -3510,7 +3624,7 @@ class popy(object):
         if func_to_get_vcd is not None:
             self.l2g_data['vcd'] = vcd
             self.oversampling_list.append('vcd')
-        add_list = ['wind_e','wind_n','wind_ne','wind_nw','avk0']
+        add_list = ['wind_e','wind_n','wind_ne','wind_nw']
         for add_field in add_list:
             if add_field not in self.oversampling_list:
                 self.oversampling_list.append(add_field)
@@ -5177,6 +5291,110 @@ class popy(object):
             l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
         self.logger.warning('adding ones as column_uncertainty for MethaneSAT!')
         l2g_data['column_uncertainty'] = np.ones_like(l2g_data['latc'])
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
+    
+    def F_subset_S5PCH4_WFMD(self,l2_list=None,l2_path_pattern=None,data_fields=None,data_fields_l2g=None):
+        '''
+        subsetting University of Bremen TROPOMI/WFMD data at https://www.iup.uni-bremen.de/carbon_ghg/products/tropomi_wfmd/
+        '''
+        if l2_path_pattern is None and l2_list is None:
+            self.logger.error('provide l2_path_pattern or l2_list!')
+            return
+        from netCDF4 import Dataset
+        start_date = self.start_python_datetime.date()
+        end_date = self.end_python_datetime.date()
+        days = (end_date-start_date).days+1
+        DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+        if l2_path_pattern is not None:
+            l2_list = []
+            for DATE in DATES:
+                flist = glob.glob(DATE.strftime(l2_path_pattern))
+                l2_list = l2_list+flist
+        
+        self.l2_list = l2_list
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        
+        if not data_fields:
+            # absolute path of useful variables in the nc file
+            data_fields = ['/latitude_corners', \
+                           '/longitude_corners',\
+                           '/solar_zenith_angle',\
+                           '/latitude',\
+                           '/longitude',\
+                           '/time',\
+                           '/orbit_number',\
+                           '/xch4_quality_flag',\
+                           '/xch4',\
+                           '/xch4_uncertainty',\
+                           '/xco_quality_flag',\
+                           '/xco',\
+                           '/xco_uncertainty',\
+                           '/h2o_column',\
+                           '/apparent_albedo',\
+                           '/pressure_levels',\
+                           '/altitude',\
+                           '/ground_pixel']  
+        if not data_fields_l2g:
+            # standardized variable names in l2g file. should map one-on-one to data_fields
+            data_fields_l2g = ['latitude_bounds','longitude_bounds','SolarZenithAngle',\
+                               'latc','lonc','time','orbit',\
+                               'XCH4_qa','XCH4','column_uncertainty',\
+                               'XCO_qa','XCO','XCO_uncertainty',\
+                               'colh2o','albedo','pressure_levels',\
+                               'surface_altitude','across_track_position']
+        
+        self.logger.info('Read, subset, and store level 2 data to l2g_data')
+        
+        l2g_data = {}
+        for fn in l2_list:
+            self.logger.info('Loading '+os.path.split(fn)[-1])
+            nc = Dataset(fn,'r')
+            outp_nc = {dn:nc[dnc][:].data for dnc,dn in zip(data_fields,data_fields_l2g)}
+            # get surf p from p levels
+            outp_nc['surface_pressure'] = outp_nc['pressure_levels'][:,0]
+            validmask = (outp_nc['XCH4_qa'] == 0)
+            outp_nc = {k:v[validmask,] for k,v in outp_nc.items()}
+            outp_nc['UTC_matlab_datenum'] = outp_nc['time']/86400.+719529.
+            # further filtering by space/time              
+            f4 = outp_nc['latc'] >= south
+            f5 = outp_nc['latc'] <= north
+            tmplon = outp_nc['lonc']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp_nc['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp_nc['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            validmask = f4 & f5 & f6 & f7 & f8 & f9
+            self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
+            l2g_data0 = {}
+            if np.sum(validmask) == 0:
+                continue
+            Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][...,0])[validmask]
+            Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][...,3])[validmask]
+            Lat_lowerright = np.squeeze(outp_nc['latitude_bounds'][...,1])[validmask]
+            Lat_upperright = np.squeeze(outp_nc['latitude_bounds'][...,2])[validmask]
+            Lon_lowerleft = np.squeeze(outp_nc['longitude_bounds'][...,0])[validmask]
+            Lon_upperleft = np.squeeze(outp_nc['longitude_bounds'][...,3])[validmask]
+            Lon_lowerright = np.squeeze(outp_nc['longitude_bounds'][...,1])[validmask]
+            Lon_upperright = np.squeeze(outp_nc['longitude_bounds'][...,2])[validmask]
+            l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
+            l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+            for key in outp_nc.keys():
+                if key not in {'latitude_bounds','longitude_bounds','time','pressure_levels'}:
+                    l2g_data0[key] = outp_nc[key][validmask]
+            # column h2o in g/cm2, convert to mol/m2
+            l2g_data0['colh2o'] = l2g_data0['colh2o']/18.01528*1e4    
+            # hPa to Pa
+            l2g_data0['surface_pressure'] = l2g_data0['surface_pressure']*100.0
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+            nc.close()
         self.l2g_data = l2g_data
         if not l2g_data:
             self.nl2 = 0
