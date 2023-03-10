@@ -1,0 +1,40 @@
+[build-system]
+requires = [
+    "setuptools>=65.6.0",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "popy"
+description = "Physical Oversampling in Python"
+authors = [
+    {email = "kangsun@buffalo.edu"},
+    {name = "Kang Sun"}
+]
+requires-python = ">=3.8"
+keywords = ["popy"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "pandas~=1.4.3", # necessary for Level3_List
+    "pyyaml~=5.4.1",
+    "netCDF4~=1.6.1", # necessary for input/output netcdf data, which is very commonly used
+    "opencv-python~=4.5.3", # necessary for oversampling instruments with quadrilateral level 2 pixels
+    "scipy~=1.8.1",
+    "scikit-image~=0.19.3", # necessary for Level3_Data.block_reduce()
+]
+version = "0.2.1"
+
+[project.optional-dependencies]
+h5py = [
+    "h5py", # necessary for reading level 2 data in he5/h5 format
+]
+plot = [
+    "cartopy", # necessary for geospatial plotting
+    "matplotlib",
+]
+
+[tool.setuptools]
+py-modules = ["popy"]
