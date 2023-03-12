@@ -1800,29 +1800,33 @@ class Level3_Data(dict):
                 self['wind_topo_rs'] = wind_topo_rs
         
         if albedo_orders is not None and 'albedo' in self.keys():
-            ps = self['surface_pressure']
-            # d ps/dx, d ps/dy
-            dpdx,dpdy,dpdr,dpds = F_grads(ps,dy,dx_vec,dd_vec,finite_difference_order)
-            # grad(ps) dot wind
-            wind_ps_xy = dpdx*self['wind_e'] + dpdy*self['wind_n']
-            wind_ps_rs = dpdr*self['wind_ne'] + dpds*self['wind_nw'] \
-                + r_dot_s*(dpdr*self['wind_nw'] + dpds*self['wind_ne'])
-            wind_ps = np.nanmean(np.array([wind_ps_xy,wind_ps_rs]),axis=0)
-            wind_ps[np.isnan(wind_ps_xy) & np.isnan(wind_ps_rs)] = np.nan
-            
+            if 'pa' in self.keys():
+                pa = self['pa']
+            else:
+                self.logger.warning('pa not available! using surface_pressure instead')
+                pa = self['surface_pressure']
             a0 = self['albedo']
+            # d pa/dx, d pa/dy
+            dpdx,dpdy,dpdr,dpds = F_grads(pa,dy,dx_vec,dd_vec,finite_difference_order)
             # d albedo/dx, d albedo/dy
             dcdx,dcdy,dcdr,dcds = F_grads(a0,dy,dx_vec,dd_vec,finite_difference_order)
-            # grad(albedo) dot wind
-            wind_albedo_xy = dcdx*self['wind_e'] + dcdy*self['wind_n']
-            wind_albedo_rs = dcdr*self['wind_ne'] + dcds*self['wind_nw'] \
-                + r_dot_s*(dcdr*self['wind_nw'] + dcds*self['wind_ne'])
-            wind_albedo = np.nanmean(np.array([wind_albedo_xy,wind_albedo_rs]),axis=0)
-            wind_albedo[np.isnan(wind_albedo_xy) & np.isnan(wind_albedo_rs)] = np.nan
             
             for order in albedo_orders:
-                self['wind_albedo_{}'.format(order)] = order*ps*wind_albedo*np.power(a0,order-1)\
-                +np.power(a0,order)*wind_ps
+                
+                wind_albedo_xy = order*pa*np.power(a0,order-1)*\
+                (dcdx*self['wind_e'] + dcdy*self['wind_n'])+\
+                np.power(a0,order)*(dpdx*self['wind_e'] + dpdy*self['wind_n'])
+                
+                wind_albedo_rs = order*pa*np.power(a0,order-1)*\
+                (dcdr*self['wind_ne'] + dcds*self['wind_nw']+\
+                r_dot_s*(dcdr*self['wind_nw'] + dcds*self['wind_ne']))+\
+                np.power(a0,order)*(dpdr*self['wind_ne'] + dpds*self['wind_nw']+\
+                r_dot_s*(dpdr*self['wind_nw'] + dpds*self['wind_ne']))
+                                 
+                wind_albedo = np.nanmean(np.array([wind_albedo_xy,wind_albedo_rs]),axis=0)
+                wind_albedo[np.isnan(wind_albedo_xy) & np.isnan(wind_albedo_rs)] = np.nan
+                
+                self['wind_albedo_{}'.format(order)] = wind_albedo
                 
     def calculate_flux_divergence(self,write_diagnostic=False,remove_wind_div=False,
                                   finite_difference_order=2,calculate_wind_albedo=False):
@@ -2047,7 +2051,8 @@ class Level3_Data(dict):
             precision = 0.5*np.nanstd((self['wind_column_xy']-self['wind_column_rs'])[mask].ravel())
         return precision
         
-    def fit_topography(self,mask=None,min_windtopo=None,max_windtopo=None,max_iter=None,outlier_std=None,fit_chem=None):
+    def fit_topography(self,mask=None,min_windtopo=None,max_windtopo=None,
+                       max_iter=None,outlier_std=None,fit_chem=None,remove_intercept=False):
         '''infer scale height for the wind-topography term
         '''
         import statsmodels.formula.api as smf
@@ -2115,6 +2120,8 @@ class Level3_Data(dict):
             topo_residual = np.full_like(self['num_samples'],np.nan)
             topo_residual[topo_mask] = topo_fit.resid
             wc_topo = self['wind_column']-topo_fit.params['wt']*self['wind_topo']
+            if remove_intercept:
+                wc_topo -= topo_fit.params['Intercept']
             count += 1
         self.topo_fit = topo_fit
         self['topo_residual'] = topo_residual
@@ -2172,7 +2179,8 @@ class Level3_Data(dict):
         self['wind_column_topo_chem'] = wc_chem
     
     def fit_albedo(self,albedo_fields=None,albedo_orders=None,
-                   mask=None,min_windtopo=None,max_windtopo=None,max_iter=None,outlier_std=None,fit_topo=True):
+                   mask=None,min_windtopo=None,max_windtopo=None,
+                   max_iter=None,outlier_std=None,fit_topo=True,remove_intercept=False):
         '''infer albedo-related bias
         '''
         import statsmodels.formula.api as smf
@@ -2183,6 +2191,7 @@ class Level3_Data(dict):
         outlier_std = outlier_std or 2
         if albedo_fields is None:
             albedo_fields = [k for k in self.keys() if 'wind_albedo' in k]
+        albedo_fields = np.array(albedo_fields)
         # assuming fields defined like ['wind_albedo_1','wind_albedo_2']
         if albedo_orders is None:
             albedo_orders = np.array([float(f.split('_')[-1]) for f in albedo_fields])
@@ -2207,10 +2216,10 @@ class Level3_Data(dict):
         while count < max_iter:
             if count > 0:
                 alb_mask = alb_mask & (np.abs(alb_residual) < outlier_std*np.nanstd(alb_fit.resid))
-            self.logger.info('{} total grids, fitting X using {} ({:.2%}) grids'.format(
+            self.logger.info('{} total grids, fitting albedo using {} ({:.2%}) grids'.format(
                 len(self['xgrid'])*len(self['ygrid']),np.sum(alb_mask),
                 np.sum(alb_mask)/(len(self['xgrid'])*len(self['ygrid']))))
-            df_dict = {'y':self['wind_column'][alb_mask],'wt':self['wind_topo'][alb_mask]}
+            df_dict = {'y':wc[alb_mask],'wt':self['wind_topo'][alb_mask]}
             df_dict.update({km:self[k][alb_mask] for k,km in zip(albedo_fields,albedo_fields_minus2m)})
             df = pd.DataFrame(df_dict).dropna()
             
@@ -2228,14 +2237,32 @@ class Level3_Data(dict):
                 self.logger.info('iter {}, scale height {:.3f} km'.format(count,-1/(alb_fit.params['wt'])/1000))
             alb_residual = np.full_like(self['num_samples'],np.nan)
             alb_residual[alb_mask] = alb_fit.resid
-            wc_alb = wc
+            wc_alb = wc.copy()
             for f,fm,order in zip(albedo_fields,albedo_fields_minus2m,albedo_orders):
                 wc_alb -= alb_fit.params[fm]*self[f]
+            if remove_intercept:
+                wc_alb -= alb_fit.params['Intercept']
             count += 1
         self.alb_fit = alb_fit
+        self.albedo_fields = albedo_fields
+        self.albedo_orders = albedo_orders
+        self.max_albedo = np.nanmax(self['albedo'][alb_mask])
+        self.min_albedo = np.nanmin(self['albedo'][alb_mask])
         self['alb_residual'] = alb_residual
         self['wind_column_topo_alb'] = wc_alb
-    
+        # negative orders (e.g., -1) is no longer supported, not useful
+        p = np.zeros(int(np.round(np.max(self.albedo_orders)))+1)
+        for i,order in enumerate(np.arange(np.max(self.albedo_orders),-1,-1)):
+            field = albedo_fields[np.where(albedo_orders==order)[0]]
+            if len(field) == 0:
+                continue
+            if len(field) > 1:
+                self.logger.error('this should not happen');return
+            p[i] = self.alb_fit.params[field[0]]*9.8*0.02896
+        self.albedo_p = p
+        # assuming XCH4 in ppb
+        self['XCH4_alb'] = (np.polyval(p,self['albedo'])-np.nanmean(np.polyval(p,self['albedo']))+self['XCH4']*1e-9)*1e9
+        
     def average_by_finerMask(self,tif_dict=None,tif_fn=None,tif_mask=None,fields_to_average=None):
         '''average l3 using a mask that does not match the l3 grid, and finer. the mask
         can be read from geotif file at tif_fn
@@ -2322,6 +2349,42 @@ class Level3_Data(dict):
                 continue
             else:
                 result[key] = np.nansum(self[key][mask]*self['total_sample_weight'][mask])/result['total_sample_weight']
+        return result
+    
+    def sum_by_mask(self,mask=None,xys=None,fields_to_sum=None):
+        '''sum emission to emission rate by mask and/or polygon boundarys
+        mask:
+            binary mask to begin with
+        xys:
+            a list of tuples for the polygon, e.g., [(xarray,yarray)]
+        fields_to_sum:
+            should be emission related fields, in, e.g., mol/m2/s, where the area unit is assumed to be m2
+        '''
+        if self.proj is not None:
+            self.logger.error('proj is not implemented yet!');return
+        if mask is None:
+            mask = np.ones(self['num_samples'].shape,dtype=bool)
+        if fields_to_sum is None:
+            fields_to_sum = ['wind_column','wind_column_topo','wind_column_topo_chem','wind_column_topo_alb']
+        if 'lonmesh' in self.keys():
+            lonmesh,latmesh = self['lonmesh'],self['latmesh']
+        else:
+            lonmesh,latmesh = np.meshgrid(self['xgrid'],self['ygrid'])
+        grid_size = self.grid_size
+        grid_m2 = np.square(grid_size*111e3)*np.cos(latmesh/180*np.pi)
+        if xys is not None:
+            from matplotlib import path
+            for xy in xys:
+                boundary_polygon = path.Path([(x,y) for x,y in zip(*xy)])
+                all_points = np.column_stack((lonmesh.ravel(),latmesh.ravel()))
+                mask = mask & boundary_polygon.contains_points(all_points).reshape(lonmesh.shape)
+        
+        result = {}
+        
+        all_keys = set(fields_to_sum).intersection(self.keys())
+        for key in all_keys:
+            result[key] = np.nansum((self[key][mask]*grid_m2[mask]*self['total_sample_weight'][mask]))\
+            /np.nansum(self['total_sample_weight'][mask]*grid_m2[mask])*np.nansum(grid_m2[mask])
         return result
     
     def merge(self,l3_data1):
@@ -2942,6 +3005,12 @@ class Level3_List(list):
             l3 = Level3_Data().read_nc(l3_filename=l3_fn,fields_name=fields_name)
             self.add(l3)
     
+    def trim(self,west,east,south,north):
+        l3s_new = Level3_List(dt_array=self.dt_array,west=west,east=east,south=south,north=north)
+        for l3 in self:
+            l3s_new.add(l3)
+        return l3s_new
+    
     def add(self,l3):
         self.append(l3.trim(west=self.west,east=self.east,south=self.south,north=self.north))
     
@@ -2967,6 +3036,11 @@ class Level3_List(list):
         *np.sqrt(np.array([l3.average_by_mask(mask=mask,fields_to_average=['num_samples'])['num_samples'] for l3 in self]))
     
     def fit_topography(self,resample_rule=None,half_running_window=0,return_resampled=False,**kwargs):
+        if 'remove_intercept' in kwargs.keys():
+            remove_intercept = kwargs['remove_intercept']
+        else:
+            remove_intercept = False
+        
         if resample_rule is None:
             for l3 in self:
                 l3.fit_topography(**kwargs)
@@ -2979,6 +3053,8 @@ class Level3_List(list):
                     self[int(row['count'])]['wind_column_topo'] = \
                     self[int(row['count'])]['wind_column']\
                     -l3.topo_fit.params['wt']*self[int(row['count'])]['wind_topo']
+                    if remove_intercept:
+                        self[int(row['count'])]['wind_column_topo'] -= l3.topo_fit.params['Intercept']
         
         self.df['topo_scale_height'] = [-1/l3.topo_fit.params['wt'] for l3 in self]
         self.df['topo_rmse'] = [np.sqrt(l3.topo_fit.mse_resid) for l3 in self]
@@ -3016,6 +3092,11 @@ class Level3_List(list):
         # replace '-' by 'm' to support negative power
         albedo_fields_minus2m = [f.replace('-','m') for f in albedo_fields]
         
+        if 'remove_intercept' in kwargs.keys():
+            remove_intercept = kwargs['remove_intercept']
+        else:
+            remove_intercept = False
+        
         if resample_rule is None:
             for l3 in self:
                 l3.fit_albedo(albedo_fields=albedo_fields,albedo_orders=albedo_orders,**kwargs)
@@ -3025,10 +3106,18 @@ class Level3_List(list):
                 l3.fit_albedo(albedo_fields=albedo_fields,albedo_orders=albedo_orders,**kwargs)
                 for irow,row in sub_df.iterrows():
                     self[int(row['count'])].alb_fit = l3.alb_fit
-                    
+                    self[int(row['count'])].max_albedo = l3.max_albedo
+                    self[int(row['count'])].min_albedo = l3.min_albedo
+                    self[int(row['count'])].albedo_fields = l3.albedo_fields
+                    self[int(row['count'])].albedo_orders = l3.albedo_orders
+                    self[int(row['count'])].albedo_p = l3.albedo_p
+                    self[int(row['count'])]['alb_residual'] = l3['alb_residual']
+                    self[int(row['count'])]['XCH4_alb'] = l3['XCH4_alb']
                     wc_alb = self[int(row['count'])]['wind_column_topo'].copy()
                     for f,fm,order in zip(albedo_fields,albedo_fields_minus2m,albedo_orders):
                         wc_alb -= l3.alb_fit.params[fm]*self[int(row['count'])][f]
+                    if remove_intercept:
+                        wc_alb -= l3.alb_fit.params['Intercept']
                     self[int(row['count'])]['wind_column_topo_alb'] = wc_alb
         
         self.df['alb_rmse'] = [np.sqrt(l3.alb_fit.mse_resid) for l3 in self]
@@ -3049,6 +3138,20 @@ class Level3_List(list):
                     continue
             l3 = l3.merge(l)
         return l3
+    
+    def sum_by_mask(self,mask=None,xys=None,fields_to_sum=None):
+        '''wrapper of Level3_Data.sum_by_mask'''
+        if fields_to_sum is None:
+            fields_to_sum = ['wind_column','wind_column_topo','wind_column_topo_chem','wind_column_topo_alb']
+        summed = []
+        summed.append(self[0].sum_by_mask(mask=mask,xys=xys,fields_to_sum=fields_to_sum))
+        
+        if len(self) > 1:
+            for l3 in self[1:]:
+                summed.append(l3.sum_by_mask(mask=mask,xys=xys,fields_to_sum=fields_to_sum))
+        all_keys = set(fields_to_sum).intersection(self[0].keys())
+        for f in all_keys:
+            self.df['summed_{}'.format(f)] = [m[f] for m in summed]
     
     def average_by_finerMask(self,tif_dict,fields_to_average=None):
         '''
@@ -3244,7 +3347,7 @@ class popy(object):
                 self.default_subset_function = 'F_subset_S5PAI'
             elif product in ['CH4']:
                 oversampling_list = oversampling_list or ['XCH4','albedo',\
-                                     'surface_altitude','surface_pressure']
+                                     'surface_altitude','surface_pressure','pa']
                 self.default_subset_function = 'F_subset_S5PCH4'
                 self.default_column_unit = 'nmol/mol'
             elif product in ['NO2']:
