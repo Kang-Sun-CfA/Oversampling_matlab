@@ -2018,6 +2018,62 @@ class Level3_Data(dict):
         l3_new.check()
         return l3_new
     
+    def remesh_align(self,xgrid,ygrid,grid_size_rtol=1e-2):
+        '''return a new Level3_Data instance on x/ygrid, to which the original grid can fully map with a tolerance relative to grid_size'''
+        # similar to np.isin but with tolerance
+        def isin_tolerance(A, B, tol):
+            A = np.asarray(A)
+            B = np.asarray(B)
+
+            Bs = np.sort(B) # skip if already sorted
+            idx = np.searchsorted(Bs, A)
+
+            linvalid_mask = idx==len(B)
+            idx[linvalid_mask] = len(B)-1
+            lval = Bs[idx] - A
+            lval[linvalid_mask] *=-1
+
+            rinvalid_mask = idx==0
+            idx1 = idx-1
+            idx1[rinvalid_mask] = 0
+            rval = A - Bs[idx1]
+            rval[rinvalid_mask] *=-1
+            return np.minimum(lval, rval) <= tol
+        
+        grid_sizex = np.median(np.diff(xgrid))
+        grid_sizey = np.median(np.diff(ygrid))
+        if not np.isclose(grid_sizex,grid_sizey,rtol=1e-3):
+            self.logger.warning('x grid size {} and y grid size {} are inconsistent!'.format(grid_sizex,grid_sizey))
+        new_grid_size = np.mean([grid_sizex,grid_sizey])
+        
+        if not np.isclose(new_grid_size,self.grid_size,rtol=1e-3):
+            self.logger.warning('input grid size {} inconsistent with l3 grid size {}. using remesh instead'.format(new_grid_size,self.grid_size))
+            return self.remesh(xgrid,ygrid)
+        
+        xgrid_mask = isin_tolerance(xgrid,self['xgrid'],tol=self.grid_size*grid_size_rtol)
+        ygrid_mask = isin_tolerance(ygrid,self['ygrid'],tol=self.grid_size*grid_size_rtol)
+        if np.sum(xgrid_mask) != len(self['xgrid']) or np.sum(ygrid_mask) != len(self['ygrid']):
+            self.logger.warning('original and target grids are not fully aligned. using remesh instead')
+            return self.remesh(xgrid,ygrid)
+        
+        l3_new = Level3_Data(instrum=self.instrum,product=self.product,
+                             start_python_datetime=self.start_python_datetime,
+                             end_python_datetime=self.end_python_datetime,
+                             proj=self.proj,oversampling_list=self.oversampling_list)
+        l3_new.assimilate({'xgrid':xgrid,'ygrid':ygrid})
+        for key in self.keys():
+            if key in ['xgrid','ygrid','nrows','nrow','ncols','ncol','xmesh','ymesh','lonmesh','latmesh']:
+                continue
+            elif key in ['total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
+                interpolated_fields = np.zeros((len(ygrid),len(xgrid)))
+                interpolated_fields[np.ix_(ygrid_mask,xgrid_mask)] = self[key]
+            else:
+                interpolated_fields = np.full((len(ygrid),len(xgrid)),np.nan)
+                interpolated_fields[np.ix_(ygrid_mask,xgrid_mask)] = self[key]
+            l3_new.add(key,interpolated_fields)
+        l3_new.check()
+        return l3_new
+        
     def trim(self,west,east,south,north):
         l3_new = Level3_Data(instrum=self.instrum,product=self.product,
                              start_python_datetime=self.start_python_datetime,
