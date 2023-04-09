@@ -3091,6 +3091,47 @@ class Level3_List(list):
         self.df['wind_column_precision_singleLayer'] = self.df['wind_column_precision']\
         *np.sqrt(np.array([l3.average_by_mask(mask=mask,fields_to_average=['num_samples'])['num_samples'] for l3 in self]))
     
+    def calculate_precision(self,mask=None,resampling_rule=None,ax=None):
+        '''calculate and optionally plot directional derivative term precision for all periods.
+        also calculate preciesion of resampled (1Y is supported) and total aggregated maps
+        '''
+        import matplotlib.pyplot as plt
+        precisions = np.array([l.get_emission_precision(mask) for l in self])
+        coverages = np.array([np.nanmean(l['num_samples']) for l in self])
+        ccs = ['#4477AA', '#EE6677', '#228833', '#CCBB44', '#66CCEE',
+                            '#AA3377', '#BBBBBB', '#000000']
+        allyear = np.unique(self.df.index.year)
+        if ax is None:
+            fig,ax = plt.subplots(1,1,figsize=(10,5))
+        for iyear,year in enumerate(allyear):
+            mmask = self.df.index.year == year
+            ax.scatter(coverages[mmask],precisions[mmask],label='months in {}'.format(year),marker='+',zorder=2,s=75,
+                      c=ccs[iyear])
+        if resampling_rule is not None:
+            l3s_resampled,_ = self.resample(rule=resampling_rule)
+            precisions_r = np.array([l.get_emission_precision(mask) for l in l3s_resampled])
+            coverages_r = np.array([np.nanmean(l['num_samples']) for l in l3s_resampled])
+            for iyear,year in enumerate(np.unique(self.df.index.year)):
+                ax.scatter(coverages_r[iyear],precisions_r[iyear],label='{}-mean'.format(year),marker='o',zorder=3,s=75,
+                          c=ccs[iyear])
+        else:
+            precisions_r = None;coverages_r = None
+        l3 = self.aggregate()
+        ax.scatter(np.nanmean(l3['num_samples']),
+                   l3.get_emission_precision(mask),
+                   label='all',marker='*',zorder=3,s=100,c='r')
+        ax.set_xscale('log')
+        ax.set_yscale('log')
+        xx = np.logspace(0,3)
+        error0 = np.exp(np.nanmean(np.log(precisions))+0.5*np.nanmean(np.log(coverages)))
+        ax.plot(xx,np.power(xx,-0.5)*error0,label=r'$\sigma$='+'{:.1E}'.format(error0)+r'$\times N^{-0.5}$',color='k',zorder=1)
+        ax.legend(ncol=2)
+        ax.grid(which='both',ls=':')
+        ax.set_xlabel(r'Mean level 2 coverage $N$');
+        ax.set_ylabel(r'Random error $\sigma$ [mol m$^{-2}$ s$^{-1}$]');
+        return dict(precisions=precisions,coverages=coverages,
+                    precisions_r=precisions_r,coverages_r=coverages_r,ax=ax,error0=error0)
+        
     def fit_topography(self,resample_rule=None,half_running_window=0,return_resampled=False,**kwargs):
         if 'remove_intercept' in kwargs.keys():
             remove_intercept = kwargs['remove_intercept']
