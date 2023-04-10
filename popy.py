@@ -2074,17 +2074,21 @@ class Level3_Data(dict):
         l3_new.check()
         return l3_new
         
-    def trim(self,west,east,south,north):
+    def trim(self,west,east,south,north,inherit_attributes=['topo_fit','topo_fit_xy','topo_fit_rs','chem_fit','alb_fit']):
         l3_new = Level3_Data(instrum=self.instrum,product=self.product,
                              start_python_datetime=self.start_python_datetime,
                              end_python_datetime=self.end_python_datetime,
                              proj=self.proj,oversampling_list=self.oversampling_list)
+        for inherit_attribute in inherit_attributes:
+            if hasattr(self,inherit_attribute):
+                setattr(l3_new,inherit_attribute,getattr(self,inherit_attribute))
         if len(self.keys()) == 0:
             self.logger.info('empty l3. returning')
             return l3_new
         xmask = (self['xgrid'] >= west) & (self['xgrid'] <= east)
         ymask = (self['ygrid'] >= south) & (self['ygrid'] <= north)
         self.logger.info('l3 trimed from {}, {} to {}, {}'.format(len(self['xgrid']),len(self['ygrid']),np.sum(xmask),np.sum(ymask)))
+        
         for key in self.keys():
             if key == 'xgrid':
                 l3_new[key] = self[key][xmask]
@@ -2108,7 +2112,8 @@ class Level3_Data(dict):
         return precision
         
     def fit_topography(self,mask=None,min_windtopo=None,max_windtopo=None,
-                       max_iter=None,outlier_std=None,fit_chem=None,remove_intercept=False):
+                       max_iter=None,outlier_std=None,fit_chem=None,remove_intercept=False,
+                       if_bootstrap=False,if_xyrs=False):
         '''infer scale height for the wind-topography term
         '''
         import statsmodels.formula.api as smf
@@ -2150,24 +2155,40 @@ class Level3_Data(dict):
         if mask is not None:
             topo_mask = topo_mask & mask
         count = 0
-#         try:
-#             precision=self.get_emission_precision(mask=topo_mask)
-#             self.logger.info('emission random error is {:.3e}'.format(precision))
-#         except Exception as e:
-#             self.logger.warning(e)
-#             self.logger.warning('error in precision calculation')
         while count < max_iter:
             if count > 0:
                 topo_mask = topo_mask & (np.abs(topo_residual) < outlier_std*np.nanstd(topo_fit.resid))
             self.logger.info('{} total grids, fitting X using {} ({:.2%}) grids'.format(
                 len(self['xgrid'])*len(self['ygrid']),np.sum(topo_mask),
                 np.sum(topo_mask)/(len(self['xgrid'])*len(self['ygrid']))))
-            df = pd.DataFrame({'y':self['wind_column'][topo_mask],'wt':self['wind_topo'][topo_mask],
+            if if_bootstrap:
+                df_nrows = np.sum(topo_mask).astype(int)
+                new_idx = np.random.choice(np.arange(df_nrows),df_nrows)
+                df = pd.DataFrame({'y':self['wind_column'][topo_mask][new_idx],'wt':self['wind_topo'][topo_mask][new_idx],
+                                  'chem':vcd[topo_mask][new_idx]}).dropna()
+                if if_xyrs:
+                    df_xy = pd.DataFrame({'y':self['wind_column_xy'][topo_mask][new_idx],'wt':self['wind_topo'][topo_mask][new_idx],
+                                  'chem':vcd[topo_mask][new_idx]}).dropna()
+                    df_rs = pd.DataFrame({'y':self['wind_column_rs'][topo_mask][new_idx],'wt':self['wind_topo'][topo_mask][new_idx],
+                                  'chem':vcd[topo_mask][new_idx]}).dropna()
+            else:
+                df = pd.DataFrame({'y':self['wind_column'][topo_mask],'wt':self['wind_topo'][topo_mask],
+                                  'chem':vcd[topo_mask]}).dropna()
+                if if_xyrs:
+                    df_xy = pd.DataFrame({'y':self['wind_column_xy'][topo_mask],'wt':self['wind_topo'][topo_mask],
+                                  'chem':vcd[topo_mask]}).dropna()
+                    df_rs = pd.DataFrame({'y':self['wind_column_rs'][topo_mask],'wt':self['wind_topo'][topo_mask],
                                   'chem':vcd[topo_mask]}).dropna()
             if fit_chem:
                 topo_fit = smf.ols('y ~ wt + chem', data=df).fit()
+                if if_xyrs:
+                    topo_fit_xy = smf.ols('y ~ wt + chem', data=df_xy).fit()
+                    topo_fit_rs = smf.ols('y ~ wt + chem', data=df_rs).fit()
             else:
                 topo_fit = smf.ols('y ~ wt', data=df).fit()
+                if if_xyrs:
+                    topo_fit_xy = smf.ols('y ~ wt', data=df_xy).fit()
+                    topo_fit_rs = smf.ols('y ~ wt', data=df_rs).fit()
             self.logger.info('iter {}, r2 {:.3f}'.format(count,topo_fit.rsquared))
             self.logger.info('iter {}, rmse {:.3e}'.format(count,np.sqrt(topo_fit.mse_resid)))
             if fit_chem:
@@ -2176,12 +2197,23 @@ class Level3_Data(dict):
             topo_residual = np.full_like(self['num_samples'],np.nan)
             topo_residual[topo_mask] = topo_fit.resid
             wc_topo = self['wind_column']-topo_fit.params['wt']*self['wind_topo']
+            if if_xyrs:
+                wc_topo_xy = self['wind_column_xy']-topo_fit_xy.params['wt']*self['wind_topo']
+                wc_topo_rs = self['wind_column_rs']-topo_fit_rs.params['wt']*self['wind_topo']
             if remove_intercept:
                 wc_topo -= topo_fit.params['Intercept']
+                if if_xyrs:
+                    wc_topo_xy -= topo_fit_xy.params['Intercept']
+                    wc_topo_rs -= topo_fit_rs.params['Intercept']
             count += 1
         self.topo_fit = topo_fit
         self['topo_residual'] = topo_residual
         self['wind_column_topo'] = wc_topo
+        if if_xyrs:
+            self.topo_fit_xy = topo_fit_xy
+            self['wind_column_topo_xy'] = wc_topo_xy
+            self.topo_fit_rs = topo_fit_rs
+            self['wind_column_topo_rs'] = wc_topo_rs
     
     def fit_chemistry(self,mask=None,min_windtopo=None,max_windtopo=None,
                       max_wind_column=None,max_iter=None,outlier_std=None):
@@ -2208,11 +2240,6 @@ class Level3_Data(dict):
         if mask is not None:
             chem_mask = chem_mask & mask
         count = 0
-#         try:
-#             precision=self.get_emission_precision(mask=chem_mask)
-#             self.logger.info('emission random error is {:.3e}'.format(precision))
-#         except:
-#             self.logger.warning('error in precision calculation')
         while count < max_iter:
             if count > 0:
                 chem_mask = chem_mask & (np.abs(chem_residual) < outlier_std*np.nanstd(chem_fit.resid)) &\
@@ -3132,19 +3159,44 @@ class Level3_List(list):
         return dict(precisions=precisions,coverages=coverages,
                     precisions_r=precisions_r,coverages_r=coverages_r,ax=ax,error0=error0)
         
-    def fit_topography(self,resample_rule=None,half_running_window=0,return_resampled=False,**kwargs):
+    def fit_topography(self,resample_rule=None,half_running_window=0,return_resampled=False,
+                       nbootstrap=None,**kwargs):
         if 'remove_intercept' in kwargs.keys():
             remove_intercept = kwargs['remove_intercept']
         else:
             remove_intercept = False
         
+        kwargs['if_bootstrap'] = False
+        if 'if_xyrs' in kwargs.keys():
+            if_xyrs = kwargs['if_xyrs']
+        else:
+            if_xyrs = False
+        bkwargs = kwargs.copy()
+        bkwargs['if_bootstrap'] = True
+        bkwargs['if_xyrs'] = False
         if resample_rule is None:
             for l3 in self:
+                if nbootstrap is not None:
+                    bootstrap_params = []
+                    for i in range(nbootstrap):
+                        l3.fit_topography(**bkwargs)
+                        bootstrap_params.append(l3.topo_fit.params)
                 l3.fit_topography(**kwargs)
+                if nbootstrap is not None:
+                    l3.topo_fit.bootstrap_params = bootstrap_params
+                    l3.topo_fit.nbootstrap = nbootstrap
         else:
             l3s_resampled,resampler = self.resample(rule=resample_rule,half_running_window=half_running_window)
             for l3,(ind,sub_df) in zip(l3s_resampled,resampler.__iter__()):
+                if nbootstrap is not None:
+                    bootstrap_params = []
+                    for i in range(nbootstrap):
+                        l3.fit_topography(**bkwargs)
+                        bootstrap_params.append(l3.topo_fit.params)
                 l3.fit_topography(**kwargs)
+                if nbootstrap is not None:
+                    l3.topo_fit.bootstrap_params = bootstrap_params
+                    l3.topo_fit.nbootstrap = nbootstrap
                 for irow,row in sub_df.iterrows():
                     self[int(row['count'])].topo_fit = l3.topo_fit
                     self[int(row['count'])]['wind_column_topo'] = \
@@ -3152,6 +3204,19 @@ class Level3_List(list):
                     -l3.topo_fit.params['wt']*self[int(row['count'])]['wind_topo']
                     if remove_intercept:
                         self[int(row['count'])]['wind_column_topo'] -= l3.topo_fit.params['Intercept']
+                    if if_xyrs:
+                        self[int(row['count'])].topo_fit_xy = l3.topo_fit_xy
+                        self[int(row['count'])]['wind_column_topo_xy'] = \
+                        self[int(row['count'])]['wind_column_xy']\
+                        -l3.topo_fit_xy.params['wt']*self[int(row['count'])]['wind_topo']
+                        if remove_intercept:
+                            self[int(row['count'])]['wind_column_topo_xy'] -= l3.topo_fit_xy.params['Intercept']
+                        self[int(row['count'])].topo_fit_rs = l3.topo_fit_rs
+                        self[int(row['count'])]['wind_column_topo_rs'] = \
+                        self[int(row['count'])]['wind_column_rs']\
+                        -l3.topo_fit_rs.params['wt']*self[int(row['count'])]['wind_topo']
+                        if remove_intercept:
+                            self[int(row['count'])]['wind_column_topo_rs'] -= l3.topo_fit_rs.params['Intercept']
         
         self.df['topo_scale_height'] = [-1/l3.topo_fit.params['wt'] for l3 in self]
         self.df['topo_rmse'] = [np.sqrt(l3.topo_fit.mse_resid) for l3 in self]
