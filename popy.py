@@ -2065,10 +2065,10 @@ class Level3_Data(dict):
             if key in ['xgrid','ygrid','nrows','nrow','ncols','ncol','xmesh','ymesh','lonmesh','latmesh']:
                 continue
             elif key in ['total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
-                interpolated_fields = np.zeros((len(ygrid),len(xgrid)))
+                interpolated_fields = np.zeros((len(ygrid),len(xgrid)),dtype=self[key].dtype)
                 interpolated_fields[np.ix_(ygrid_mask,xgrid_mask)] = self[key]
             else:
-                interpolated_fields = np.full((len(ygrid),len(xgrid)),np.nan)
+                interpolated_fields = np.full((len(ygrid),len(xgrid)),np.nan,dtype=self[key].dtype)
                 interpolated_fields[np.ix_(ygrid_mask,xgrid_mask)] = self[key]
             l3_new.add(key,interpolated_fields)
         l3_new.check()
