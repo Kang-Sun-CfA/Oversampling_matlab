@@ -23,7 +23,7 @@ dependencies = [
     "netCDF4~=1.6.1", # necessary for input/output netcdf data, which is very commonly used
     "opencv-python~=4.5.3", # necessary for oversampling instruments with quadrilateral level 2 pixels
     "scipy~=1.8.1",
-    "scikit-image~=0.19.3", # necessary for Level3_Data.block_reduce()
+    "scikit-image>=0.19.3", # necessary for Level3_Data.block_reduce()
 ]
 version = "0.2.1"
 
