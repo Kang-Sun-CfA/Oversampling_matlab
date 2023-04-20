@@ -2505,14 +2505,8 @@ class Level3_Data(dict):
                 below = np.nansum(np.array([self['pres_total_sample_weight'],l3_data1['pres_total_sample_weight']]),axis=0)
                 l3_data[key] = above/below
             else:
-                # This code block can be memory intensive for large datasets. Creating the weight arrays as views rather than copies lowers
-                # peak memory usage, and doesn't affect the end result since the weights are intermediate products. It's also faster.
-                weight0 = np.nan_to_num(self['total_sample_weight'],copy=False)
-                weight1 = np.nan_to_num(l3_data1['total_sample_weight'],copy=False)
-                # Compute the merged field using the input weight and field values. This could probably be optimized further for reduced
-                # memory consumption.
-                above = np.nansum(np.array([v0*weight0,v1*weight1]),axis=0)
-                below = np.nansum(np.array([weight0,weight1]),axis=0)
+                above = np.nansum(np.array([v0*self['total_sample_weight'],v1*l3_data1['total_sample_weight']]),axis=0)
+                below = np.nansum(np.array([self['total_sample_weight'],l3_data1['total_sample_weight']]),axis=0)
                 l3_data[key] = above/below
         return l3_data
     
