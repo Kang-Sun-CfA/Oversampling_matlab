@@ -2532,12 +2532,8 @@ class Level3_Data(dict):
                 below = np.nansum(np.array([self['pres_total_sample_weight'],l3_data1['pres_total_sample_weight']]),axis=0)
                 l3_data[key] = above/below
             else:
-                weight0 = self['total_sample_weight'].copy()
-                weight0[np.isnan(v0)] = 0
-                weight1 = l3_data1['total_sample_weight'].copy()
-                weight1[np.isnan(v1)] = 0
-                above = np.nansum(np.array([v0*weight0,v1*weight1]),axis=0)
-                below = np.nansum(np.array([weight0,weight1]),axis=0)
+                above = np.nansum(np.array([v0*self['total_sample_weight'],v1*l3_data1['total_sample_weight']]),axis=0)
+                below = np.nansum(np.array([self['total_sample_weight'],l3_data1['total_sample_weight']]),axis=0)
                 l3_data[key] = above/below
         return l3_data
     
