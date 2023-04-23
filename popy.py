@@ -2434,7 +2434,7 @@ class Level3_Data(dict):
                 result[key] = np.nansum(self[key][mask]*self['total_sample_weight'][mask])/result['total_sample_weight']
         return result
     
-    def sum_by_mask(self,mask=None,xys=None,fields_to_sum=None):
+    def sum_by_mask(self,mask=None,xys=None,fields_to_sum=None,fields_to_average=None):
         '''sum emission to emission rate by mask and/or polygon boundarys
         mask:
             binary mask to begin with
@@ -2442,6 +2442,8 @@ class Level3_Data(dict):
             a list of tuples for the polygon, e.g., [(xarray,yarray)]
         fields_to_sum:
             should be emission related fields, in, e.g., mol/m2/s, where the area unit is assumed to be m2
+        fields_to_average:
+            fields where average makes more sense, like num_samples
         '''
         if self.proj is not None:
             self.logger.error('proj is not implemented yet!');return
@@ -2449,6 +2451,8 @@ class Level3_Data(dict):
             mask = np.ones(self['num_samples'].shape,dtype=bool)
         if fields_to_sum is None:
             fields_to_sum = ['wind_column','wind_column_topo','wind_column_topo_chem','wind_column_topo_alb']
+        if fields_to_average is None:
+            fields_to_average = ['num_samples']
         if 'lonmesh' in self.keys():
             lonmesh,latmesh = self['lonmesh'],self['latmesh']
         else:
@@ -2464,10 +2468,15 @@ class Level3_Data(dict):
         
         result = {}
         
-        all_keys = set(fields_to_sum).intersection(self.keys())
-        for key in all_keys:
+        sum_keys = set(fields_to_sum).intersection(self.keys())
+        for key in sum_keys:
             result[key] = np.nansum((self[key][mask]*grid_m2[mask]*self['total_sample_weight'][mask]))\
             /np.nansum(self['total_sample_weight'][mask]*grid_m2[mask])*np.nansum(grid_m2[mask])
+        
+        average_keys = set(fields_to_average).intersection(self.keys())
+        for key in average_keys:
+            result[key] = np.nansum((self[key][mask]*grid_m2[mask]))\
+            /np.nansum(grid_m2[mask])
         return result
     
     def merge(self,l3_data1):
@@ -3297,19 +3306,27 @@ class Level3_List(list):
             l3 = l3.merge(l)
         return l3
     
-    def sum_by_mask(self,mask=None,xys=None,fields_to_sum=None):
+    def sum_by_mask(self,mask=None,xys=None,fields_to_sum=None,fields_to_average=None):
         '''wrapper of Level3_Data.sum_by_mask'''
         if fields_to_sum is None:
             fields_to_sum = ['wind_column','wind_column_topo','wind_column_topo_chem','wind_column_topo_alb']
+        if fields_to_average is None:
+            fields_to_average = ['num_samples']
+        
         summed = []
-        summed.append(self[0].sum_by_mask(mask=mask,xys=xys,fields_to_sum=fields_to_sum))
+        summed.append(self[0].sum_by_mask(mask=mask,xys=xys,fields_to_sum=fields_to_sum,fields_to_average=fields_to_average))
         
         if len(self) > 1:
             for l3 in self[1:]:
-                summed.append(l3.sum_by_mask(mask=mask,xys=xys,fields_to_sum=fields_to_sum))
-        all_keys = set(fields_to_sum).intersection(self[0].keys())
-        for f in all_keys:
+                summed.append(l3.sum_by_mask(mask=mask,xys=xys,fields_to_sum=fields_to_sum,fields_to_average=fields_to_average))
+        
+        sum_keys = set(fields_to_sum).intersection(self[0].keys())
+        for f in sum_keys:
             self.df['summed_{}'.format(f)] = [m[f] for m in summed]
+        
+        average_keys = set(fields_to_average).intersection(self[0].keys())
+        for f in average_keys:
+            self.df['averaged_{}'.format(f)] = [m[f] for m in summed]
     
     def average_by_finerMask(self,tif_dict,fields_to_average=None):
         '''
