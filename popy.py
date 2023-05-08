@@ -1725,7 +1725,12 @@ class Level3_Data(dict):
             self['lonmesh'] = lonmesh
             self['latmesh'] = latmesh
     
-    def calculate_gradient(self,write_diagnostic=False,finite_difference_order=2,albedo_orders=None):
+    def calculate_gradient(self,write_diagnostic=False,finite_difference_order=2,
+                           bc_kw=None,albedo_orders=None):
+        '''
+        bc_kw:
+            configuration for bias correction. e.g., {'keys':['albedo','aerosol_size'],'orders':[[0,1,2],[1,2]]}
+        '''
         if self.proj is not None:
             self.logger.error('projection is not supported in flux divergence calculation yet')
             return
@@ -1799,34 +1804,65 @@ class Level3_Data(dict):
                 self['wind_topo_xy'] = wind_topo_xy
                 self['wind_topo_rs'] = wind_topo_rs
         
-        if albedo_orders is not None and 'albedo' in self.keys():
+        bc_kw = bc_kw or dict(keys=[],orders=[])
+        if albedo_orders is not None:
+            self.logger.warning('use bc_kw instead for more general bias characterization')
+            bc_kw['keys'].append('albedo')
+            bc_kw['orders'].append(albedo_orders)
+        
+        if len(bc_kw['keys']) > 0:
             if 'pa' in self.keys():
                 pa = self['pa']
             else:
                 self.logger.warning('pa not available! using surface_pressure instead')
                 pa = self['surface_pressure']
-            a0 = self['albedo']
             # d pa/dx, d pa/dy
             dpdx,dpdy,dpdr,dpds = F_grads(pa,dy,dx_vec,dd_vec,finite_difference_order)
-            # d albedo/dx, d albedo/dy
-            dcdx,dcdy,dcdr,dcds = F_grads(a0,dy,dx_vec,dd_vec,finite_difference_order)
             
-            for order in albedo_orders:
+            for ibc,(bc_key,bc_order) in enumerate(zip(bc_kw['keys'],bc_kw['orders'])):
+                a0 = self[bc_key] # first example of bc_key is 'albedo'
+                # d albedo/dx, d albedo/dy
+                dcdx,dcdy,dcdr,dcds = F_grads(a0,dy,dx_vec,dd_vec,finite_difference_order)
                 
-                wind_albedo_xy = order*pa*np.power(a0,order-1)*\
-                (dcdx*self['wind_e'] + dcdy*self['wind_n'])+\
-                np.power(a0,order)*(dpdx*self['wind_e'] + dpdy*self['wind_n'])
-                
-                wind_albedo_rs = order*pa*np.power(a0,order-1)*\
-                (dcdr*self['wind_ne'] + dcds*self['wind_nw']+\
-                r_dot_s*(dcdr*self['wind_nw'] + dcds*self['wind_ne']))+\
-                np.power(a0,order)*(dpdr*self['wind_ne'] + dpds*self['wind_nw']+\
-                r_dot_s*(dpdr*self['wind_nw'] + dpds*self['wind_ne']))
-                                 
-                wind_albedo = np.nanmean(np.array([wind_albedo_xy,wind_albedo_rs]),axis=0)
-                wind_albedo[np.isnan(wind_albedo_xy) & np.isnan(wind_albedo_rs)] = np.nan
-                
-                self['wind_albedo_{}'.format(order)] = wind_albedo
+                for order in bc_order:
+                    wind_albedo_xy = order*pa*np.power(a0,order-1)*\
+                    (dcdx*self['wind_e'] + dcdy*self['wind_n'])+\
+                    np.power(a0,order)*(dpdx*self['wind_e'] + dpdy*self['wind_n'])
+
+                    wind_albedo_rs = order*pa*np.power(a0,order-1)*\
+                    (dcdr*self['wind_ne'] + dcds*self['wind_nw']+\
+                    r_dot_s*(dcdr*self['wind_nw'] + dcds*self['wind_ne']))+\
+                    np.power(a0,order)*(dpdr*self['wind_ne'] + dpds*self['wind_nw']+\
+                    r_dot_s*(dpdr*self['wind_nw'] + dpds*self['wind_ne']))
+
+                    wind_albedo = np.nanmean(np.array([wind_albedo_xy,wind_albedo_rs]),axis=0)
+                    wind_albedo[np.isnan(wind_albedo_xy) & np.isnan(wind_albedo_rs)] = np.nan
+
+                    self['wind_{}_{}'.format(bc_key,order)] = wind_albedo
+                if ibc+1 == len(bc_kw['keys']):
+                    continue
+                # loop for the first order interaction term(s)
+                for jbc in range(ibc+1,len(bc_kw['keys'])):
+                    a1 = self[bc_kw['keys'][jbc]]# e.g., aerosol_size
+                    a0 = a0*a1 # e.g., reuse a0 for albedo*aerosol_size, the interaction term
+                    dcdx,dcdy,dcdr,dcds = F_grads(a0,dy,dx_vec,dd_vec,finite_difference_order)
+                    
+                    order = 1 # only consider first order term for the interaction term
+                    
+                    wind_albedo_xy = order*pa*np.power(a0,order-1)*\
+                    (dcdx*self['wind_e'] + dcdy*self['wind_n'])+\
+                    np.power(a0,order)*(dpdx*self['wind_e'] + dpdy*self['wind_n'])
+
+                    wind_albedo_rs = order*pa*np.power(a0,order-1)*\
+                    (dcdr*self['wind_ne'] + dcds*self['wind_nw']+\
+                    r_dot_s*(dcdr*self['wind_nw'] + dcds*self['wind_ne']))+\
+                    np.power(a0,order)*(dpdr*self['wind_ne'] + dpds*self['wind_nw']+\
+                    r_dot_s*(dpdr*self['wind_nw'] + dpds*self['wind_ne']))
+
+                    wind_albedo = np.nanmean(np.array([wind_albedo_xy,wind_albedo_rs]),axis=0)
+                    wind_albedo[np.isnan(wind_albedo_xy) & np.isnan(wind_albedo_rs)] = np.nan
+
+                    self['wind_{}_{}_{}'.format(bc_key,bc_kw['keys'][jbc],order)] = wind_albedo
                 
     def calculate_flux_divergence(self,write_diagnostic=False,remove_wind_div=False,
                                   finite_difference_order=2,calculate_wind_albedo=False):
@@ -2074,7 +2110,7 @@ class Level3_Data(dict):
         l3_new.check()
         return l3_new
         
-    def trim(self,west,east,south,north,inherit_attributes=['topo_fit','topo_fit_xy','topo_fit_rs','chem_fit','alb_fit']):
+    def trim(self,west,east,south,north,inherit_attributes=['topo_fit','topo_fit_xy','topo_fit_rs','chem_fit','alb_fit','bc_fit','bc_fields']):
         l3_new = Level3_Data(instrum=self.instrum,product=self.product,
                              start_python_datetime=self.start_python_datetime,
                              end_python_datetime=self.end_python_datetime,
@@ -2261,6 +2297,115 @@ class Level3_Data(dict):
         self['chem_residual'] = chem_residual
         self['wind_column_topo_chem'] = wc_chem
     
+    def fit_bc(self,keys=['albedo'],orders=[[0,1]],min_windtopo=None,max_windtopo=None,
+               mask=None,fit_topo=True,remove_intercept=False,
+               if_bootstrap=False,if_xyrs=False):
+        '''infer level2 parameter (e.g., albedo, aerosol_size)-related bias, incorporating lessons learned in fit_albedo
+        and fit_topography
+        keys:
+            list of key names in Level3_Data. interaction terms have to be added explicitly, e.g., ['albedo','aerosol_size',
+            'albedo_aerosol_size']
+        orders:
+            polynominal terms corresponding to keys, e.g., [[0,1,2],[1,2],[1]]
+        '''
+        import statsmodels.formula.api as smf
+        import pandas as pd
+        
+        bc_fields = []
+        for key,bc_order in zip(keys,orders):
+            for order in bc_order:
+                bc_field = 'wind_{}_{}'.format(key,order)
+                if bc_field not in self.keys():
+                    self.logger.error(f'{bc_field} is not in l3 data!')
+                    return
+                bc_fields.append(bc_field)
+        bc_fields = np.array(bc_fields)
+        keys = np.array(keys)
+        orders = [np.array(order) for order in orders]
+        if 'column_amount' in self.keys():
+            vcd = self['column_amount']
+        else:
+            vcd = self['vcd']
+        
+        wc = self['wind_column_topo']
+        if if_xyrs:
+            try:
+                wc_xy = self['wind_column_topo_xy']
+                wc_rs = self['wind_column_topo_rs']
+            except:
+                self.logger.warning('run fit_topography with if_xyrs on first!')
+                if_xyrs = False
+        
+        min_windtopo = min_windtopo or -np.inf
+        max_windtopo = max_windtopo or np.inf
+        wt = np.abs(self['wind_topo']/vcd)
+        bc_mask = (wt >= min_windtopo) & (wt <= max_windtopo)
+        if mask is not None:
+            bc_mask = bc_mask & mask
+        
+        if if_bootstrap:
+            df_nrows = np.sum(bc_mask).astype(int)
+            new_idx = np.random.choice(np.arange(df_nrows),df_nrows)
+            df_dict = {'y':wc[bc_mask][new_idx],'wt':self['wind_topo'][bc_mask][new_idx]}
+            df_dict.update({k:self[k][bc_mask][new_idx] for k in bc_fields})
+            df = pd.DataFrame(df_dict).dropna()
+            if fit_topo:
+                reg_formula = 'y ~ wt'
+            else:
+                reg_formula = 'y ~'
+            for k in bc_fields:
+                reg_formula += ' + '+k
+            if if_xyrs:
+                df_xy = df.copy()
+                df_xy['y'] = wc_xy[bc_mask][new_idx]
+                df_rs = df.copy()
+                df_rs['y'] = wc_rs[bc_mask][new_idx]
+        else:
+            df_dict = {'y':wc[bc_mask],'wt':self['wind_topo'][bc_mask]}
+            df_dict.update({k:self[k][bc_mask] for k in bc_fields})
+            df = pd.DataFrame(df_dict).dropna()
+            if fit_topo:
+                reg_formula = 'y ~ wt'
+            else:
+                reg_formula = 'y ~'
+            for k in bc_fields:
+                reg_formula += ' + '+k
+            if if_xyrs:
+                df_xy = df.copy()
+                df_xy['y'] = wc_xy[bc_mask]
+                df_rs = df.copy()
+                df_rs['y'] = wc_rs[bc_mask]
+        
+        bc_fit = smf.ols(reg_formula, data=df).fit()
+        if if_xyrs:
+            bc_fit_xy = smf.ols(reg_formula, data=df_xy).fit()
+            bc_fit_rs = smf.ols(reg_formula, data=df_rs).fit()
+        
+        wc_bc = wc.copy()
+        for bc_field in bc_fields:
+            wc_bc -= bc_fit.params[bc_field]*self[bc_field]
+        if remove_intercept:
+            wc_bc -= bc_fit.params['Intercept']
+        
+        if if_xyrs:
+            wc_bc_xy = wc_xy.copy()
+            wc_bc_rs = wc_rs.copy()
+            for bc_field in bc_fields:
+                wc_bc_xy -= bc_fit_xy.params[bc_field]*self[bc_field]
+                wc_bc_rs -= bc_fit_rs.params[bc_field]*self[bc_field]
+            if remove_intercept:
+                wc_bc_xy -= bc_fit_xy.params['Intercept']
+                wc_bc_rs -= bc_fit_rs.params['Intercept']
+        
+        self.bc_fit = bc_fit
+        self.bc_fields = bc_fields
+        self['wind_column_topo_bc'] = wc_bc
+        if if_xyrs:
+            self.bc_fit_xy = bc_fit_xy
+            self['wind_column_topo_bc_xy'] = wc_bc_xy
+            self.bc_fit_rs = bc_fit_rs
+            self['wind_column_topo_bc_rs'] = wc_bc_rs
+        
     def fit_albedo(self,albedo_fields=None,albedo_orders=None,
                    mask=None,min_windtopo=None,max_windtopo=None,
                    max_iter=None,outlier_std=None,fit_topo=True,remove_intercept=False):
@@ -2448,7 +2593,7 @@ class Level3_Data(dict):
         if self.proj is not None:
             self.logger.error('proj is not implemented yet!');return
         if mask is None:
-            mask = np.ones(self['num_samples'].shape,dtype=bool)
+            mask = np.zeros(self['num_samples'].shape,dtype=bool)
         if fields_to_sum is None:
             fields_to_sum = ['wind_column','wind_column_topo','wind_column_topo_chem','wind_column_topo_alb']
         if fields_to_average is None:
@@ -2464,7 +2609,7 @@ class Level3_Data(dict):
             for xy in xys:
                 boundary_polygon = path.Path([(x,y) for x,y in zip(*xy)])
                 all_points = np.column_stack((lonmesh.ravel(),latmesh.ravel()))
-                mask = mask & boundary_polygon.contains_points(all_points).reshape(lonmesh.shape)
+                mask = mask | boundary_polygon.contains_points(all_points).reshape(lonmesh.shape)
         
         result = {}
         
@@ -3249,6 +3394,95 @@ class Level3_List(list):
         if resample_rule is not None and return_resampled:
             return l3s_resampled
     
+    def fit_bc(self,resample_rule=None,half_running_window=0,return_resampled=False,
+               keys=['albedo'],orders=[[0,1]],nbootstrap=None,if_propagate_bootstrap=False,**kwargs):
+        
+        if 'remove_intercept' in kwargs.keys():
+            remove_intercept = kwargs['remove_intercept']
+        else:
+            remove_intercept = False
+        
+        if if_propagate_bootstrap:
+            if nbootstrap is not None:
+                self.logger.warning('bootstrap progagates from topo_fit, nbootstrap={}'.format(self[0].topo_fit.nbootstrap))
+            nbootstrap = self[0].topo_fit.nbootstrap
+        
+        kwargs['if_bootstrap'] = False
+        if 'if_xyrs' in kwargs.keys():
+            if_xyrs = kwargs['if_xyrs']
+        else:
+            if_xyrs = False
+        bkwargs = kwargs.copy()
+        bkwargs['if_bootstrap'] = True
+        bkwargs['if_xyrs'] = False
+        
+        if resample_rule is None:
+            for l3 in self:
+                if nbootstrap is not None:
+                    bootstrap_params = []
+                    if if_propagate_bootstrap:
+                        wc = l3['wind_column_topo'].copy()
+                    for i in range(nbootstrap):
+                        if if_propagate_bootstrap:
+                            bparam = l3.topo_fit.bootstrap_params[i]
+                            l3['wind_column_topo'] = l3['wind_column']-bparam['wt']*l3['wind_topo']\
+                            -bparam['Intercept']
+                        l3.fit_bc(keys=keys,orders=orders,**bkwargs)
+                        bootstrap_params.append(l3.bc_fit.params)
+                    if if_propagate_bootstrap:
+                        l3['wind_column_topo'] = wc
+                l3.fit_bc(keys=keys,orders=orders,**kwargs)
+                if nbootstrap is not None:
+                    l3.bc_fit.bootstrap_params = bootstrap_params
+                    l3.bc_fit.nbootstrap = nbootstrap
+        else:
+            l3s_resampled,resampler = self.resample(rule=resample_rule,half_running_window=half_running_window)
+            for l3,(ind,sub_df) in zip(l3s_resampled,resampler.__iter__()):
+                if nbootstrap is not None:
+                    bootstrap_params = []
+                    if if_propagate_bootstrap:
+                        wc = l3['wind_column_topo'].copy()
+                    for i in range(nbootstrap):
+                        if if_propagate_bootstrap:
+                            bparam = l3.topo_fit.bootstrap_params[i]
+                            l3['wind_column_topo'] = l3['wind_column']-bparam['wt']*l3['wind_topo']\
+                            -bparam['Intercept']
+                        l3.fit_bc(keys=keys,orders=orders,**bkwargs)
+                        bootstrap_params.append(l3.bc_fit.params)
+                    if if_propagate_bootstrap:
+                        l3['wind_column_topo'] = wc
+                l3.fit_bc(keys=keys,orders=orders,**kwargs)
+                if nbootstrap is not None:
+                    l3.bc_fit.bootstrap_params = bootstrap_params
+                    l3.bc_fit.nbootstrap = nbootstrap
+                for irow,row in sub_df.iterrows():
+                    self[int(row['count'])].bc_fit = l3.bc_fit
+                    self[int(row['count'])].bc_fields = l3.bc_fields
+                    wc_bc = self[int(row['count'])]['wind_column_topo'].copy()
+                    for bc_field in l3.bc_fields:
+                        wc_bc -= l3.bc_fit.params[bc_field]*self[int(row['count'])][bc_field]
+                    if remove_intercept:
+                        wc_bc -= l3.bc_fit.params['Intercept']
+                    self[int(row['count'])]['wind_column_topo_bc'] = wc_bc
+                    if if_xyrs:
+                        self[int(row['count'])].bc_fit_xy = l3.bc_fit_xy
+                        self[int(row['count'])].bc_fit_rs = l3.bc_fit_rs
+                        wc_bc_xy = self[int(row['count'])]['wind_column_topo_xy'].copy()
+                        wc_bc_rs = self[int(row['count'])]['wind_column_topo_rs'].copy()
+                        for bc_field in l3.bc_fields:
+                            wc_bc_xy -= l3.bc_fit_xy.params[bc_field]*self[int(row['count'])][bc_field]
+                            wc_bc_rs -= l3.bc_fit_rs.params[bc_field]*self[int(row['count'])][bc_field]
+                        if remove_intercept:
+                            wc_bc_xy -= l3.bc_fit_xy.params['Intercept']
+                            wc_bc_rs -= l3.bc_fit_rs.params['Intercept']
+                        self[int(row['count'])]['wind_column_topo_bc_xy'] = wc_bc_xy
+                        self[int(row['count'])]['wind_column_topo_bc_rs'] = wc_bc_rs
+        
+        self.df['bc_rmse'] = [np.sqrt(l3.bc_fit.mse_resid) for l3 in self]
+        self.df['bc_r2'] = [l3.bc_fit.rsquared for l3 in self]
+        if resample_rule is not None and return_resampled:
+            return l3s_resampled
+    
     def fit_albedo(self,resample_rule=None,half_running_window=0,return_resampled=False,
                    albedo_fields=None,albedo_orders=None,**kwargs):
         if albedo_fields is None:
@@ -3522,7 +3756,7 @@ class popy(object):
                 self.default_subset_function = 'F_subset_S5PAI'
             elif product in ['CH4']:
                 oversampling_list = oversampling_list or ['XCH4','albedo',\
-                                     'surface_altitude','surface_pressure','pa']
+                                     'surface_altitude','surface_pressure','pa','aerosol_size']
                 self.default_subset_function = 'F_subset_S5PCH4'
                 self.default_column_unit = 'nmol/mol'
             elif product in ['NO2']:
@@ -5679,11 +5913,25 @@ class popy(object):
         else:
             self.nl2 = len(l2g_data['latc'])
     
-    def F_subset_S5PCH4_SRON(self,l2_list,data_fields=None,data_fields_l2g=None):
+    def F_subset_S5PCH4_SRON(self,l2_list=None,l2_path_pattern=None,
+                             data_fields=None,data_fields_l2g=None):
         '''
         subsetting sron data at https://ftp.sron.nl/open-access-data-2/TROPOMI/tropomi/ch4/18_17/
         '''
+        if l2_path_pattern is None and l2_list is None:
+            self.logger.error('provide l2_path_pattern or l2_list!')
+            return
         from netCDF4 import Dataset
+        start_date = self.start_python_datetime.date()
+        end_date = self.end_python_datetime.date()
+        days = (end_date-start_date).days+1
+        DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+        if l2_path_pattern is not None:
+            l2_list = []
+            for DATE in DATES:
+                flist = glob.glob(DATE.strftime(l2_path_pattern))
+                l2_list = l2_list+flist
+        
         self.l2_list = l2_list
         west = self.west
         east = self.east
@@ -5709,13 +5957,15 @@ class popy(object):
                            '/meteo/surface_pressure',\
                            '/meteo/surface_altitude',\
                            '/instrument/glintflag',\
-                           '/instrument/ground_pixel']  
+                           '/instrument/ground_pixel',\
+                           '/side_product/aerosol_size']  
         if not data_fields_l2g:
             # standardized variable names in l2g file. should map one-on-one to data_fields
             data_fields_l2g = ['latitude_bounds','longitude_bounds','SolarZenithAngle',\
                                'vza','latc','lonc','qa_value','time',\
                                'XCH4_no_bias_correction','XCH4','column_uncertainty',
-                               'colh2o','albedo','surface_pressure','surface_altitude','glintflag','across_track_position']
+                               'colh2o','albedo','surface_pressure','surface_altitude','glintflag','across_track_position',
+                               'aerosol_size']
         
         self.logger.info('Read, subset, and store level 2 data to l2g_data')
         

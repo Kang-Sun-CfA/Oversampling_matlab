@@ -188,24 +188,24 @@ class Basin():
                 self.xys = [gdf_row.geometry.exterior.xy]
         else:
             self.name = name
-            self.west = west or np.min(xys[0])-buffer_latlon
-            self.east = east or np.max(xys[0])+buffer_latlon
-            self.south = south or np.min(xys[1])-buffer_latlon
-            self.north = north or np.max(xys[1])+buffer_latlon
+            self.west = west or np.min([np.min(xy[0]) for xy in xys])-buffer_latlon
+            self.east = east or np.max([np.max(xy[0]) for xy in xys])+buffer_latlon
+            self.south = south or np.min([np.min(xy[1]) for xy in xys])-buffer_latlon
+            self.north = north or np.max([np.max(xy[1]) for xy in xys])+buffer_latlon
             self.xys = xys
     
     def get_basin_emission(self,period_range=None,l3_path_pattern=None,l3s=None,product='CH4',
                            Inventory_kw=None,
-                           fit_topo_kw=None,fit_chem_kw=None,fit_alb_kw=None,
+                           fit_topo_kw=None,fit_chem_kw=None,fit_bc_kw=None,
                            chem_min_column_amount=None,chem_max_wind_column=None):
         if product == 'CH4':
             fields_name=['wind_column','wind_column_xy','wind_column_rs',\
-                                             'vcd','XCH4','surface_altitude','wind_topo',\
-                                             'albedo','wind_albedo_0','wind_albedo_1',\
-                                             'wind_albedo_2','wind_albedo_3','surface_pressure','pa']
+                         'vcd','XCH4','surface_altitude','wind_topo',\
+                         'albedo','aerosol_size','wind_albedo_0','wind_albedo_1','wind_albedo_aerosol_size_1',\
+                         'wind_albedo_2','wind_aerosol_size_1','surface_pressure','pa']
         elif product == 'NO2':
             fields_name=['column_amount','surface_altitude','wind_topo',
-                                    'wind_column','wind_column_xy','wind_column_rs']
+                         'wind_column','wind_column_xy','wind_column_rs']
         
         if period_range is None and l3_path_pattern is None:
             l3s = l3s.trim(west=self.west,east=self.east,south=self.south,north=self.north)
@@ -216,7 +216,7 @@ class Basin():
         self.l3 = l3s.aggregate()
         if Inventory_kw is not None and product == 'CH4':
             fit_topo_kw = fit_topo_kw or {} 
-            fit_alb_kw = fit_alb_kw or {}
+            fit_bc_kw = fit_bc_kw or {}
             inventory_native = Inventory(name=self.name+'_'+Inventory_kw['name'],
                                          west=self.west,east=self.east,south=self.south,north=self.north)
             
@@ -236,12 +236,12 @@ class Basin():
                 max_topo_windtopo = Inventory_kw['max_topo_windtopo']
             else:
                 max_topo_windtopo = np.inf
-            if 'min_alb_windtopo' in Inventory_kw.keys():
-                min_alb_windtopo = Inventory_kw['min_alb_windtopo']
+            if 'min_bc_windtopo' in Inventory_kw.keys():
+                min_bc_windtopo = Inventory_kw['min_bc_windtopo']
             else:
-                min_alb_windtopo = -np.inf
-            if 'max_alb_windtopo' in Inventory_kw.keys():
-                max_alb_windtopo = Inventory_kw['max_alb_windtopo']
+                min_bc_windtopo = -np.inf
+            if 'max_bc_windtopo' in Inventory_kw.keys():
+                max_bc_windtopo = Inventory_kw['max_bc_windtopo']
             else:
                 max_alb_windtopo = np.inf
             if 'min_z0' in Inventory_kw.keys():
@@ -253,15 +253,15 @@ class Basin():
                                            max_windtopo=max_topo_windtopo,min_z0=min_z0)
             fit_topo_kw.update(dict(mask=topo_mask,min_windtopo=min_topo_windtopo,max_windtopo=max_topo_windtopo))
             
-            alb_mask = inventory.get_mask(max_emission=Inventory_kw['max_alb_emission'],
-                                          min_windtopo=min_alb_windtopo,
-                                          max_windtopo=max_alb_windtopo,min_z0=min_z0)
-            fit_alb_kw.update(dict(mask=alb_mask,min_windtopo=min_alb_windtopo,max_windtopo=max_alb_windtopo))
+            bc_mask = inventory.get_mask(max_emission=Inventory_kw['max_bc_emission'],
+                                         min_windtopo=min_bc_windtopo,
+                                         max_windtopo=max_bc_windtopo,min_z0=min_z0)
+            fit_bc_kw.update(dict(mask=bc_mask,min_windtopo=min_bc_windtopo,max_windtopo=max_bc_windtopo))
             inventory['topo_mask'] = topo_mask
-            inventory['alb_mask'] = alb_mask
+            inventory['bc_mask'] = bc_mask
             self.inventory = inventory
             
-        if fit_topo_kw is None and fit_chem_kw is None and fit_alb_kw is None:#for sub domain
+        if fit_topo_kw is None and fit_chem_kw is None and fit_bc_kw is None:#for sub domain
             if hasattr(l3s[0].topo_fit,'bootstrap_params'):
                 b_sum_mat = np.full((len(l3s),l3s[0].topo_fit.nbootstrap),np.nan)
                 for il,l in enumerate(l3s):
@@ -272,14 +272,35 @@ class Basin():
                         l[b_field_name] -= bparam['Intercept']
                         b_sum_mat[il,ib] = l.sum_by_mask(xys=self.xys,fields_to_sum=[b_field_name])[b_field_name]
                         l.pop(b_field_name)
-                l3s.b_sum_mat = b_sum_mat
+                l3s.topo_b_sum_mat = b_sum_mat
+                l3s.df['summed_wind_column_topo_std'] = np.std(b_sum_mat,axis=1)
                 for percentile in [1,2.5,5,10,25,50,75,90,95,97.5,99]:
                     l3s.df['summed_wind_column_topo_{}'.format(percentile)] = np.percentile(b_sum_mat,percentile,axis=1)
+            
+            if hasattr(l3s[0],'bc_fit'):
+                if hasattr(l3s[0].bc_fit,'bootstrap_params'):
+                    b_sum_mat = np.full((len(l3s),l3s[0].bc_fit.nbootstrap),np.nan)
+                    for il,l in enumerate(l3s):
+                        for ib,bparam in enumerate(l.bc_fit.bootstrap_params):
+                            b_field_name = f'wind_column_topo_bc_b{ib}'
+                            l[b_field_name] = l['wind_column_topo'].copy()
+                            for bc_field in l.bc_fields:
+                                l[b_field_name] -= bparam[bc_field]*l[bc_field]
+                            #always remove intercept for subdomains
+                            l[b_field_name] -= bparam['Intercept']
+                            b_sum_mat[il,ib] = l.sum_by_mask(xys=self.xys,fields_to_sum=[b_field_name])[b_field_name]
+                            l.pop(b_field_name)
+                    l3s.bc_b_sum_mat = b_sum_mat
+                    l3s.df['summed_wind_column_topo_bc_std'] = np.std(b_sum_mat,axis=1)
+                    for percentile in [1,2.5,5,10,25,50,75,90,95,97.5,99]:
+                        l3s.df['summed_wind_column_topo_bc_{}'.format(percentile)] = np.percentile(b_sum_mat,percentile,axis=1)
+            
             self.l3s = l3s
             self.l3 = l3s.aggregate()
             self.l3s.sum_by_mask(xys=self.xys,
-                                 fields_to_sum=['wind_column','wind_column_topo','wind_column_topo_alb',
-                                                'wind_column_topo_chem','wind_column_topo_xy','wind_column_topo_rs'],
+                                 fields_to_sum=['wind_column','wind_column_topo','wind_column_topo_bc',
+                                                'wind_column_topo_chem','wind_column_topo_xy','wind_column_topo_rs',
+                                                'wind_column_topo_bc_xy','wind_column_topo_bc_rs'],
                                  fields_to_average=['num_samples'])
             return
         
@@ -299,27 +320,55 @@ class Basin():
                     b_sum_mat[il,ib] = l.sum_by_mask(xys=self.xys,fields_to_sum=[b_field_name])[b_field_name]
                     l.pop(b_field_name)
             
-            l3s.b_sum_mat = b_sum_mat
+            l3s.topo_b_sum_mat = b_sum_mat
+            l3s.df['summed_wind_column_topo_std'] = np.std(b_sum_mat,axis=1)
             for percentile in [1,2.5,5,10,25,50,75,90,95,97.5,99]:
                 l3s.df['summed_wind_column_topo_{}'.format(percentile)] = np.percentile(b_sum_mat,percentile,axis=1)
         if product == 'CH4':
-            if fit_alb_kw is None:
+            if fit_bc_kw is None:
                 self.l3s = l3s
                 self.l3 = l3s.aggregate()
                 self.l3s.sum_by_mask(xys=self.xys,
                                      fields_to_sum=['wind_column','wind_column_topo',
                                                     'wind_column_topo_xy','wind_column_topo_rs',
-                                                    'wind_column_topo_alb'],
+                                                    'wind_column_topo_bc',
+                                                    'wind_column_topo_bc_xy','wind_column_topo_bc_rs'],
                                      fields_to_average=['num_samples'])
                 return
             else:
-                l3s.fit_albedo(**fit_alb_kw)
+                l3s.fit_bc(**fit_bc_kw)
+                if 'if_propagate_bootstrap' not in fit_bc_kw.keys():
+                    fit_bc_kw['if_propagate_bootstrap'] = False
+                if 'nbootstrap' not in fit_bc_kw.keys():
+                    if fit_bc_kw['if_propagate_bootstrap']:
+                        fit_bc_kw['nbootstrap'] = fit_topo_kw['nbootstrap']
+                    else:
+                        fit_bsc_kw['nbootstrap'] = None
+                if fit_bc_kw['nbootstrap'] is not None or fit_bc_kw['if_propagate_bootstrap']:
+                    b_sum_mat = np.full((len(l3s),fit_bc_kw['nbootstrap']),np.nan)
+                    for il,l in enumerate(l3s):
+                        for ib,bparam in enumerate(l.bc_fit.bootstrap_params):
+                            b_field_name = f'wind_column_topo_bc_b{ib}'
+                            l[b_field_name] = l['wind_column_topo'].copy()
+                            for bc_field in l.bc_fields:
+                                l[b_field_name] -= bparam[bc_field]*l[bc_field]
+                            if 'remove_intercept' in fit_bc_kw.keys():
+                                if fit_bc_kw['remove_intercept']:
+                                    l[b_field_name] -= bparam['Intercept']
+                            b_sum_mat[il,ib] = l.sum_by_mask(xys=self.xys,fields_to_sum=[b_field_name])[b_field_name]
+                            l.pop(b_field_name)
+
+                    l3s.bc_b_sum_mat = b_sum_mat
+                    l3s.df['summed_wind_column_topo_bc_std'] = np.std(b_sum_mat,axis=1)
+                    for percentile in [1,2.5,5,10,25,50,75,90,95,97.5,99]:
+                        l3s.df['summed_wind_column_topo_bc_{}'.format(percentile)] = np.percentile(b_sum_mat,percentile,axis=1)
                 self.l3s = l3s
                 self.l3 = l3s.aggregate()
                 self.l3s.sum_by_mask(xys=self.xys,
                                      fields_to_sum=['wind_column','wind_column_topo',
                                                     'wind_column_topo_xy','wind_column_topo_rs',
-                                                    'wind_column_topo_alb'],
+                                                    'wind_column_topo_bc',
+                                                    'wind_column_topo_bc_xy','wind_column_topo_bc_rs'],
                                      fields_to_average=['num_samples'])
                 return
         if product == 'NO2':
@@ -375,7 +424,7 @@ class Basin():
         field = field or 'summed_wind_column_topo'
         
         if ax is None and if_plot:
-            fig,ax = plt.subplots(1,1,figsize=(10,5))
+            fig,ax = plt.subplots(1,1,figsize=(10,5),constrained_layout=True)
         
         sc_kw = sc_kw or {}
         if 'zorder' not in sc_kw.keys():
@@ -416,8 +465,18 @@ class Basin():
         df = self.l3s.df.copy()
         if field+'_xy' not in df.keys():
             plot_xyrs = False
-        if not hasattr(self.l3s,'b_sum_mat'):
-            plot_bootstrap = False
+        
+        if field == 'summed_wind_column_topo':
+            if hasattr(self.l3s,'topo_b_sum_mat'):
+                b_sum_mat = self.l3s.topo_b_sum_mat.copy()
+            else:
+                plot_bootstrap = False
+        if field == 'summed_wind_column_topo_bc':
+            if hasattr(self.l3s,'bc_b_sum_mat'):
+                b_sum_mat = self.l3s.bc_b_sum_mat.copy()
+            else:
+                plot_bootstrap = False
+        
         br_kw = br_kw or {}
         if 'legend' not in br_kw.keys():
             br_kw['legend'] = False
@@ -429,7 +488,6 @@ class Basin():
             df[field+'_lower'] = df[[field+'_xy',field+'_rs']].min(axis=1)
             df[field+'_ul'] = df[field+'_upper']-df[field+'_lower']
         if plot_bootstrap:
-            b_sum_mat = self.l3s.b_sum_mat.copy()
             if plot_xyrs:
                 for icol in range(b_sum_mat.shape[1]):
                     b_sum_mat[:,icol] = b_sum_mat[:,icol]+np.random.normal(scale=df[field+'_ul']/2)
