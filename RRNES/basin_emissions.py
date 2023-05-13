@@ -343,7 +343,7 @@ class Basin():
                     if fit_bc_kw['if_propagate_bootstrap']:
                         fit_bc_kw['nbootstrap'] = fit_topo_kw['nbootstrap']
                     else:
-                        fit_bsc_kw['nbootstrap'] = None
+                        fit_bc_kw['nbootstrap'] = None
                 if fit_bc_kw['nbootstrap'] is not None or fit_bc_kw['if_propagate_bootstrap']:
                     b_sum_mat = np.full((len(l3s),fit_bc_kw['nbootstrap']),np.nan)
                     for il,l in enumerate(l3s):

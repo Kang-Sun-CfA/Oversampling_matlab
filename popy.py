@@ -2342,7 +2342,8 @@ class Level3_Data(dict):
         bc_mask = (wt >= min_windtopo) & (wt <= max_windtopo)
         if mask is not None:
             bc_mask = bc_mask & mask
-        
+        for bc_field in bc_fields:
+            bc_mask = bc_mask & ~np.isnan(self[bc_field])
         if if_bootstrap:
             df_nrows = np.sum(bc_mask).astype(int)
             new_idx = np.random.choice(np.arange(df_nrows),df_nrows)
@@ -2862,6 +2863,170 @@ class Level3_Data(dict):
             save_dict['proj_srs'] = self.proj.srs
         savemat(l3_filename,save_dict)
     
+    def save_kmz(self,outfile_pre=None,plot_field=None,func=None,
+                 savedir=None,remove_png=True,vmin=None,vmax=None,
+                 legend=False,cmap=None):
+        '''save a field to kmz file, adopted from kmz_utility.py by Chris Chan Miller'''
+        try:
+            from simplekml import (Kml, OverlayXY, ScreenXY, Units, RotationXY, AltitudeMode, Camera)
+        except:
+            self.logger.error('simplekml package is needed!')
+            return
+        from scipy.ndimage.filters import convolve
+        import matplotlib as mpl
+        import matplotlib.pyplot as plt
+        def make_kml(llcrnrlon, llcrnrlat, urcrnrlon, urcrnrlat,
+             figs, colorbar=None, **kw):
+            kml = Kml()
+            altitude = kw.pop('altitude', 2e7)
+            roll = kw.pop('roll', 0)
+            tilt = kw.pop('tilt', 0)
+            altitudemode = kw.pop('altitudemode', AltitudeMode.relativetoground)
+            camera = Camera(latitude=np.mean([urcrnrlat, llcrnrlat]),
+                            longitude=np.mean([urcrnrlon, llcrnrlon]),
+                            altitude=altitude, roll=roll, tilt=tilt,
+                            altitudemode=altitudemode)
+            kml.document.camera = camera
+            draworder = 0
+            for fig in figs:  # NOTE: Overlays are limited to the same bbox.
+                draworder += 1
+                ground = kml.newgroundoverlay(name='GroundOverlay')
+                ground.draworder = draworder
+                ground.visibility = kw.pop('visibility', 1)
+                ground.name = kw.pop('name', 'overlay')
+                ground.color = kw.pop('color', '9effffff')
+                ground.atomauthor = kw.pop('author', 'ocefpaf')
+                ground.latlonbox.rotation = kw.pop('rotation', 0)
+                ground.description = kw.pop('description', 'Matplotlib figure')
+                ground.gxaltitudemode = kw.pop('gxaltitudemode',
+                                               'clampToSeaFloor')
+                ground.icon.href = fig
+                ground.latlonbox.east = llcrnrlon
+                ground.latlonbox.south = llcrnrlat
+                ground.latlonbox.north = urcrnrlat
+                ground.latlonbox.west = urcrnrlon
+            if colorbar:  # Options for colorbar are hard-coded (to avoid a big mess).
+                screen = kml.newscreenoverlay(name='ScreenOverlay')
+                screen.icon.href = colorbar
+                screen.overlayxy = OverlayXY(x=0, y=0,
+                                             xunits=Units.fraction,
+                                             yunits=Units.fraction)
+                screen.screenxy = ScreenXY(x=0.015, y=0.075,
+                                           xunits=Units.fraction,
+                                           yunits=Units.fraction)
+                screen.rotationXY = RotationXY(x=0.5, y=0.5,
+                                               xunits=Units.fraction,
+                                               yunits=Units.fraction)
+                screen.size.x = 0
+                screen.size.y = 0
+                screen.size.xunits = Units.fraction
+                screen.size.yunits = Units.fraction
+                screen.visibility = 1
+            kmzfile = kw.pop('kmzfile', 'overlay.kmz')
+            kml.savekmz(kmzfile)
+        def gearth_fig(llcrnrlon, llcrnrlat, urcrnrlon, urcrnrlat, pixels=1024):
+            """Return a Matplotlib `fig` and `ax` handles for a Google-Earth Image."""
+            aspect = np.cos(np.mean([llcrnrlat, urcrnrlat]) * np.pi/180.0)
+            xsize = np.ptp([urcrnrlon, llcrnrlon]) * aspect
+            ysize = np.ptp([urcrnrlat, llcrnrlat])
+            aspect = ysize / xsize
+            if aspect > 1.0:
+                figsize = (10.0 / aspect, 10.0)
+            else:
+                figsize = (10.0, 10.0 * aspect)
+            plt.ioff()  
+            fig = plt.figure(figsize=figsize,
+                             frameon=False,
+                             dpi=pixels//10)
+            # KML friendly image.  If using basemap try: `fix_aspect=False`.
+            ax = fig.add_axes([0, 0, 1, 1])
+            ax.set_xlim(llcrnrlon, urcrnrlon)
+            ax.set_ylim(llcrnrlat, urcrnrlat)
+            return fig, ax
+        def safe_convolve(ts,agg_fac):
+            from scipy.ndimage.filters import convolve
+            # Define weighting
+            weights = np.ones(agg_fac)
+            weights = weights / np.sum(weights[:])
+            ct = np.ones(ts.shape)
+            ct[ts.mask] = 0
+            ts[ts.mask] = 0.0
+            # Perform convolution
+            y = convolve(ts, weights, mode='constant')
+            y_ct = convolve(ct, weights, mode='constant')
+            # Return mean
+            return y/y_ct
+        
+        if self.product == 'CH4':
+            plot_field = plot_field or 'XCH4'
+        else:
+            plot_field = plot_field or 'column_amount'
+        if savedir is None:
+            savedir = './'
+        outfile_pre = outfile_pre or plot_field
+        outfile_pre = os.path.join(savedir,outfile_pre)
+        xgrid = self['xgrid'];ygrid = self['ygrid']
+        if plot_field not in self.keys():
+            self.logger.warning(plot_field+' doesn''t exist in l3_data!')
+            return
+        if func is not None:
+            C = func(self[plot_field])
+        else:
+            C = self[plot_field]
+        # Pixel dimensions
+        pixels = 1024 * 10
+        if(cmap is None):
+            cmap = plt.get_cmap('rainbow')
+        if isinstance(cmap,str):
+            cmap = plt.get_cmap(cmap)
+        if(vmin is None):
+            vmin = C.min()
+        if(vmax is None):
+            vmax = C.max()
+        xgridr,ygridr = F_center2edge(xgrid,ygrid)
+        # Plot Figure
+        overlay_png = outfile_pre+'_overlay.png'
+        fig, ax = gearth_fig(llcrnrlon=xgridr.min(),
+                             llcrnrlat=ygridr.min(),
+                             urcrnrlon=xgridr.max(),
+                             urcrnrlat=ygridr.max(),
+                             pixels=pixels)
+        cs = ax.pcolormesh(xgridr,ygridr, C, cmap=cmap,vmin=vmin,vmax=vmax)
+        ax.set_axis_off()
+        fig.savefig(overlay_png, transparent=False, format='png')
+        plt.close()
+        aspect = np.cos(np.mean([ygrid.min(), ygrid.max()]) * np.pi/180.0)
+        xsize = np.ptp([xgrid.max(), xgrid.min()]) * aspect
+        ysize = np.ptp([ygrid.max(), ygrid.min()])
+        aspect = ysize / xsize
+        outfile = outfile_pre + '.kmz'
+        if(legend):
+            # Plot Colorbar
+            legend_png = outfile_pre+'_legend.png'
+            fig = plt.figure(figsize=(8, 3), facecolor=None, frameon=False)
+            ax  = fig.add_axes([0.05, 0.80, 0.9, 0.15])
+            norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
+            cb = mpl.colorbar.ColorbarBase(ax, cmap=cmap,norm=norm,
+                                           orientation='horizontal')
+            fig.savefig(legend_png, transparent=True, format='png')  # Change transparent to True if your colorbar is not on space :)
+            plt.close()
+            # Make the KML File
+            make_kml(llcrnrlon=xgridr.min(), llcrnrlat=ygridr.min(),
+                    urcrnrlon=xgridr.max(), urcrnrlat=ygridr.max(),
+                    figs=[overlay_png], colorbar=os.path.split(legend_png)[-1],
+                    kmzfile=outfile)
+        else: 
+            # Make the KML File
+            make_kml(llcrnrlon=xgridr.min(), llcrnrlat=ygridr.min(),
+                    urcrnrlon=xgridr.max(), urcrnrlat=ygridr.max(),
+                    figs=[overlay_png],
+                    kmzfile=outfile)
+        if remove_png:
+            os.remove(overlay_png)
+            if legend:
+                os.remove(legend_png)
+        return outfile
+    
     def save_nc(self,l3_filename,
                 fields_name=None,
                 fields_rename=None,
@@ -3116,7 +3281,7 @@ class Level3_Data(dict):
         fig_output['pc'] = pc
         return fig_output
     
-    def plot(self,plot_field=None,
+    def plot(self,plot_field=None,scale=None,
              existing_ax=None,draw_admin_level=1,
              layer_threshold=0.5,draw_colorbar=True,
              func=None,**kwargs):
@@ -3172,16 +3337,27 @@ class Level3_Data(dict):
         else:
             ax.set_extent([np.min(self['lonmesh']),np.max(self['lonmesh']),
                            np.min(self['latmesh']),np.max(self['latmesh'])], ccrs.Geodetic())
-        ax.add_feature(cfeature.COASTLINE)
+        ax.coastlines(resolution='50m', color='black', linewidth=1)
         if draw_admin_level == 0:
-            ax.add_feature(cfeature.BORDERS, edgecolor='k',linewidth=0.5)
+            ax.add_feature(cfeature.BORDERS.with_scale('50m'), edgecolor='k',linewidth=1)
         elif draw_admin_level == 1:
-            ax.add_feature(cfeature.BORDERS)
-            ax.add_feature(cfeature.STATES,edgecolor='k',linewidth=0.5)
+            ax.add_feature(cfeature.BORDERS.with_scale('50m'))
+            ax.add_feature(cfeature.STATES.with_scale('50m'),edgecolor='k',linewidth=1)
         if 'num_samples' in self.keys():
             plotdata[self['num_samples']<layer_threshold] = np.nan
         if self.proj is None and 'lonmesh' not in self.keys():
-            pc = ax.pcolormesh(*F_center2edge(xgrid,ygrid),plotdata,transform=ccrs.PlateCarree(),
+            if scale == 'log':
+                from matplotlib.colors import LogNorm
+                if 'vmin' in kwargs:
+                    inputNorm = LogNorm(vmin=kwargs['vmin'],vmax=kwargs['vmax'])
+                    kwargs.pop('vmin');
+                    kwargs.pop('vmax');
+                else:
+                    inputNorm = LogNorm()
+                pc = ax.pcolormesh(*F_center2edge(xgrid,ygrid),plotdata,transform=ccrs.PlateCarree(),
+                           alpha=kwargs['alpha'],cmap=kwargs['cmap'],norm=inputNorm)
+            else:
+                pc = ax.pcolormesh(*F_center2edge(xgrid,ygrid),plotdata,transform=ccrs.PlateCarree(),
                            alpha=kwargs['alpha'],cmap=kwargs['cmap'],vmin=kwargs['vmin'],vmax=kwargs['vmax'])
         else:
             pc = ax.pcolormesh(self['lonmesh'],self['latmesh'],plotdata,transform=ccrs.PlateCarree(),
