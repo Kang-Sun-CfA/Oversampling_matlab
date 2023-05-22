@@ -155,12 +155,11 @@ class Inventory(dict):
 
 class Basin():
     '''class based on dict, representing a basin, usually for oil & gas'''
-    def __init__(self,gdf_row=None,xys=None,buffer_latlon=0.5,name=None,west=None,east=None,south=None,north=None):
+    def __init__(self,geometry=None,gdf_row=None,xys=None,
+                 buffer_latlon=0.5,name=None,west=None,east=None,south=None,north=None):
         '''
-        gdf_row:
-            a row of a geopandas data frame
-        xys:
-            a list of tuples for the polygon, e.g., [(xarray,yarray)]
+        geometry:
+            a row of a geopandas data frame, a list of tuples for the polygon, e.g., [(xarray,yarray)], or geometry in a gpd row
         name:
             name of basin, if None, infer from gdf_row
         buffer_latlon:
@@ -170,12 +169,17 @@ class Basin():
         '''
         import shapely
         self.logger = logging.getLogger(__name__)
-        if gdf_row is not None:
-            if gdf_row.ndim > 1:
+        if geometry is None and gdf_row is not None:
+            geometry = gdf_row
+        if geometry is None and xys is not None:
+            geometry = xys
+        
+        if isinstance(geometry,gpd.geodataframe.GeoDataFrame):
+            if geometry.ndim > 1:
                 self.logger.info('gdf is a data frame, taking its first row')
-                if gdf_row.shape[0] > 1:
-                    self.logger.warning(f'gdf has {gdf_row.shape[0]} rows!')
-                gdf_row = gdf_row.head(1).squeeze()
+                if geometry.shape[0] > 1:
+                    self.logger.warning(f'gdf has {geometry_row.shape[0]} rows!')
+                gdf_row = geometry.head(1).squeeze()
             self.name = name or gdf_row.NAME
             bounds = gdf_row.geometry.bounds
             self.west = west or bounds[0]-buffer_latlon
@@ -186,13 +190,32 @@ class Basin():
                 self.xys = [g.exterior.xy for g in gdf_row.geometry]
             else:
                 self.xys = [gdf_row.geometry.exterior.xy]
-        else:
+        elif isinstance(geometry,list):
+            xys = geometry
             self.name = name
             self.west = west or np.min([np.min(xy[0]) for xy in xys])-buffer_latlon
             self.east = east or np.max([np.max(xy[0]) for xy in xys])+buffer_latlon
             self.south = south or np.min([np.min(xy[1]) for xy in xys])-buffer_latlon
             self.north = north or np.max([np.max(xy[1]) for xy in xys])+buffer_latlon
             self.xys = xys
+        elif isinstance(geometry,shapely.geometry.multipolygon.MultiPolygon):
+            self.name = name
+            bounds = geometry.bounds
+            self.west = west or bounds[0]-buffer_latlon
+            self.east = east or bounds[2]+buffer_latlon
+            self.south = south or bounds[1]-buffer_latlon
+            self.north = north or bounds[3]+buffer_latlon
+            self.xys = [g.exterior.xy for g in geometry]
+        elif isinstance(geometry,shapely.geometry.polygon.Polygon):
+            self.name = name
+            bounds = geometry.bounds
+            self.west = west or bounds[0]-buffer_latlon
+            self.east = east or bounds[2]+buffer_latlon
+            self.south = south or bounds[1]-buffer_latlon
+            self.north = north or bounds[3]+buffer_latlon
+            self.xys = [geometry.exterior.xy]
+        else:
+            self.logger.error('unknown class for geometry!')
     
     def get_basin_emission(self,period_range=None,l3_path_pattern=None,l3s=None,product='CH4',
                            Inventory_kw=None,
@@ -415,6 +438,70 @@ class Basin():
         ax.coastlines(resolution='50m', color='black', linewidth=1)
         ax.add_feature(cfeature.STATES.with_scale('50m'), facecolor='None', edgecolor='k', 
                        linestyle='-',zorder=0,lw=0.5)
+    
+    def resample_df(self,resample_rule,include_xyrs=True,include_bootstrap=True,
+                    normalize_sec=None,min_D=1,keep_bt_realizations=False):
+        keys = ['summed_wind_column_topo','summed_wind_column_topo_xy','summed_wind_column_topo_rs',
+                'summed_wind_column_topo_bc','summed_wind_column_topo_bc_xy','summed_wind_column_topo_bc_rs']
+        common_keys = list(set(keys).intersection(set(self.l3s.df.keys())))
+        df = self.l3s.df[common_keys].copy()
+        layers = self.l3s.df['averaged_num_samples'].squeeze()
+        ibfs = []
+        for field in ['summed_wind_column_topo','summed_wind_column_topo_bc']:
+            if field not in df.keys():
+                self.logger.warning('{} not available!'.format(field))
+                continue
+            include_xyrs_f = include_xyrs and (field+'_xy' in df.keys())
+            include_bootstrap_f = include_bootstrap
+            if field == 'summed_wind_column_topo':
+                if hasattr(self.l3s,'topo_b_sum_mat'):
+                    b_sum_mat = self.l3s.topo_b_sum_mat.copy()
+                else:
+                    include_bootstrap_f = False
+            if field == 'summed_wind_column_topo_bc':
+                if hasattr(self.l3s,'bc_b_sum_mat'):
+                    b_sum_mat = self.l3s.bc_b_sum_mat.copy()
+                else:
+                    include_bootstrap_f = False
+            ibfs.append(include_bootstrap_f)
+            if include_xyrs_f:
+                df[field+'_upper'] = df[[field+'_xy',field+'_rs']].max(axis=1)
+                df[field+'_lower'] = df[[field+'_xy',field+'_rs']].min(axis=1)
+                df[field+'_ul'] = df[field+'_upper']-df[field+'_lower']
+            if include_bootstrap_f:
+                if include_xyrs_f:
+                    for icol in range(b_sum_mat.shape[1]):
+                        b_sum_mat[:,icol] = b_sum_mat[:,icol]+np.random.normal(scale=df[field+'_ul']/2)
+                df = pd.concat([df,
+                                pd.DataFrame(b_sum_mat,index=df.index,
+                                             columns=['b_{}_{}'.format(field,i) \
+                                                      for i in range(b_sum_mat.shape[1])])
+                               ],axis=1)
+        # mol/s to mol for each month
+        df = df.multiply((df.index.end_time-df.index.start_time).total_seconds(),axis=0)
+        # mol to tg for each month
+        df = df*16*1e-12
+        # s for each month
+        df['tsec'] = (df.index.end_time-df.index.start_time).total_seconds()
+        df['layers'] = layers
+        drop_idx = df[df['layers'] < min_D].index
+        df.drop(drop_idx,inplace=True)
+        df = df.resample(resample_rule).sum().dropna()
+        # mol to mol/normalize_sec (usually a year)
+        if normalize_sec is not None:
+            df = df.divide(df['tsec'],axis=0)*normalize_sec
+        # calculate percentiles and std if bootstrap
+        for field,include_bootstrap_f in zip(['summed_wind_column_topo','summed_wind_column_topo_bc'],
+                                             ibfs):
+            if field not in df.keys() or not include_bootstrap_f:
+                continue
+            bs = df.filter(items=['b_{}_{}'.format(field,i) for i in range(b_sum_mat.shape[1])])
+            if not keep_bt_realizations:
+                df.drop(['b_{}_{}'.format(field,i) for i in range(b_sum_mat.shape[1])],inplace=True,axis=1)
+            df['{}_std'.format(field)] = np.nanstd(bs,axis=1)
+            for p in [2.5,25,75,97.5]:
+                df['{}_{}'.format(field,p)] = np.percentile(bs,q=p,axis=1)
+        return df
         
     def plot_emission_ts(self,ax=None,resample_rule=None,field=None,normalize_sec=None,
                          plot_xyrs=True,plot_bootstrap=True,if_plot=True,min_D=1,
