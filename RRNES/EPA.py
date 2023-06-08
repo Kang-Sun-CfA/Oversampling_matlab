@@ -9,24 +9,41 @@ import logging
 import matplotlib.pyplot as plt
 
 class CEMS():
+    '''this class builts upon EPA's clean air markets program data portal: https://campd.epa.gov/
+    the downloading part was inspired by its GitHup repository: https://github.com/USEPA/cam-api-examples
+    it focuses on NOx emissions from energy generating units/facilities'''
     def __init__(self,API_key=None,start_dt=None,end_dt=None,
                  attributes_path_pattern=None,
                  emissions_path_pattern=None,
                  west=None,east=None,south=None,north=None):
+        '''
+        API_key:
+            need one from https://www.epa.gov/airmarkets/cam-api-portal#/api-key-signup to download data
+        start/end_dt:
+            datetime objects accurate to the day
+        attributes/emissions_path_pattern:
+            path patterns for annual attributes and daily emission files. provided as default here. 
+            can be updated later during data saving/loading
+        west/east/south/north:
+            lon/lat boundary. default to the CONUS
+        '''
         self.logger = logging.getLogger(__name__)
         self.start_dt = start_dt or dt.datetime(2018,5,1)
         self.end_dt = end_dt or dt.datetime.now()
         self.west = west or -130.
         self.east = east or -63.
         self.south = south or 23.
-        self.north = north or -130.
+        self.north = north or 51
         self.API_key = API_key
         self.attributes_path_pattern = attributes_path_pattern or \
         '/projects/academic/kangsun/data/CEMS/attributes/%Y.csv'
         self.emissions_path_pattern = emissions_path_pattern or \
         '/projects/academic/kangsun/data/CEMS/emissions/%Y/%m/%d/%Y%m%d.csv'
     
-    def plot_facility_map(self,max_nfacility=10,ax=None,reset_extent=False,add_text=False,**kwargs):
+    def plot_facility_map(self,max_nfacility=None,ax=None,reset_extent=False,add_text=False,**kwargs):
+        '''plot facilities as dots on a map. dot size corresponds to self.fadf[sdata_column], 
+        where sdata_column defaults to 'noxMassLbs'
+        '''
         import cartopy.crs as ccrs
         import cartopy.feature as cfeature
         # workaround for cartopy 0.16
@@ -38,7 +55,7 @@ class CEMS():
         else:
             fig = None
         sc_leg_loc = kwargs.pop('sc_leg_loc','lower right')
-        sc_leg_fmt = kwargs.pop('sc_leg_fmt','{:.2e}')
+        sc_leg_fmt = kwargs.pop('sc_leg_fmt','{x:.2f}')
         sc_leg_title = kwargs.pop('sc_leg_title',"Emitted NOx [lbs]")
         # assume fadf is sorted by noxMassLbs
         df = self.fadf.iloc[0:max_nfacility]
@@ -77,16 +94,71 @@ class CEMS():
                         expand_text=(1.1, 1.2))
         return dict(fig=fig,ax=ax,sc=sc,leg_sc=leg_sc)
     
-    def load_emissions(self,attributes_path_pattern=None,emissions_path_pattern=None,states=None,
-                      local_hours=None):
+    def trim_unit_attributes(self,new_attributes_pattern,load_emissions_kw=None):
+        '''load_emissions becomes too slow with large spatiotemporal windows
+        run this once to get annual NOx for unit/facility to easily remove small ones.
+        see ub ccr:/projects/academic/kangsun/data/CEMS/trim_attributes.py for example
+        new_attributes_pattern:
+            path pattern to save the trimmed/noxMass-added attributes table
+        load_emissions_kw:
+            keyword arguments to self.load_emissions
         '''
-        uadf = unit attributes data frame; fadf = facility attributes data frame
-        uedf = unit emissions data frame; fadf = facility emissions data frame
+        load_emissions_kw = load_emissions_kw or {}
+        load_emissions_kw['if_unit_emissions'] = True
+        self.load_emissions(**load_emissions_kw)
+        tuadf = []
+        for year in pd.period_range(self.start_dt,self.end_dt,freq='1Y'):
+            left_df = self.uadf[['noxMassLbs', 'index', 'stateCode', 'facilityName', 'facilityId',
+       'unitId', 'latitude', 'longitude', 'year','primaryFuelInfo',
+       'secondaryFuelInfo','maxHourlyHIRate']]
+            left_df = left_df.loc[left_df['year']==year.year]
+            right_df = self.fadf[['noxMassLbs','year']]
+            right_df = right_df.loc[right_df['year']==year.year][['noxMassLbs']]
+            df = pd.merge(left_df,right_df,left_on='facilityId',
+                          right_index=True,suffixes=('','Facility'),
+                          sort=False)#.sort_index()
+            cols = list(df)
+            cols.insert(0, cols.pop(cols.index('noxMassLbsFacility')))
+            cols.insert(0, cols.pop(cols.index('index')))
+            df = df.loc[:, cols]
+            df.to_csv(year.strftime(new_attributes_pattern),
+                      index=False,index_label='index')
+            tuadf.append(df)
+        return pd.concat(tuadf)
+    
+    def load_emissions(self,attributes_path_pattern=None,emissions_path_pattern=None,states=None,
+                      local_hours=None,if_unit_emissions=True,if_facility_emissions=False,
+                      n_facility_with_most_NOx=None):
+        '''
+        attributes/emissions_path_pattern:
+            path patterns for annual attributes and daily emission files. 
+            good practice is to save trimmed attributes using self.trim_unit_attributes (takes hours), 
+            then only load a small number of largest facilities, where one can turn off emissions file loading
+        states:
+            if provided, should be a list of state codes, e.g., ['TX']
+        local_hours:
+            if_provided, should be a list of int hours, e.g., [13]
+        if_unit_emissions:
+            if load emissions files. slow if space*time*number of units is large. can be off if only looking at unit/facility
+            attributes when trimmed files are already saved
+        if_facility_emissions:
+            if groupby facility and calculate facility level emissions. may need a separate function
+        n_facility_with_most_NOx:
+            number of largest facilites (not units) to include
+        if emissions are all on, adds the following to the object:
+            uadf = unit attributes data frame; fadf = facility attributes data frame
+            uedf = unit emissions data frame; fadf = facility emissions data frame
         '''
         attributes_path_pattern = attributes_path_pattern or self.attributes_path_pattern
         emissions_path_pattern = emissions_path_pattern or self.emissions_path_pattern
+        func_1st = lambda x:x.iloc[0]
+        
         uadf = []
-        uedf = []
+        if if_unit_emissions:
+            uedf = []
+        else:
+            if_facility_emissions=False# facility level emissions impossible without unit level emissions
+        
         for year in pd.period_range(self.start_dt,self.end_dt,freq='1Y'):
             csv_name = year.strftime(attributes_path_pattern)
             self.logger.info('loading attribute file {}'.format(csv_name))
@@ -96,7 +168,20 @@ class CEMS():
             if states is not None:
                 mask = mask & (adf['stateCode'].isin(states))
             adf = adf.loc[mask]
+            # keep only units in the n_facility_with_most_NOx largest facilities
+            if 'noxMassLbsFacility' in adf.keys():
+                nfac = n_facility_with_most_NOx
+            else:
+                nfac = None
+            if nfac is not None:
+                gadf = adf.groupby('facilityId'
+                                  ).aggregate({'noxMassLbsFacility':func_1st}
+                                             ).sort_values('noxMassLbsFacility',ascending=False
+                                                          ).iloc[0:nfac,:]
+                adf = adf.loc[adf['facilityId'].isin(gadf.index)]
             uadf.append(adf)
+            if not if_unit_emissions:
+                continue# load emission files otherwise
             for date in pd.period_range(np.max([self.start_dt,year.start_time]),
                                        np.min([self.end_dt,year.end_time]),freq='1D'):
                 filename = date.strftime(emissions_path_pattern)
@@ -110,17 +195,22 @@ class CEMS():
                 if local_hours is not None:
                     edf = edf.loc[pd.to_datetime(edf['local_dt']).dt.hour.isin(local_hours)]
                 uedf.append(edf)
-        self.uadf = pd.concat(uadf).reset_index()
-        self.uedf = pd.concat(uedf).reset_index()
-        # add column for nox emission in attribute df
-        noxMassLbs = np.zeros(self.uadf.shape[0])
-        for i,(irow,row) in enumerate(self.uadf.iterrows()):
-            noxMassLbs[i] = self.uedf.loc[(self.uedf['Facility ID']==row.facilityId)&\
-                                 (self.uedf['Unit ID']==row.unitId)]['NOx Mass (lbs)'].sum()
-        self.uadf.insert(loc=0,column='noxMassLbs',value=noxMassLbs)
-        self.uadf = self.uadf.sort_values('noxMassLbs',ascending=False).reset_index(drop=True)
         
-        func_1st = lambda x:x.iloc[0]
+        self.uadf = pd.concat(uadf).reset_index()
+        if if_unit_emissions:
+            self.uedf = pd.concat(uedf).reset_index()
+        if 'noxMassLbs' not in self.uadf.keys():
+            if not if_unit_emissions:
+                self.logging.warning('Please turn on if_unit_emissions')
+                return
+            # add column for nox emission in attribute df
+            noxMassLbs = np.zeros(self.uadf.shape[0])
+            for i,(irow,row) in enumerate(self.uadf.iterrows()):
+                noxMassLbs[i] = self.uedf.loc[(self.uedf['Facility ID']==row.facilityId)&\
+                                     (self.uedf['Unit ID']==row.unitId)]['NOx Mass (lbs)'].sum()
+            self.uadf.insert(loc=0,column='noxMassLbs',value=noxMassLbs)
+            self.uadf = self.uadf.sort_values('noxMassLbs',ascending=False).reset_index(drop=True)
+        
         self.fadf = self.uadf.groupby('facilityId').aggregate({
             'noxMassLbs':'sum',
             'year':'mean',
@@ -128,15 +218,16 @@ class CEMS():
             'stateCode':func_1st,
             'latitude':'mean',
             'longitude':'mean'}).sort_values('noxMassLbs',ascending=False)
-        self.fedf = self.uedf.groupby(['Facility ID','local_dt']).aggregate({
-            'NOx Mass (lbs)':'sum',
-            'SO2 Mass (lbs)':'sum',
-            'CO2 Mass (short tons)':'sum',
-            'Facility Name':func_1st,
-            'State':func_1st,
-            'Operating Time':'sum',
-            'Gross Load (MW)':'sum',
-            'Heat Input (mmBtu)':'sum'})
+        if if_facility_emissions:
+            self.fedf = self.uedf.groupby(['Facility ID','local_dt']).aggregate({
+                'NOx Mass (lbs)':'sum',
+                'SO2 Mass (lbs)':'sum',
+                'CO2 Mass (short tons)':'sum',
+                'Facility Name':func_1st,
+                'State':func_1st,
+                'Operating Time':'sum',
+                'Gross Load (MW)':'sum',
+                'Heat Input (mmBtu)':'sum'})
     
     def download_attributes(self,attributes_path_pattern=None,API_key=None):
         self.attributes_path_pattern = attributes_path_pattern

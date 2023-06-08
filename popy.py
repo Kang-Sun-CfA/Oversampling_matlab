@@ -3747,7 +3747,7 @@ class Level3_List(list):
         else:
             mask_name = 'unknown_mask'
         if fields_to_average is None:
-            fields_to_average = ['wind_column','wind_column_topo','wind_column_topo_chem','column_amount','num_samples']
+            fields_to_average = ['wind_column','wind_column_topo','wind_column_topo_chem','column_amount','num_samples','wind_topo']
         if 'num_samples' in fields_to_average and 'sum_num_samples' not in fields_to_average:
             fields_to_average.append('sum_num_samples')
         averaged = []
