@@ -36,11 +36,11 @@ class CEMS():
         self.north = north or 51
         self.API_key = API_key
         self.attributes_path_pattern = attributes_path_pattern or \
-        '/projects/academic/kangsun/data/CEMS/attributes/%Y.csv'
+        '/projects/academic/kangsun/data/CEMS/attributes/trimmed_%Y.csv'
         self.emissions_path_pattern = emissions_path_pattern or \
         '/projects/academic/kangsun/data/CEMS/emissions/%Y/%m/%d/%Y%m%d.csv'
     
-    def plot_facility_map(self,max_nfacility=None,ax=None,reset_extent=False,add_text=False,**kwargs):
+    def plot_facility_map(self,fadf=None,max_nfacility=None,ax=None,reset_extent=False,add_text=False,**kwargs):
         '''plot facilities as dots on a map. dot size corresponds to self.fadf[sdata_column], 
         where sdata_column defaults to 'noxMassLbs'
         '''
@@ -54,11 +54,14 @@ class CEMS():
             fig,ax = plt.subplots(1,1,figsize=(10,5),subplot_kw={"projection": ccrs.PlateCarree()})
         else:
             fig = None
+        cartopy_scale = kwargs.pop('cartopy_scale','110m')
         sc_leg_loc = kwargs.pop('sc_leg_loc','lower right')
         sc_leg_fmt = kwargs.pop('sc_leg_fmt','{x:.2f}')
         sc_leg_title = kwargs.pop('sc_leg_title',"Emitted NOx [lbs]")
+        if fadf is None:
+            fadf = self.fadf
         # assume fadf is sorted by noxMassLbs
-        df = self.fadf.iloc[0:max_nfacility]
+        df = fadf.iloc[0:max_nfacility]
         sdata_column = kwargs.pop('sdata_column','noxMassLbs')
         sdata = df[sdata_column]
         sdata_func = kwargs.pop('sdata_func',None)
@@ -73,17 +76,21 @@ class CEMS():
         # normalize to sdata_min_size-sdata_max_size
         sdata = sdata*(sdata_max_size-sdata_min_size)+sdata_min_size
         sc = ax.scatter(df['longitude'],df['latitude'],s=sdata,**kwargs)
-        handles, labels = sc.legend_elements(prop="sizes", alpha=0.6, num=7,fmt=sc_leg_fmt,
-                                             func=lambda x:(x-sdata_min_size)\
-                                             /(sdata_max_size-sdata_min_size)\
-                                            *(sdata_max-sdata_min)+sdata_min)
-        leg_sc = ax.legend(handles, labels, title=sc_leg_title,ncol=3,loc=sc_leg_loc)
-        ax.add_artist(leg_sc)
+        if sc_leg_loc is None:
+            leg_sc = None
+        else:
+            handles, labels = sc.legend_elements(prop="sizes", alpha=0.6, num=7,fmt=sc_leg_fmt,
+                                                 func=lambda x:(x-sdata_min_size)\
+                                                 /(sdata_max_size-sdata_min_size)\
+                                                *(sdata_max-sdata_min)+sdata_min)
+            leg_sc = ax.legend(handles, labels, title=sc_leg_title,ncol=3,loc=sc_leg_loc)
+            ax.add_artist(leg_sc)
         if reset_extent:
             ax.set_extent([self.west,self.east,self.south,self.north])
-        ax.coastlines(resolution='50m', color='black', linewidth=1)
-        ax.add_feature(cfeature.STATES.with_scale('50m'), facecolor='None', edgecolor='k', 
-                       linestyle='-',zorder=0,lw=0.5)
+        if cartopy_scale is not None:
+            ax.coastlines(resolution=cartopy_scale, color='black', linewidth=1)
+            ax.add_feature(cfeature.STATES.with_scale(cartopy_scale), facecolor='None', edgecolor='k', 
+                           linestyle='-',zorder=0,lw=0.5)
         if add_text:
             from adjustText import adjust_text
             texts = [ax.text(row.longitude,row.latitude,row.facilityName,fontsize=10)\
@@ -125,6 +132,62 @@ class CEMS():
                       index=False,index_label='index')
             tuadf.append(df)
         return pd.concat(tuadf)
+    
+    def get_facilities_emission_rate(self,fadf=None,emissions_path_pattern=None,states=None,
+                                     local_hours=None):
+        emissions_path_pattern = emissions_path_pattern or self.emissions_path_pattern
+        if fadf is None:
+            fadf = self.fadf
+        uedf = []
+        for date in pd.period_range(self.start_dt,self.end_dt,freq='1D'):
+            filename = date.strftime(emissions_path_pattern)
+            if not os.path.exists(filename):
+                self.logger.warning('{} does not exist!'.format(filename))
+                continue
+            if date.day == 1:
+                logging.info('loading emission file {}'.format(filename))
+            edf = pd.read_csv(filename)
+            edf = edf.loc[edf['Facility ID'].isin(fadf.index)]
+            if local_hours is not None:
+                edf = edf.loc[pd.to_datetime(edf['local_dt']).dt.hour.isin(local_hours)]
+            edf['local_dt'] = pd.to_datetime(edf['local_dt'])
+            uedf.append(edf)
+        uedf = pd.concat(uedf).reset_index()
+        fedf = uedf.groupby(['Facility ID','local_dt']
+                           ).aggregate({'NOx Mass (lbs)':lambda x:np.sum(x)*0.453592/0.046/3600,#lbs to mol/s
+                                        'SO2 Mass (lbs)':lambda x:np.sum(x)*0.453592/0.064/3600,#lbs to mol/s
+                                        'CO2 Mass (short tons)':lambda x:np.sum(x)*907.185/0.044/3600,#short tons to mol/s
+                                        'Facility Name':lambda x:x.iloc[0],
+                                        'State':lambda x:x.iloc[0],
+                                        'Gross Load (MW)':'sum',
+                                        'Heat Input (mmBtu)':'sum'}
+                                      ).rename(columns={'NOx Mass (lbs)':'NOx (mol/s)',
+                                                       'SO2 Mass (lbs)':'SO2 (mol/s)',
+                                                       'CO2 Mass (short tons)':'CO2 (mol/s)'})
+        self.uedf = uedf
+        self.fedf = fedf
+        
+    def subset_facilities(self,n_facility_with_most_NOx=10,enforce_presence_all_years=True):
+        if not hasattr(self,'uadf'):
+            self.logger.info('run load_emissions to get uadf first')
+            self.load_emissions(if_unit_emissions=False,n_facility_with_most_NOx=None)
+        fadf = self.uadf.groupby('facilityId'
+                                ).aggregate({'noxMassLbs':'sum',
+                                            'year':lambda x:len(x.unique()),
+                                            'primaryFuelInfo':lambda x:'/'.join(x.dropna().unique()),
+                                            'facilityName':lambda x:x.iloc[0],
+                                            'stateCode':lambda x:x.iloc[0],
+                                            'latitude':'mean',
+                                            'longitude':'mean'}
+                                           ).sort_values('noxMassLbs',ascending=False)
+        if enforce_presence_all_years:
+            mask = fadf['year']==len(pd.period_range(self.start_dt,self.end_dt,freq='1Y'))
+            if np.sum(mask) != fadf.shape[0]:
+                self.logger.warning('only {} facilities have attributes in all years out of {}'.format(
+                    np.sum(mask),fadf.shape[0]))
+            fadf = fadf.loc[mask]
+        fadf['rank'] = np.arange(fadf.shape[0],dtype=int)+1
+        self.fadf = fadf.iloc[0:n_facility_with_most_NOx]
     
     def load_emissions(self,attributes_path_pattern=None,emissions_path_pattern=None,states=None,
                       local_hours=None,if_unit_emissions=True,if_facility_emissions=False,
