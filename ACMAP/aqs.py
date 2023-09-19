@@ -161,10 +161,158 @@ class AQS():
             self.north = north
             self.xys = [([west,west,east,east],[south,north,north,south])]
     
-    def correlate_all(self,min_pblh=200,l3_flds=None,local_hours=None,unit_freq=None,corr_freq='1M'):
+    def scatter_mdf(self,x,y,ax=None,c=None,s=None,draw_colorbar=True,**kwargs):
+        '''rewrite plot_mdf for non-map scatters'''
+        if ax is None:
+            fig,ax = plt.subplots(1,1,figsize=(10,5),subplot_kw={"projection": ccrs.PlateCarree()})
+        else:
+            fig = None
+        sc_leg_loc = kwargs.pop('sc_leg_loc','lower right')
+        sc_leg_num = kwargs.pop('sc_leg_num',5)
+        sc_leg_fmt = kwargs.pop('sc_leg_fmt','{x:.2f}')
+        sc_leg_title = kwargs.pop('sc_leg_title',"")
+        
+        cb_position = kwargs.pop('cb_position',[0.75,0.3,0.2,0.02])
+        cb_orientation = kwargs.pop('cb_orientation','horizontal')
+        cb_label = kwargs.pop('cb_label',c)
+        
+        if isinstance(x,str):
+            x = self.mdf[x]
+        if isinstance(y,str):
+            y = self.mdf[y]
+        if isinstance(c,str):
+            c = self.mdf[c]
+        if isinstance(s,str):
+            s = self.mdf[s]
+        
+        if s is not None:
+            sdata_func = kwargs.pop('sdata_func',None)
+            if sdata_func is not None:
+                s = sdata_func(s)
+            sdata_min = kwargs.pop('sdata_min',np.nanmin(s))
+            sdata_max = kwargs.pop('sdata_max',np.nanmax(s))
+            sdata_min_size = kwargs.pop('sdata_min_size',25)
+            sdata_max_size = kwargs.pop('sdata_max_size',100)
+            # normalize to 0-1
+            s = (s-sdata_min)/(sdata_max-sdata_min)
+            # normalize to sdata_min_size-sdata_max_size
+            s = s*(sdata_max_size-sdata_min_size)+sdata_min_size
+            
+        sc = ax.scatter(x,y,c=c,s=s,**kwargs)
+        leg_sc = None
+        if sc_leg_loc is not None:
+            handles, labels = sc.legend_elements(prop="sizes", alpha=0.6, num=sc_leg_num,fmt=sc_leg_fmt,
+                                                     func=lambda x:(x-sdata_min_size)\
+                                                     /(sdata_max_size-sdata_min_size)\
+                                                    *(sdata_max-sdata_min)+sdata_min)
+            leg_sc = ax.legend(handles, labels, title=sc_leg_title,ncol=3,loc=sc_leg_loc)
+            ax.add_artist(leg_sc)
+        if draw_colorbar:
+            cax = ax.inset_axes(cb_position)
+            cb = plt.colorbar(sc,ax=ax,cax=cax,orientation=cb_orientation)
+            cb.set_label(label=cb_label,size=10,color='k')
+        else:
+            cb = None
+        return dict(fig=fig,ax=ax,sc=sc,leg_sc=leg_sc,cb=cb)
+    
+    def plot_mdf(self,ax=None,reset_extent=False,sdata_column=None,cdata_column='Sample Measurement',
+                 draw_colorbar=True,name_region=None,**kwargs):
+        '''plot monitors in self.mdf as dots on a map. dot size corresponds to self.mdf[sdata_column], 
+        no size if sdata_column is not provided; dot color corresponds to self.mdf[cdata_column], 
+        where cdata_column defaults to 'Sample Measurements'
+        '''
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+        # workaround for cartopy 0.16
+        from matplotlib.axes import Axes
+        from cartopy.mpl.geoaxes import GeoAxes
+        GeoAxes._pcolormesh_patched = Axes.pcolormesh
+        if ax is None:
+            fig,ax = plt.subplots(1,1,figsize=(10,5),subplot_kw={"projection": ccrs.PlateCarree()})
+        else:
+            fig = None
+        cartopy_scale = kwargs.pop('cartopy_scale','110m')
+        sc_leg_loc = kwargs.pop('sc_leg_loc','lower right')
+        sc_leg_fmt = kwargs.pop('sc_leg_fmt','{x:.2f}')
+        sc_leg_title = kwargs.pop('sc_leg_title',"")
+        
+        cb_position = kwargs.pop('cb_position',[0.75,0.3,0.2,0.02])
+        cb_orientation = kwargs.pop('cb_orientation','horizontal')
+        cb_label = kwargs.pop('cb_label',cdata_column)
+        
+        name_xy = kwargs.pop('name_xy',None)
+        plot_xys = kwargs.pop('plot_xys',True)
+        
+        cdata = self.mdf[cdata_column]
+        
+        if sdata_column is None:
+            sc = ax.scatter(self.mdf['Longitude'],self.mdf['Latitude'],
+                            c=cdata,**kwargs)
+            leg_sc = None
+        else:
+            sdata = self.mdf[sdata_column]
+            sdata_func = kwargs.pop('sdata_func',None)
+            if sdata_func is not None:
+                sdata = sdata_func(sdata)
+            sdata_min = kwargs.pop('sdata_min',np.nanmin(sdata))
+            sdata_max = kwargs.pop('sdata_max',np.nanmax(sdata))
+            sdata_min_size = kwargs.pop('sdata_min_size',25)
+            sdata_max_size = kwargs.pop('sdata_max_size',100)
+            # normalize to 0-1
+            sdata = (sdata-sdata_min)/(sdata_max-sdata_min)
+            # normalize to sdata_min_size-sdata_max_size
+            sdata = sdata*(sdata_max_size-sdata_min_size)+sdata_min_size
+            sc = ax.scatter(self.mdf['Longitude'],self.mdf['Latitude'],s=sdata,
+                            c=cdata,**kwargs)
+            if sc_leg_loc is None:
+                leg_sc = None
+            else:
+                handles, labels = sc.legend_elements(prop="sizes", alpha=0.6, num=7,fmt=sc_leg_fmt,
+                                                     func=lambda x:(x-sdata_min_size)\
+                                                     /(sdata_max_size-sdata_min_size)\
+                                                    *(sdata_max-sdata_min)+sdata_min)
+                leg_sc = ax.legend(handles, labels, title=sc_leg_title,ncol=3,loc=sc_leg_loc)
+                ax.add_artist(leg_sc)
+        if reset_extent:
+            ax.set_extent([self.west,self.east,self.south,self.north])
+        if cartopy_scale is not None:
+            ax.coastlines(resolution=cartopy_scale, color='grey', linewidth=0.25)
+            ax.add_feature(cfeature.STATES.with_scale(cartopy_scale), facecolor='None', edgecolor='grey', 
+                           zorder=0,lw=0.25)
+        if plot_xys:
+            for xy in self.xys:
+                ax.plot(*xy,color='k',zorder=0)
+        if name_region is not None:
+            if name_region == 'Central':
+                gxy = (-87.10812672236439, 38.766609699256335)
+            if name_region == 'East North Central':
+                gxy = (-90.43415170737065, 45.76247395235188)
+            if name_region == 'Northeast':
+                gxy = (-75.25482126652217, 42.50105027796941)
+            if name_region == 'Northwest':
+                gxy = (-118.66368244521263, 45.104907416404906)
+            if name_region == 'South':
+                gxy = (-96.83087684656562, 34.416641026351996)
+            if name_region == 'Southeast':
+                gxy = (-84.0674647875265, 32.17560764988584)
+            if name_region == 'Southwest':
+                gxy = (-108.57098320279188, 37.86224553145235)
+            if name_region == 'West':
+                gxy = (-118.43031576775631, 38.093095290331824)
+            if name_region == 'West North Central':
+                gxy = (-104.72656918158656, 46.00966756024588)
+        if draw_colorbar:
+            cax = ax.inset_axes(cb_position)
+            cb = plt.colorbar(sc,ax=ax,cax=cax,orientation=cb_orientation)
+            cb.set_label(label=cb_label,size=10,color='k')
+        else:
+            cb = None
+        return dict(fig=fig,ax=ax,sc=sc,leg_sc=leg_sc,cb=cb)
+    
+    def correlate_all(self,min_pblh=200,max_pblh=np.inf,l3_flds=None,local_hours=None,unit_freq=None,corr_freq='1M'):
         '''compute and plot correlations/slopes between monitor data and l3 data
-        min_pblh:
-            monitor data with era5_blh lower than this value will be excluded
+        min/max_pblh:
+            monitor data with era5_blh lower/higher than this value will be excluded
         l3_flds:
             list of keys of l3ds to sample in Monitor.df and correlate/regress with monitor data
         local_hours:
@@ -174,25 +322,50 @@ class AQS():
         corr_freq:
             time interval at which correlation/regression are done
         '''
-        l3_flds = l3_flds or ['column_amount','S_vcd','S','S_p','S_x','era5_blh']
+        l3_flds = l3_flds or ['column_amount','S']
         dfs = []
-        for monitor in self.monitors:
+        mdf_flds = ['valid_fraction','valid_n','aqs_no2']+l3_flds\
+        +[f+'_r' for f in l3_flds]+[f+'_t' for f in l3_flds]+[f+'_slope' for f in l3_flds]
+        for mdf_fld in mdf_flds:
+            self.mdf[mdf_fld] = np.nan
+        for im,monitor in enumerate(self.monitors):
             df = monitor.df
             if local_hours is not None:
                 df = df.loc[pd.to_datetime(df.datetime_local).dt.hour.isin(local_hours)]
+            self.mdf.loc[im,'valid_fraction'] = np.sum(~np.isnan(df['column_amount']))/np.sum(~np.isnan(df['Sample Measurement']))
             df = df.dropna(subset=l3_flds)
+            if df.shape[0] == 0:
+                self.logger.warning('empty monitor {}'.format(im))
+                continue
             if unit_freq is not None:
                 df = df.resample(unit_freq).mean()
+            # add statistics to mdf
+            self.mdf.loc[im,'aqs_no2'] = np.nanmean(df['Sample Measurement'])
+            self.mdf.loc[im,'valid_n'] = df.shape[0]
+            df['x'] = df['Sample Measurement'].values
+            for f in l3_flds:
+                self.mdf.loc[im,f] = np.nanmean(df[f])
+                self.mdf.loc[im,f+'_r'] = df['Sample Measurement'].corr(df[f])
+                self.mdf.loc[im,f+'_t'] = kendalltau(df['Sample Measurement'],df[f]).correlation
+                fit = smf.ols(f+' ~ x', data=df).fit()
+                self.mdf.loc[im,f+'_slope'] = fit.params['x']
             dfs.append(df)
         dfs = pd.concat(dfs)
-        mask = dfs['era5_blh']>=min_pblh
-        mask_ = dfs['era5_blh']<min_pblh
-        if np.sum(mask) < len(mask):
-            self.logger.warning('{} data points has blh<{}'.format(np.sum(mask_),min_pblh))
-            
+        mask = (dfs['era5_blh']>=min_pblh) & (dfs['era5_blh']<=max_pblh)
+        mask_ = (dfs['era5_blh']<min_pblh) | (dfs['era5_blh']>max_pblh)
+        if np.sum(mask_) > 0:
+            self.logger.warning('{}/{} data points in/out of pblh range'.format(np.sum(mask),np.sum(mask_)))
+        dfs_out = dfs.loc[mask_]
         dfs = dfs.loc[mask]
+        metric_dict = {}
         keys = []
+        dfs['x'] = dfs['Sample Measurement'].values
         for fld in l3_flds:
+            metric_dict[fld+'_r'] = dfs['Sample Measurement'].corr(dfs[fld])
+            metric_dict[fld+'_t'] = kendalltau(dfs['Sample Measurement'],dfs[fld]).correlation
+            
+            fit = smf.ols(fld+' ~ x', data=dfs).fit()
+            metric_dict[fld+'_slope'] = fit.params['x']
             for v in ['r','t','slope','slope_e']:
                 keys.append(fld+'_'+v)
         resampler = dfs.resample(corr_freq)
@@ -208,28 +381,33 @@ class AQS():
                 fit = smf.ols(fld+' ~ x', data=tmpdf).fit()
                 vdf.loc[ind,fld+'_slope'] = fit.params['x']
                 vdf.loc[ind,fld+'_slope_e'] = fit.bse['x']
-        return dfs, vdf
+        return dict(dfs=dfs, vdf=vdf, dfs_out=dfs_out,metric_dict=metric_dict)
     
     def load_pkl(self,filename):
         with open(filename, 'rb') as inp:
             d = pickle.load(inp)
-        for fld in ['start_dt','end_dt','xys','mdf']:
-            if hasattr(self,fld):
-                setattr(self,fld,getattr(self,fld) or d[fld])
-            else:
-                setattr(self,fld,d[fld])
+        for fld in ['start_dt','end_dt','xys','mdf','region_mask','topo_mask']:
+            if fld not in d.keys():
+                self.logger.warning(f'{fld} does not exist in pkl file!')
+                continue
+            setattr(self,fld,d[fld])
         self.monitors = np.array([Monitor(lon=row.Longitude,lat=row.Latitude,
                                           start_dt=self.start_dt,end_dt=self.end_dt,
                                           df=d['dfs'][i].loc[(d['dfs'][i].index>=self.start_dt)&\
                                                             (d['dfs'][i].index<=self.end_dt)]
                                          ) for i,(irow,row) in enumerate(self.mdf.iterrows())])
+        self.west = np.min([np.min(xy[0]) for xy in self.xys])
+        self.east = np.max([np.max(xy[0]) for xy in self.xys])
+        self.south = np.min([np.min(xy[1]) for xy in self.xys])
+        self.north = np.max([np.max(xy[1]) for xy in self.xys])
         return self
     
     def save_pkl(self,filename):
         with open(filename, 'wb') as outp:
             pickle.dump({'dfs':[m.df for m in self.monitors],
                          'mdf':self.mdf,'xys':self.xys,
-                         'start_dt':self.start_dt,'end_dt':self.end_dt}, outp, pickle.HIGHEST_PROTOCOL)
+                         'start_dt':self.start_dt,'end_dt':self.end_dt,
+                         'region_mask':self.region_mask,'topo_mask':self.topo_mask}, outp, pickle.HIGHEST_PROTOCOL)
     
     def match_monitor_l3(self,l3_flds=None,local_hours=None):
         '''match l3 with all monitors
@@ -241,11 +419,104 @@ class AQS():
         if not hasattr(self,'l3ds'):
             self.logger.error('run get_l3 first')
             return
-        l3_flds = l3_flds or ['column_amount','surface_pressure','S','S_vcd','S_x','S_xgb','xgb_pblh','era5_blh','era5_t2m']
+        l3_flds = l3_flds or ['column_amount','surface_pressure','S','S_vcd','S_x','S_xgb','S_vcd_xgb',
+                              'xgb_pblh','era5_blh','era5_t2m']
         for monitor in self.monitors:
             monitor.sample_l3(self.l3ds,l3_flds)
             if local_hours is not None:
                 monitor.df = monitor.df.loc[pd.to_datetime(monitor.df.datetime_local).dt.hour.isin(local_hours)]
+    
+    def save_l3(self,l3_path_pattern,file_freq='1M',fields_name=None,min_pblh=None):
+        '''save l3 objects attached to AQS
+        l3_path_pattern:
+            time pattern of level3 files
+        file_freq:
+            frequency code by which l3 files are saved
+        fields_name:
+            fields in l3 objects to save
+        min_pblh:
+            no averaging data with era5_blh < this value
+        '''
+        fields_name = fields_name or ['S','S_xgb','S_p','S_p_xgb','column_amount','column_amount_p',\
+                                      'wind_column','wind_topo','surface_altitude','era5_blh']
+        l3s = self.l3ds
+        if min_pblh is not None:
+            for l3 in l3s:
+                l3['total_sample_weight'][l3['era5_blh']<min_pblh] = 0
+                l3['num_samples'][l3['era5_blh']<min_pblh] = 0
+        l3s,_ = l3s.resample(rule=file_freq)
+        for l3 in l3s:
+            fn = l3.start_python_datetime.strftime(l3_path_pattern)
+            l3.save_nc(fn,fields_name=fields_name)
+    
+    def interpolate_l3(self,l3_path_pattern,file_freq='1M',fields_name=None,
+                       lonlat_margin=10,attach_l3=True,topo_kw=None,chem_kw=None):
+        '''lighter version of get_l3, mainly for sampling fields from popy l3 data'''
+        # load level 3 files
+        ewsn_dict = dict(west=self.west-lonlat_margin,east=self.east+lonlat_margin,
+                        south=self.south-lonlat_margin,north=self.north+lonlat_margin)
+        l3s = Level3_List(pd.period_range(self.start_dt,self.end_dt,freq=file_freq),**ewsn_dict)
+        fields_name = fields_name or ['S','S_xgb','S_p','S_p_xgb','column_amount','column_amount_p',\
+                                      'wind_column','wind_topo','surface_altitude','era5_blh']
+        l3s.read_nc_pattern(l3_path_pattern,
+                            fields_name=fields_name.copy())
+        l3 = l3s.aggregate()
+        region_mask = self.region_mask
+        
+        if topo_kw is not None:
+            if 'max_iter' not in topo_kw.keys():
+                topo_kw['max_iter'] = 1
+            
+            # create topo mask
+            min_windtopo = topo_kw.pop('min_windtopo',0.001)
+            max_windtopo = topo_kw.pop('max_windtopo',0.1)
+            min_H = topo_kw.pop('min_H',0.1)
+            max_H = topo_kw.pop('max_H',2000)
+            max_wind_column = topo_kw.pop('max_wind_column',1e-9)
+            topo_mask = region_mask &\
+            (np.abs(l3['wind_topo']/l3['column_amount'])>=min_windtopo) &\
+            (np.abs(l3['wind_topo']/l3['column_amount'])<=max_windtopo) &\
+            (l3['surface_altitude']>=min_H) &\
+            (l3['surface_altitude']<=max_H) &\
+            (l3['wind_column']<=max_wind_column)
+            if 'mask' in topo_kw.keys():
+                topo_kw['mask'] = topo_kw['mask'] & topo_mask
+            else:
+                topo_kw['mask'] = topo_mask
+
+            l3s.fit_topography(**topo_kw)
+            self.topo_mask = topo_mask
+            fields_name.append('wind_column_topo')
+            
+        if chem_kw is not None:
+            min_column_amount = chem_kw.pop('min_column_amount',)
+            max_wind_column = chem_kw.pop('max_wind_column',)
+            chem_mask = region_mask &\
+            (l3['column_amount']>=min_column_amount) &\
+            (l3['wind_column']>=max_wind_column)
+            if 'mask' in chem_kw.keys():
+                chem_kw['mask'] = chem_kw['mask'] & chem_mask
+            else:
+                chem_kw['mask'] = chem_mask
+            l3s.fit_chemistry(**chem_kw)
+            self.chem_mask = chem_mask
+            fields_name.append('wind_column_topo_chem')
+        
+        if topo_kw is not None or chem_tw is not None:
+            l3 = l3s.aggregate()
+        
+        if attach_l3:
+            self.l3 = l3
+            self.l3s = l3s
+            self.fields_name = fields_name
+        
+        for fld in fields_name:
+            func = RegularGridInterpolator((l3['ygrid'],l3['xgrid']),\
+                                        l3[fld],bounds_error=False,fill_value=np.nan)
+            self.mdf['interp_'+fld] = ''
+            for irow,row in self.mdf.iterrows():
+                self.mdf.loc[irow,'interp_'+fld] = func((row.Latitude,row.Longitude))
+        
         
     def get_l3(self,l3_path_pattern,file_freq='1D',lonlat_margin=0.5,xgb_pblh_path_pattern=None,
                topo_kw=None,if_smooth_X=True,X_smooth_kw=None,cp_kw=None):
@@ -355,6 +626,8 @@ class AQS():
                 l3d['S_xgb'] = l3d['S_p_xgb']+S_c
             # total sfc ppb simply from TVCD and pblp
             l3d['S_vcd'] = l3d['column_amount']*9.8*0.02896/(gamma*pblp)*1e9
+            # total sfc ppb simply from TVCD and pblp
+            l3d['S_vcd_xgb'] = l3d['column_amount']*9.8*0.02896/(gamma*pblp_xgb)*1e9
             # total sfc ppb from scale height
             l3d['S_x'] = l3d['column_amount']*8.314*l3d['era5_t2m']*daily_X/l3d['surface_pressure']*1e9
         # attach results to self

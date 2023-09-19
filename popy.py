@@ -23,6 +23,7 @@ Created on Sat Jan 26 15:50:30 2019
 2022/06/07: updates for MethaneAIR level3 (merging, inflation)
 2022/06/20: flux divergence 2.0
 2022/10/16: Level3_List class
+2023/09/19: fix num_samples bias for quadrilateral pixels
 """
 
 import numpy as np
@@ -1365,7 +1366,7 @@ def F_block_regrid_wrapper(args):
 def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
                        oversampling_list,pixel_shape,error_model,
                        k1,k2,k3,xmargin,ymargin,
-                       iblock=1,verbose=False,inflatex=None,inflatey=None):
+                       iblock=1,verbose=False,inflatex=None,inflatey=None,sg_scaling=1):
     '''
     a more compact version of F_regrid_ccm designed for parallel regridding
     l2g_data:
@@ -1392,6 +1393,8 @@ def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
         if print diagnostics
     inflatex/y:
         inflate pixels across (x) and along (y) track
+    sg_scaling:
+        scale SG so num_samples is not biased as layers
     created on 2020/07/19
     '''
     if len(l2g_data['latc']) == 0:
@@ -1588,7 +1591,7 @@ def F_block_regrid_ccm(l2g_data,xmesh,ymesh,
             xym2 = rotation_matrix.dot(xym1).T
             
         SG = np.exp(-(np.power( np.power(np.abs(xym2[:,0]/sg_wx[il2]),k1)           \
-                                  +np.power(np.abs(xym2[:,1]/sg_wy[il2]),k2),k3)) )
+                                  +np.power(np.abs(xym2[:,1]/sg_wy[il2]),k2),k3)) )/sg_scaling
         SG = SG.reshape(patch_xmesh.shape)
         # Update Number of samples
         num_samples[ijmsh] += SG
@@ -4018,6 +4021,14 @@ class popy(object):
         self.k1 = k1
         self.k2 = k2
         self.k3 = k3
+        if (k1,k2,k3) == (2,2,1):
+            self.sg_scaling = 1.13309
+        elif (k1,k2,k3) == (2,4,1) or (k1,k2,k3) == (4,2,1):
+            self.sg_scaling = 1.05742
+        elif (k1,k2,k3) == (4,4,1):
+            self.sg_scaling = 0.9868
+        else:
+            self.sg_scaling = 1.
         self.inflatex = inflatex
         self.inflatey = inflatey
         self.sg_kfacx = 2*(np.log(2)**(1/k1/k3))
@@ -8267,7 +8278,7 @@ class popy(object):
             l3_data = F_block_regrid_ccm(l2g_data,xmesh,ymesh,
                        oversampling_list,self.pixel_shape,self.error_model,
                        self.k1,self.k2,self.k3,xmargin,ymargin,
-                       iblock=1,inflatex=self.inflatex,inflatey=self.inflatey)
+                       iblock=1,inflatex=self.inflatex,inflatey=self.inflatey,sg_scaling=self.sg_scaling)
             l3_data['xgrid'] = self.xgrid
             l3_data['ygrid'] = self.ygrid
             l3_object = Level3_Data(grid_size=self.grid_size,
@@ -8353,7 +8364,8 @@ class popy(object):
                           block_ymesh[iblock],oversampling_list,\
                           self.pixel_shape,self.error_model, \
                           self.k1,self.k2,self.k3,
-                          xmargin,ymargin,iblock,self.verbose,self.inflatex,self.inflatey) for iblock in range(nblock) ) )
+                          xmargin,ymargin,iblock,self.verbose,
+                          self.inflatex,self.inflatey,self.sg_scaling) for iblock in range(nblock) ) )
 #        pp = multiprocessing.Pool(ncores)
 #        l3_data_list = pp.map( F_block_regrid_wrapper, \
 #                        ((block_l2g_data[iblock],block_xmesh[iblock],\
@@ -8498,7 +8510,8 @@ class popy(object):
                           block_ymesh[iblock],oversampling_list,\
                           self.pixel_shape,self.error_model, \
                           self.k1,self.k2,self.k3,
-                          xmargin,ymargin,iblock,self.verbose,self.inflatex,self.inflatey) for iblock in range(nblock) ) )
+                          xmargin,ymargin,iblock,self.verbose,
+                          self.inflatex,self.inflatey,self.sg_scaling) for iblock in range(nblock) ) )
         
         self.logger.info('Reassemble blocks back to l3 grid')
         dict_of_lists = {}
@@ -8712,7 +8725,7 @@ class popy(object):
                 xym2 = rotation_matrix.dot(xym1).T
                 
             SG = np.exp(-(np.power( np.power(np.abs(xym2[:,0]/sg_wx[il2]),self.k1)           \
-                                   +np.power(np.abs(xym2[:,1]/sg_wy[il2]),self.k2),self.k3)) )
+                                   +np.power(np.abs(xym2[:,1]/sg_wy[il2]),self.k2),self.k3)) )/self.sg_scaling
             SG = SG.reshape(patch_xmesh.shape)
             # Update Number of samples
             num_samples[ijmsh] += SG
@@ -8893,7 +8906,7 @@ class popy(object):
                 area_weight = Polygon(np.column_stack([patch_lonr[:],latr[:]])).area
                 
                 SG = self.F_2D_SG_transform(patch_xmesh,patch_ymesh,patch_lonr,latr,
-                                            patch_lonc,latc)
+                                            patch_lonc,latc)/self.sg_scaling
                 #if il2==100:self.sg = SG;return
             elif self.pixel_shape == 'elliptical':
                 latc = local_l2g_data['latc']
@@ -8932,7 +8945,7 @@ class popy(object):
                 area_weight = u*v
                 
                 SG = self.F_2D_SG_rotate(patch_xmesh,patch_ymesh,patch_lonc,latc,\
-                                         2*v,2*u,-t)
+                                         2*v,2*u,-t)/self.sg_scaling
             
             num_samples[np.ix_(lat_index,lon_index)] =\
             num_samples[np.ix_(lat_index,lon_index)]+SG
@@ -9063,7 +9076,7 @@ class popy(object):
                 area_weight = Polygon(np.column_stack([patch_lonr[:],latr[:]])).area
                 
                 SG = self.F_2D_SG_transform(patch_xmesh,patch_ymesh,patch_lonr,latr,
-                                            patch_lonc,latc)
+                                            patch_lonc,latc)/self.sg_scaling
             elif self.pixel_shape == 'elliptical':
                 latc = local_l2g_data['latc']
                 lonc = local_l2g_data['lonc']-west
@@ -9101,7 +9114,7 @@ class popy(object):
                 area_weight = u*v
                 
                 SG = self.F_2D_SG_rotate(patch_xmesh,patch_ymesh,patch_lonc,latc,\
-                                         2*v,2*u,-t)
+                                         2*v,2*u,-t)/self.sg_scaling
             if error_model == "square":
                 uncertainty_weight = local_l2g_data['column_uncertainty']**2
             elif error_model == "log":
