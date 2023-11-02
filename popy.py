@@ -24,6 +24,7 @@ Created on Sat Jan 26 15:50:30 2019
 2022/06/20: flux divergence 2.0
 2022/10/16: Level3_List class
 2023/09/19: fix num_samples bias for quadrilateral pixels
+2023/11/01: add TEMPONO2
 """
 
 import numpy as np
@@ -31,6 +32,7 @@ np.seterr(divide='ignore', invalid='ignore')
 import datetime
 import os, sys, glob
 import logging
+import warnings
 import inspect
 from calendar import monthrange
 try:
@@ -3917,6 +3919,27 @@ class popy(object):
             self.pixel_shape = 'quadrilateral'
             self.default_subset_function = 'F_subset_MethaneAIR'
             self.default_column_unit = 'mol/mol'
+        
+        elif(instrum == "TEMPO"):
+            k1 = k1 or 4
+            k2 = k2 or 2
+            k3 = k3 or 1
+            error_model = error_model or "linear"
+            self.min_qa_value = 0.5
+            xmargin = 1.5
+            ymargin = 1.5
+            maxsza = 70
+            maxcf = 0.3
+            self.pixel_shape = 'quadrilateral'
+            self.default_column_unit = 'molec/cm2'
+            
+            if product in ['NO2']:
+                self.default_subset_function = 'F_subset_TEMPONO2'
+                oversampling_list = oversampling_list or ['column_amount','albedo',\
+                                     'surface_altitude']
+                maxsza = 75
+                maxcf = 0.5
+        
         elif(instrum == "TROPOMI"):
             k1 = k1 or 4
             k2 = k2 or 2
@@ -4957,7 +4980,7 @@ class popy(object):
     
     def F_subset_MEaSUREs(self,l2_list=None,l2_path_pattern=None,
                           path=None,data_fields=None,data_fields_l2g=None,
-                          min_MDQF=0,max_MDQF=1):
+                          min_MDQF=0,max_MDQF=1,maxsza=75,maxcf=0.3):
         """ 
         function to subset MEaSUREs level 2 data, calling self.F_read_MEaSUREs_nc
         l2_list:
@@ -5086,7 +5109,164 @@ class popy(object):
             self.nl2 = 0
         else:
             self.nl2 = len(l2g_data['latc'])
+    
+    def F_subset_TEMPONO2(self,l2_list=None,l2_path_pattern=None,
+                          data_fields=None,data_fields_l2g=None,
+                          min_MDQF=0,max_MDQF=0,maxsza=75,maxvza=90,maxcf=1):
+        """ 
+        function to subset TEMPONO2 level 2 data
+        l2_list:
+            a list of level 2 file paths. If provided, l2_path_pattern will be ignored.
+        l2_path_pattern:
+            a format string indicating the path structure of level 2 data. e.g.,
+            r'C:/data/*O2-CH4_%Y%m%dT*CO2proxy.nc' 
+        data_fields:
+            a list of strings indicating which fields in the l2 file to keep
+        data_fields_l2g:
+            shortened data_fields used in the output dictionary l2g_data
+        min/max_MDQF:
+            bounds of /key_science_data/main_data_quality_flag
+        maxsza/cf:
+            max solar zenith angle and amf_cloud_fraction
+        created on 2023/11/01
+        """      
+        from netCDF4 import Dataset
+        # find out list of l2 files to subset
+        instrum = self.instrum
+        product = self.product
+        if l2_list is None and l2_path_pattern is None:
+            self.logger.error('either l2_list or l2_path_pattern has to be provided!')
+            return
+        if l2_list is not None and l2_path_pattern is not None:
+            self.logger.info('both l2_list and l2_path_pattern are provided. l2_path_pattern will be overwritten')
+            l2_path_pattern = None
+
+        if l2_list is None:
+            l2_list = []
+            start_date = self.start_python_datetime.date()
+            end_date = self.end_python_datetime.date()
+            days = (end_date-start_date).days+1
+            DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+            for DATE in DATES:
+                flist = glob.glob(DATE.strftime(l2_path_pattern))
+                l2_list = l2_list+flist                 
+        self.l2_list = l2_list
         
+        maxsza = self.maxsza
+        maxcf = self.maxcf
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        if not data_fields:
+            # default, absolute path of useful variables in the nc file
+            data_fields = ['/support_data/eff_cloud_fraction',\
+                           '/support_data/amf_cloud_fraction',\
+                           '/support_data/albedo',\
+                           '/support_data/surface_pressure',\
+                           '/support_data/tropopause_pressure',\
+                           '/support_data/terrain_height',\
+                           '/geolocation/latitude_bounds',\
+                           '/geolocation/longitude_bounds',\
+                           '/geolocation/latitude',\
+                           '/geolocation/longitude',\
+                           '/geolocation/solar_zenith_angle',\
+                           '/geolocation/viewing_zenith_angle',\
+                           '/geolocation/time',\
+                           '/product/main_data_quality_flag',\
+                           '/product/vertical_column_troposphere',\
+                           '/product/vertical_column_troposphere_uncertainty']    
+        if not data_fields_l2g:
+            # standardized variable names in l2g file. should map one-on-one to data_fields
+            data_fields_l2g = ['eff_cloud_fraction','amf_cloud_fraction','albedo',
+                               'surface_pressure','tropopause_pressure','terrain_height',
+                               'latitude_bounds','longitude_bounds','latc','lonc',
+                               'SolarZenithAngle','vza',
+                               'time','main_data_quality_flag',
+                               'column_amount','column_uncertainty']
+        self.logger.info('Read, subset, and store level 2 data to l2g_data')
+        l2g_data = {}
+        if not hasattr(self,'polygon'):
+            from shapely.geometry import Polygon
+            polygon = Polygon(np.array([[self.west,self.west,self.east,self.east],\
+                                        [self.south,self.north,self.north,self.south]]).T)
+        else:
+            polygon = self.polygon
+        for fn in l2_list:
+            self.logger.info('Loading '+os.path.split(fn)[-1])
+            with Dataset(fn,'r') as nc:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore",category=DeprecationWarning)
+                    xys = nc.geospatial_bounds.split('((')[-1].split('))')[0].split(',')
+                    ref_dt = datetime.datetime.strptime(nc.time_reference,'%Y-%m-%dT%H:%M:%SZ')
+                    t0 = ref_dt+datetime.timedelta(seconds=nc.time_coverage_start_since_epoch)
+                    t1 = ref_dt+datetime.timedelta(seconds=nc.time_coverage_end_since_epoch)
+    
+                    
+                if t0 > self.end_python_datetime or t1 < self.start_python_datetime:
+                    self.logger.info(os.path.split(fn)[-1]+' does not overlap with the given time. Skipping...')
+                    continue
+                granule_bounds = np.array([xy.split(' ')[::-1] for xy in xys]).astype(float)
+                granule_poly = Polygon(granule_bounds)
+                if not polygon.intersects(granule_poly):
+                    self.logger.info(os.path.split(fn)[-1]+' does not intersects with popy domain. Skipping...')
+                    continue
+                
+                outp_nc = {}
+                for i,dfld in enumerate(data_fields):
+                    tmp = nc[dfld]
+                    if not data_fields_l2g:
+                        varname = tmp.name
+                    else:
+                        varname = data_fields_l2g[i]
+                    try:
+                        outp_nc[varname] = tmp[:].filled(np.nan)
+                    except:
+                        self.logger.debug('{} cannot be filled by nan or is not a masked array'.format(varname))
+                        outp_nc[varname] = tmp[:].data
+                UTC_matlab_datenum = np.array([datetime2datenum(ref_dt+datetime.timedelta(seconds=s)) \
+                                               for s in nc['geolocation/time'][:].data])
+                outp_nc['UTC_matlab_datenum'] = np.broadcast_to(UTC_matlab_datenum[:,np.newaxis],outp_nc['latc'].shape)
+                xtrack = nc.dimensions['xtrack'].size
+                outp_nc['across_track_position'] = np.broadcast_to(np.arange(1.,xtrack+1)[np.newaxis,:],\
+                                                                   outp_nc['latc'].shape).astype(int)
+                outp_nc['scan_num'] = np.full(outp_nc['latc'].shape,nc.scan_num,dtype=int)
+                outp_nc['granule_num'] = np.full(outp_nc['latc'].shape,nc.granule_num,dtype=int)
+                
+            f1 = (outp_nc['SolarZenithAngle'] <= maxsza) & (outp_nc['vza'] <= maxvza)
+            f2 = outp_nc['amf_cloud_fraction'] <= maxcf
+            f3 = (outp_nc['main_data_quality_flag'] <= max_MDQF) & (outp_nc['main_data_quality_flag'] >= min_MDQF)             
+            f4 = outp_nc['latc'] >= south
+            f5 = outp_nc['latc'] <= north
+            tmplon = outp_nc['lonc']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp_nc['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp_nc['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+            self.logger.info('You have {} valid L2 pixels'.format(np.nansum(validmask)))
+            l2g_data0 = {}
+            Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][:,:,0])[validmask]
+            Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][:,:,3])[validmask]
+            Lat_lowerright = np.squeeze(outp_nc['latitude_bounds'][:,:,1])[validmask]
+            Lat_upperright = np.squeeze(outp_nc['latitude_bounds'][:,:,2])[validmask]
+            Lon_lowerleft = np.squeeze(outp_nc['longitude_bounds'][:,:,0])[validmask]
+            Lon_upperleft = np.squeeze(outp_nc['longitude_bounds'][:,:,3])[validmask]
+            Lon_lowerright = np.squeeze(outp_nc['longitude_bounds'][:,:,1])[validmask]
+            Lon_upperright = np.squeeze(outp_nc['longitude_bounds'][:,:,2])[validmask]
+            l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
+            l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+            for key in outp_nc.keys():
+                if key not in {'latitude_bounds','longitude_bounds','time'}:
+                    l2g_data0[key] = outp_nc[key][validmask]
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
+    
     def F_subset_OMPSN20HCHO(self,path):
         """ 
         function to subset OMPS-N20 hcho level 2 data, calling self.F_read_S5P_nc

@@ -450,7 +450,7 @@ class AQS():
             l3.save_nc(fn,fields_name=fields_name)
     
     def interpolate_l3(self,l3_path_pattern,file_freq='1M',fields_name=None,
-                       lonlat_margin=10,attach_l3=True,topo_kw=None,chem_kw=None):
+                       lonlat_margin=10,attach_l3=True,topo_kw=None,chem_kw=None,grad_fields_name=None):
         '''lighter version of get_l3, mainly for sampling fields from popy l3 data'''
         # load level 3 files
         ewsn_dict = dict(west=self.west-lonlat_margin,east=self.east+lonlat_margin,
@@ -458,6 +458,7 @@ class AQS():
         l3s = Level3_List(pd.period_range(self.start_dt,self.end_dt,freq=file_freq),**ewsn_dict)
         fields_name = fields_name or ['S','S_xgb','S_p','S_p_xgb','column_amount','column_amount_p',\
                                       'wind_column','wind_topo','surface_altitude','era5_blh']
+        grad_fields_name = grad_fields_name or ['column_amount','wind_column','surface_altitude','wind_column_topo']
         l3s.read_nc_pattern(l3_path_pattern,
                             fields_name=fields_name.copy())
         l3 = l3s.aggregate()
@@ -510,12 +511,21 @@ class AQS():
             self.l3s = l3s
             self.fields_name = fields_name
         
+        grad_fields_name = list(set(grad_fields_name).intersection(set(fields_name)))
         for fld in fields_name:
             func = RegularGridInterpolator((l3['ygrid'],l3['xgrid']),\
                                         l3[fld],bounds_error=False,fill_value=np.nan)
             self.mdf['interp_'+fld] = ''
             for irow,row in self.mdf.iterrows():
                 self.mdf.loc[irow,'interp_'+fld] = func((row.Latitude,row.Longitude))
+            # calculate strength of gradient
+            if fld in grad_fields_name:
+                [gx,gy] = np.gradient(l3[fld],l3.grid_size*111e3*np.cos(np.deg2rad(np.mean(l3['ygrid']))),l3.grid_size*111e3)
+                func = RegularGridInterpolator((l3['ygrid'],l3['xgrid']),\
+                                        np.sqrt(gx**2+gy**2),bounds_error=False,fill_value=np.nan)
+                self.mdf['interp_'+fld+'_slope'] = ''
+                for irow,row in self.mdf.iterrows():
+                    self.mdf.loc[irow,'interp_'+fld+'_slope'] = func((row.Latitude,row.Longitude))
         
         
     def get_l3(self,l3_path_pattern,file_freq='1D',lonlat_margin=0.5,xgb_pblh_path_pattern=None,

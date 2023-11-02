@@ -93,7 +93,7 @@ class Geo_Raster(dict):
 
 class Region(dict):
     '''class based on dict, representing a large region containing one or more subregions'''
-    def __init__(self,name,bounds_list,west,east,south,north):
+    def __init__(self,name,bounds_list,west,east,south,north,subregion_namelist=None):
         '''
         name:
             name of region
@@ -104,7 +104,11 @@ class Region(dict):
         '''
         self.logger = logging.getLogger(__name__)
         for i,rb in enumerate(bounds_list):
-            self['{}{}'.format(name,i)] = {'west':rb[0],'east':rb[1],'south':rb[2],'north':rb[3]}
+            if subregion_namelist is None:
+                subregion_name = '{}{}'.format(name,i)
+            else:
+                subregion_name = subregion_namelist[i]
+            self[subregion_name] = {'west':rb[0],'east':rb[1],'south':rb[2],'north':rb[3]}
         self.name = name
         self.west = west
         self.east = east
