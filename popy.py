@@ -5193,6 +5193,9 @@ class popy(object):
         else:
             polygon = self.polygon
         for fn in l2_list:
+            if not os.path.exists(fn):
+                self.logger.warning('{} does not exist!!! Skipping...'.format(fn))
+                continue
             self.logger.info('Loading '+os.path.split(fn)[-1])
             with Dataset(fn,'r') as nc:
                 with warnings.catch_warnings():
@@ -5201,8 +5204,6 @@ class popy(object):
                     ref_dt = datetime.datetime.strptime(nc.time_reference,'%Y-%m-%dT%H:%M:%SZ')
                     t0 = ref_dt+datetime.timedelta(seconds=nc.time_coverage_start_since_epoch)
                     t1 = ref_dt+datetime.timedelta(seconds=nc.time_coverage_end_since_epoch)
-    
-                    
                 if t0 > self.end_python_datetime or t1 < self.start_python_datetime:
                     self.logger.info(os.path.split(fn)[-1]+' does not overlap with the given time. Skipping...')
                     continue
@@ -5211,7 +5212,9 @@ class popy(object):
                 if not polygon.intersects(granule_poly):
                     self.logger.info(os.path.split(fn)[-1]+' does not intersects with popy domain. Skipping...')
                     continue
-                
+                if np.max(nc['geolocation/time'][:].mask) == True:
+                    self.logger.warning(os.path.split(fn)[-1]+' has invalid time stamp! Skipping...')
+                    continue
                 outp_nc = {}
                 for i,dfld in enumerate(data_fields):
                     tmp = nc[dfld]
@@ -8483,7 +8486,7 @@ class popy(object):
         l2g_data = {k:v[validmask,] for (k,v) in l2g_data.items()}
         nl2 = len(l2g_data['latc'])
         self.nl2 = nl2
-        self.l2g_data = l2g_data
+#         self.l2g_data = l2g_data
         self.logger.info('%d pixels in the L2g data' %nl20)
         if nl2 > 0:
             self.logger.info('%d pixels to be regridded...' %nl2)
