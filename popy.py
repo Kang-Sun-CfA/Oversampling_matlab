@@ -2752,7 +2752,7 @@ class Level3_Data(dict):
         if 'total_sample_weight' not in fields_name:
             fields_name.append('total_sample_weight')
         nc = Dataset(l3_filename,'r')
-        self.grid_size = np.float(nc.getncattr('grid_size'))
+        self.grid_size = float(nc.getncattr('grid_size'))
         self.instrum = nc.getncattr('instrument')
         self.product = nc.getncattr('product')
         self.start_python_datetime = datetime.datetime.strptime(nc.getncattr('time_coverage_start'),'%Y-%m-%dT%H:%M:%SZ')
@@ -3151,7 +3151,7 @@ class Level3_Data(dict):
             self.logger.warning('provide a grid size larger than {}!'.format(self.grid_size))
             return self
         from skimage.measure import block_reduce
-        reduce_factor = np.int(np.rint(new_grid_size/self.grid_size))
+        reduce_factor = int(np.rint(new_grid_size/self.grid_size))
         if reduce_factor == 1:
             self.logger.warning('no need to reduce')
             return self
@@ -7522,8 +7522,8 @@ class popy(object):
             nobs = np.sum(validmask)
             # work out footprint number
             tmprunID = outp['Run_ID'][validmask]
-            tmpfov = np.asarray([np.float(tmprunID[i][-3:]) for i in range(nobs)])
-            tmpfor = np.asarray([np.float(tmprunID[i][-8:-4]) for i in range(nobs)])
+            tmpfov = np.asarray([float(tmprunID[i][-3:]) for i in range(nobs)])
+            tmpfor = np.asarray([float(tmprunID[i][-8:-4]) for i in range(nobs)])
             l2g_data0['ifov'] = (tmpfor-1)*9+tmpfov
             latc = outp['Latitude'][validmask]
             lonc = outp['Longitude'][validmask]
@@ -7790,8 +7790,8 @@ class popy(object):
             nobs = np.sum(validmask)
             # work out footprint number
             tmprunID = outp['Run_ID'][validmask]
-            tmpfov = np.asarray([np.float(tmprunID[i][-3:]) for i in range(nobs)])
-            tmpfor = np.asarray([np.float(tmprunID[i][-8:-4]) for i in range(nobs)])
+            tmpfov = np.asarray([float(tmprunID[i][-3:]) for i in range(nobs)])
+            tmpfor = np.asarray([float(tmprunID[i][-8:-4]) for i in range(nobs)])
             pressure0 = outp['pressure'][validmask,]
             xretv0 = outp['xretv'][validmask,]
             noise_error0 = outp['total_covariance_error'][validmask,]
@@ -9671,8 +9671,8 @@ class popy(object):
                 msg_str = msg_str+' %.1f'%(pbl_multiplier[count_pbl])+' x pbl thickness ([%.1f'%(np.nanmin(tmp)/1e2)+',%.1f] hPa)'%(np.nanmax(tmp)/1e2)
                 count_pbl = count_pbl+1
             else:# hPa to Pa
-                num_pressure_boundaries[:,ip] = np.float(pressure_boundaries[ip])*1e2
-                msg_str = msg_str+' %.1f hPa'%(np.float(pressure_boundaries[ip]))
+                num_pressure_boundaries[:,ip] = float(pressure_boundaries[ip])*1e2
+                msg_str = msg_str+' %.1f hPa'%(float(pressure_boundaries[ip]))
         self.logger.info(msg_str)
         self.l2g_data[subcolumn_field_header+'num_pressure_boundaries'] = num_pressure_boundaries
         nl2 = self.nl2
