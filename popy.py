@@ -3291,9 +3291,6 @@ class Level3_Data(dict):
              layer_threshold=0.5,draw_colorbar=True,
              func=None,**kwargs):
         import matplotlib.pyplot as plt
-        import warnings
-        import matplotlib.cbook
-        warnings.filterwarnings("ignore",category=matplotlib.cbook.mplDeprecation)
         import cartopy.crs as ccrs
         import cartopy.feature as cfeature
         # workaround for cartopy 0.16
