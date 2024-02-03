@@ -7300,8 +7300,7 @@ class popy(object):
             self.nl2 = len(l2g_data['latc'])
     
     def F_subset_IASINH3(self,l2_list=None,l2_path_pattern=None,
-                         path=None,which_metop='A',
-                         l2_path_structure=None,
+                         version='4',data_fields=None,
                          ellipse_lut_path='daysss.mat'):
         '''
         function to subset IASI NH3 level2 files
@@ -7310,64 +7309,50 @@ class popy(object):
         l2_path_pattern:
             a format string indicating the path structure of level 2 data. e.g.,
             r'C:/data/*O2-CH4_%Y%m%dT*CO2proxy.nc'
-        path:
-            l2 data root directory, only flat l2 file structure is supported
-        which_metop:
-            iasi-a or iasi-b
-        l2_path_structure:
-            None indicates that individual files are directly under path;
-            '%Y/' if files are like l2_dir/2017/*.nc;
-            '%Y/%m/%d/' if files are like l2_dir/2017/05/01/*.nc
+        version:
+            3, 3R, 4, or 4R. used to make sure backward compatible to version 3
+        data_fields:
+            fields to read from l2 netcdf
         ellipse_lut_path:
             path to a look up table storing u, v, and t data to reconstruct IASI pixel ellipsis
         created on 2021/04/01 based on CrIS subset and matlab-based iasi subset function, work for iasi v3
         updated 2022/11/09
+        updated 2024/02/03 for version 4, removing obsolete inputs
         '''
         from scipy.io import loadmat
         from scipy.interpolate import RegularGridInterpolator
-        if path is not None:
-            self.logger.warning('please use l2_list or l2_path_pattern instead')
-            l2_dir = path
+        if l2_list is None and l2_path_pattern is None:
+            self.logger.error('either l2_list or l2_path_pattern has to be provided!')
+            return
+        if l2_list is not None and l2_path_pattern is not None:
+            self.logger.info('both l2_list and l2_path_pattern are provided. l2_path_pattern will be overwritten')
+            l2_path_pattern = None
+
+        if l2_list is None:
             l2_list = []
-            cwd = os.getcwd()
-            os.chdir(l2_dir)
             start_date = self.start_python_datetime.date()
             end_date = self.end_python_datetime.date()
             days = (end_date-start_date).days+1
             DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
             for DATE in DATES:
-                if l2_path_structure == None:
-                    flist = glob.glob('IASI_METOP'+which_metop+'_L2_NH3_'+DATE.strftime("%Y%m%d")+'*.nc')
-                else:
-                    flist = glob.glob(DATE.strftime(l2_path_structure)+\
-                                      'IASI_METOP'+which_metop+'_L2_NH3_'+DATE.strftime("%Y%m%d")+'*.nc')
-                l2_list = l2_list+flist
-
-            os.chdir(cwd)
-            self.l2_dir = l2_dir
-            self.l2_list = l2_list
-        else:
-            if l2_list is None and l2_path_pattern is None:
-                self.logger.error('either l2_list or l2_path_pattern has to be provided!')
-                return
-            if l2_list is not None and l2_path_pattern is not None:
-                self.logger.info('both l2_list and l2_path_pattern are provided. l2_path_pattern will be overwritten')
-                l2_path_pattern = None
-            
-            if l2_list is None:
-                l2_list = []
-                start_date = self.start_python_datetime.date()
-                end_date = self.end_python_datetime.date()
-                days = (end_date-start_date).days+1
-                DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
-                for DATE in DATES:
-                    flist = glob.glob(DATE.strftime(l2_path_pattern))
-                    l2_list = l2_list+flist                 
-            self.l2_list = l2_list
+                flist = glob.glob(DATE.strftime(l2_path_pattern))
+                l2_list = l2_list+flist                 
+        self.l2_list = l2_list
         
-        varnames = ['time','latitude','longitude','solar_zenith_angle',
-                    'pixel_number','cloud_coverage','AMPM',
-                    'nh3_total_column','nh3_total_column_uncertainty']
+        if data_fields is None:
+            if version in ['3','3R']:
+                data_fields = ['time','latitude','longitude','solar_zenith_angle',
+                            'pixel_number','cloud_coverage','AMPM',
+                            'nh3_total_column','nh3_total_column_uncertainty']
+                
+            elif version in ['4','4R']:
+                data_fields = ['AERIStime','latitude','longitude','solar_zenith_angle',
+                            'pixel_number','cloud_coverage','AMPM',
+                            'nh3_total_column','nh3_total_column_random_uncertainty',
+                            'nh3_total_column_systematic_uncertainty',
+                            'LS_mask', 'prefilter', 'postfilter']
+        
+        ref_dt = datetime.datetime(2007,1,1,0,0,0)       
         west = self.west
         east = self.east
         south = self.south
@@ -7377,16 +7362,18 @@ class popy(object):
         f_uuu = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,121)),pixel_lut['uuu4']) 
         f_vvv = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,121)),pixel_lut['vvv4']) 
         f_ttt = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,121)),pixel_lut['ttt4']) 
-        ref_dt = datetime.datetime(2007,1,1,0,0,0)
+        
         for fn in l2_list:
             self.logger.info('Loading '+os.path.split(fn)[-1])
             try:
-                outp = F_ncread_selective(fn,varnames)
+                outp = F_ncread_selective(fn,data_fields)
             except:
                 self.logger.warning(fn+' cannot be read!')
                 continue
-            
-            outp['UTC_matlab_datenum'] = np.array([datetime2datenum(ref_dt+datetime.timedelta(seconds=t)) for t in outp['time']])
+            if version in ['3','3R']:
+                outp['UTC_matlab_datenum'] = np.array([datetime2datenum(ref_dt+datetime.timedelta(seconds=t)) for t in outp['time']])
+            elif version in ['4','4R']:
+                outp['UTC_matlab_datenum'] = np.array([datetime2datenum(ref_dt+datetime.timedelta(seconds=t)) for t in outp['AERIStime']])
             f1 = outp['cloud_coverage']/100 < self.maxcf
             f2 = ~np.isnan(outp['nh3_total_column'])
             f3 = outp['AMPM'] == 0
@@ -7399,6 +7386,12 @@ class popy(object):
             f8 = outp['UTC_matlab_datenum'] >= self.start_matlab_datenum
             f9 = outp['UTC_matlab_datenum'] <= self.end_matlab_datenum
             validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+            if version in ['4','4R']:
+                f10 = outp['LS_mask'] == 1
+                f11 = outp['prefilter'] == 1
+                f12 = outp['postfilter'] == 1
+                f13 = outp['nh3_total_column'] < 1e36 # fill value is 9.97e36
+                validmask = validmask & f10 & f11 & f12 & f13
             self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
             l2g_data0 = {}
             if np.sum(validmask) == 0:
@@ -7411,7 +7404,10 @@ class popy(object):
             l2g_data0['v'] = f_vvv((l2g_data0['latc'],l2g_data0['ifov']))
             l2g_data0['t'] = f_ttt((l2g_data0['latc'],l2g_data0['ifov']))
             l2g_data0['column_amount'] = outp['nh3_total_column'][validmask]
-            l2g_data0['column_uncertainty'] = np.abs(outp['nh3_total_column_uncertainty'][validmask]/100*outp['nh3_total_column'][validmask])
+            if version in ['3','3R']:
+                l2g_data0['column_uncertainty'] = np.abs(outp['nh3_total_column_uncertainty'][validmask]/100*outp['nh3_total_column'][validmask])
+            elif version in ['4','4R']:
+                l2g_data0['column_uncertainty'] = np.abs(np.sqrt(outp['nh3_total_column_random_uncertainty']**2 + outp['nh3_total_column_systematic_uncertainty']**2)[validmask]/100*outp['nh3_total_column'][validmask])
             l2g_data0['UTC_matlab_datenum'] = outp['UTC_matlab_datenum'][validmask]
             l2g_data0['SolarZenithAngle'] = outp['solar_zenith_angle'][validmask]
             l2g_data0['cloud_fraction'] = outp['cloud_coverage'][validmask]/100
