@@ -7350,7 +7350,7 @@ class popy(object):
                             'pixel_number','cloud_coverage','AMPM',
                             'nh3_total_column','nh3_total_column_random_uncertainty',
                             'nh3_total_column_systematic_uncertainty',
-                            'LS_mask', 'prefilter', 'postfilter']
+                            'LS_mask', 'prefilter', 'postfilter','ground_height']
         
         ref_dt = datetime.datetime(2007,1,1,0,0,0)       
         west = self.west
@@ -7373,7 +7373,7 @@ class popy(object):
             if version in ['3','3R']:
                 outp['UTC_matlab_datenum'] = np.array([datetime2datenum(ref_dt+datetime.timedelta(seconds=t)) for t in outp['time']])
             elif version in ['4','4R']:
-                outp['UTC_matlab_datenum'] = np.array([datetime2datenum(ref_dt+datetime.timedelta(seconds=t)) for t in outp['AERIStime']])
+                outp['UTC_matlab_datenum'] = np.array([datetime2datenum(ref_dt+datetime.timedelta(seconds=float(t))) for t in outp['AERIStime']])
             f1 = outp['cloud_coverage']/100 < self.maxcf
             f2 = ~np.isnan(outp['nh3_total_column'])
             f3 = outp['AMPM'] == 0
@@ -7413,6 +7413,8 @@ class popy(object):
             l2g_data0['cloud_fraction'] = outp['cloud_coverage'][validmask]/100
             
             l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        if version in ['4','4R']:
+            l2g_data['surface_altitude'] = l2g_data.pop('ground_height')*1e3 # km to m
         self.l2g_data = l2g_data
         if not l2g_data:
             self.nl2 = 0
