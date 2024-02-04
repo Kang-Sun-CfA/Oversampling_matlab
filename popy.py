@@ -7411,10 +7411,10 @@ class popy(object):
             l2g_data0['UTC_matlab_datenum'] = outp['UTC_matlab_datenum'][validmask]
             l2g_data0['SolarZenithAngle'] = outp['solar_zenith_angle'][validmask]
             l2g_data0['cloud_fraction'] = outp['cloud_coverage'][validmask]/100
-            
+            if version in ['4','4R']:
+                l2g_data0['surface_altitude'] = outp['ground_height'][validmask]*1e3 # km to m
             l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
-        if version in ['4','4R']:
-            l2g_data['surface_altitude'] = l2g_data.pop('ground_height')*1e3 # km to m
+        
         self.l2g_data = l2g_data
         if not l2g_data:
             self.nl2 = 0
