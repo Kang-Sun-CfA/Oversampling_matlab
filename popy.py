@@ -3985,7 +3985,7 @@ class popy(object):
             k2 = k2 or 2
             k3 = k3 or 9
             error_model = error_model or "square"
-            oversampling_list = oversampling_list or ['column_amount']
+            oversampling_list = oversampling_list or ['column_amount','surface_altitude']
             xmargin = 2
             ymargin = 2
             maxsza = 90
@@ -4853,7 +4853,7 @@ class popy(object):
             
             
             if 'TimeUTC' in outp_he5.keys():
-                TimeUTC = outp_he5['TimeUTC'].astype(np.int)
+                TimeUTC = outp_he5['TimeUTC'].astype(int)
                 # python datetime does not allow vectorization
                 UTC_matlab_datenum = np.zeros((TimeUTC.shape[0],1),dtype=np.float64)
                 for i in range(TimeUTC.shape[0]):
@@ -7300,7 +7300,7 @@ class popy(object):
             self.nl2 = len(l2g_data['latc'])
     
     def F_subset_IASINH3(self,l2_list=None,l2_path_pattern=None,
-                         version='4',data_fields=None,
+                         version=None,data_fields=None,
                          ellipse_lut_path='daysss.mat'):
         '''
         function to subset IASI NH3 level2 files
@@ -7310,14 +7310,14 @@ class popy(object):
             a format string indicating the path structure of level 2 data. e.g.,
             r'C:/data/*O2-CH4_%Y%m%dT*CO2proxy.nc'
         version:
-            3, 3R, 4, or 4R. used to make sure backward compatible to version 3
+            3, 3R, 4, or 4R. used to make sure backward compatible to version 3. infer if None
         data_fields:
             fields to read from l2 netcdf
         ellipse_lut_path:
             path to a look up table storing u, v, and t data to reconstruct IASI pixel ellipsis
         created on 2021/04/01 based on CrIS subset and matlab-based iasi subset function, work for iasi v3
         updated 2022/11/09
-        updated 2024/02/03 for version 4, removing obsolete inputs
+        updated 2024/02/03 for version 4 based on the work of Daniel Moore. removing obsolete inputs
         '''
         from scipy.io import loadmat
         from scipy.interpolate import RegularGridInterpolator
@@ -7339,6 +7339,10 @@ class popy(object):
                 l2_list = l2_list+flist                 
         self.l2_list = l2_list
         
+        if version is None:
+            if "V3." in os.path.split(l2_list[0])[-1]: version = '3'
+            if "V4." in os.path.split(l2_list[0])[-1]: version = '4'
+            self.logger.warning(f'version is not given, inferring V{version} from the first file name')
         if data_fields is None:
             if version in ['3','3R']:
                 data_fields = ['time','latitude','longitude','solar_zenith_angle',
@@ -8488,8 +8492,8 @@ class popy(object):
         else:
             self.logger.info('No pixel to be regridded, returning...')
             return {}
-        nblock_row = np.max([np.floor(nrows/block_length),1]).astype(np.int)
-        nblock_col = np.max([np.floor(ncols/block_length),1]).astype(np.int)
+        nblock_row = np.max([np.floor(nrows/block_length),1]).astype(int)
+        nblock_col = np.max([np.floor(ncols/block_length),1]).astype(int)
         self.nblock_row = nblock_row
         self.nblock_col = nblock_col
         
@@ -8633,8 +8637,8 @@ class popy(object):
         else:
             self.logger.info('No pixel to be regridded, returning...')
             return {}
-        nblock_row = np.max([np.floor(nrows/block_length),1]).astype(np.int)
-        nblock_col = np.max([np.floor(ncols/block_length),1]).astype(np.int)
+        nblock_row = np.max([np.floor(nrows/block_length),1]).astype(int)
+        nblock_col = np.max([np.floor(ncols/block_length),1]).astype(int)
         self.nblock_row = nblock_row
         self.nblock_col = nblock_col
         
@@ -9563,7 +9567,7 @@ class popy(object):
                 lonc_local = lonc[sat_mask]
                 if_overlap = np.array([smoke_df['geometry'].iloc[ifire].contains(Point(lonc_local[il2],latc_local[il2]))
                                        for il2 in range(np.sum(sat_mask))])
-            smoke_density[sat_mask] = np.max(np.vstack((smoke_density[sat_mask],if_overlap*smoke_df['Density'].iloc[ifire].astype(np.int))),axis=0)
+            smoke_density[sat_mask] = np.max(np.vstack((smoke_density[sat_mask],if_overlap*smoke_df['Density'].iloc[ifire].astype(int))),axis=0)
             if np.sum(if_overlap) > 0:
                 overlapping_smoke_mask[ifire] = True
                 self.logger.info('found {} pixels overlapping with a plume starting at {}'.format(np.sum(if_overlap),datedev_py(smoke_df['s_datenum'].iloc[ifire]).strftime('%Y%m%dT%H:%M')))
