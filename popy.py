@@ -24,6 +24,7 @@ Created on Sat Jan 26 15:50:30 2019
 2022/06/20: flux divergence 2.0
 2022/10/16: Level3_List class
 2023/09/19: fix num_samples bias for quadrilateral pixels
+2023/11/01: add TEMPONO2
 """
 
 import numpy as np
@@ -31,6 +32,7 @@ np.seterr(divide='ignore', invalid='ignore')
 import datetime
 import os, sys, glob
 import logging
+import warnings
 import inspect
 from calendar import monthrange
 try:
@@ -2750,7 +2752,7 @@ class Level3_Data(dict):
         if 'total_sample_weight' not in fields_name:
             fields_name.append('total_sample_weight')
         nc = Dataset(l3_filename,'r')
-        self.grid_size = np.float(nc.getncattr('grid_size'))
+        self.grid_size = float(nc.getncattr('grid_size'))
         self.instrum = nc.getncattr('instrument')
         self.product = nc.getncattr('product')
         self.start_python_datetime = datetime.datetime.strptime(nc.getncattr('time_coverage_start'),'%Y-%m-%dT%H:%M:%SZ')
@@ -3149,7 +3151,7 @@ class Level3_Data(dict):
             self.logger.warning('provide a grid size larger than {}!'.format(self.grid_size))
             return self
         from skimage.measure import block_reduce
-        reduce_factor = np.int(np.rint(new_grid_size/self.grid_size))
+        reduce_factor = int(np.rint(new_grid_size/self.grid_size))
         if reduce_factor == 1:
             self.logger.warning('no need to reduce')
             return self
@@ -3289,9 +3291,6 @@ class Level3_Data(dict):
              layer_threshold=0.5,draw_colorbar=True,
              func=None,**kwargs):
         import matplotlib.pyplot as plt
-        import warnings
-        import matplotlib.cbook
-        warnings.filterwarnings("ignore",category=matplotlib.cbook.mplDeprecation)
         import cartopy.crs as ccrs
         import cartopy.feature as cfeature
         # workaround for cartopy 0.16
@@ -3917,6 +3916,27 @@ class popy(object):
             self.pixel_shape = 'quadrilateral'
             self.default_subset_function = 'F_subset_MethaneAIR'
             self.default_column_unit = 'mol/mol'
+        
+        elif(instrum == "TEMPO"):
+            k1 = k1 or 4
+            k2 = k2 or 2
+            k3 = k3 or 1
+            error_model = error_model or "linear"
+            self.min_qa_value = 0.5
+            xmargin = 1.5
+            ymargin = 1.5
+            maxsza = 70
+            maxcf = 0.3
+            self.pixel_shape = 'quadrilateral'
+            self.default_column_unit = 'molec/cm2'
+            
+            if product in ['NO2']:
+                self.default_subset_function = 'F_subset_TEMPONO2'
+                oversampling_list = oversampling_list or ['column_amount','albedo',\
+                                     'surface_altitude']
+                maxsza = 75
+                maxcf = 0.5
+        
         elif(instrum == "TROPOMI"):
             k1 = k1 or 4
             k2 = k2 or 2
@@ -3965,7 +3985,7 @@ class popy(object):
             k2 = k2 or 2
             k3 = k3 or 9
             error_model = error_model or "square"
-            oversampling_list = oversampling_list or ['column_amount']
+            oversampling_list = oversampling_list or ['column_amount','surface_altitude']
             xmargin = 2
             ymargin = 2
             maxsza = 90
@@ -4833,7 +4853,7 @@ class popy(object):
             
             
             if 'TimeUTC' in outp_he5.keys():
-                TimeUTC = outp_he5['TimeUTC'].astype(np.int)
+                TimeUTC = outp_he5['TimeUTC'].astype(int)
                 # python datetime does not allow vectorization
                 UTC_matlab_datenum = np.zeros((TimeUTC.shape[0],1),dtype=np.float64)
                 for i in range(TimeUTC.shape[0]):
@@ -4957,7 +4977,7 @@ class popy(object):
     
     def F_subset_MEaSUREs(self,l2_list=None,l2_path_pattern=None,
                           path=None,data_fields=None,data_fields_l2g=None,
-                          min_MDQF=0,max_MDQF=1):
+                          min_MDQF=0,max_MDQF=1,maxsza=75,maxcf=0.3):
         """ 
         function to subset MEaSUREs level 2 data, calling self.F_read_MEaSUREs_nc
         l2_list:
@@ -5086,7 +5106,167 @@ class popy(object):
             self.nl2 = 0
         else:
             self.nl2 = len(l2g_data['latc'])
+    
+    def F_subset_TEMPONO2(self,l2_list=None,l2_path_pattern=None,
+                          data_fields=None,data_fields_l2g=None,
+                          min_MDQF=0,max_MDQF=0,maxsza=75,maxvza=90,maxcf=1):
+        """ 
+        function to subset TEMPONO2 level 2 data
+        l2_list:
+            a list of level 2 file paths. If provided, l2_path_pattern will be ignored.
+        l2_path_pattern:
+            a format string indicating the path structure of level 2 data. e.g.,
+            r'C:/data/*O2-CH4_%Y%m%dT*CO2proxy.nc' 
+        data_fields:
+            a list of strings indicating which fields in the l2 file to keep
+        data_fields_l2g:
+            shortened data_fields used in the output dictionary l2g_data
+        min/max_MDQF:
+            bounds of /key_science_data/main_data_quality_flag
+        maxsza/cf:
+            max solar zenith angle and amf_cloud_fraction
+        created on 2023/11/01
+        """      
+        from netCDF4 import Dataset
+        # find out list of l2 files to subset
+        instrum = self.instrum
+        product = self.product
+        if l2_list is None and l2_path_pattern is None:
+            self.logger.error('either l2_list or l2_path_pattern has to be provided!')
+            return
+        if l2_list is not None and l2_path_pattern is not None:
+            self.logger.info('both l2_list and l2_path_pattern are provided. l2_path_pattern will be overwritten')
+            l2_path_pattern = None
+
+        if l2_list is None:
+            l2_list = []
+            start_date = self.start_python_datetime.date()
+            end_date = self.end_python_datetime.date()
+            days = (end_date-start_date).days+1
+            DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
+            for DATE in DATES:
+                flist = glob.glob(DATE.strftime(l2_path_pattern))
+                l2_list = l2_list+flist                 
+        self.l2_list = l2_list
         
+        maxsza = self.maxsza
+        maxcf = self.maxcf
+        west = self.west
+        east = self.east
+        south = self.south
+        north = self.north
+        if not data_fields:
+            # default, absolute path of useful variables in the nc file
+            data_fields = ['/support_data/eff_cloud_fraction',\
+                           '/support_data/amf_cloud_fraction',\
+                           '/support_data/albedo',\
+                           '/support_data/surface_pressure',\
+                           '/support_data/tropopause_pressure',\
+                           '/support_data/terrain_height',\
+                           '/geolocation/latitude_bounds',\
+                           '/geolocation/longitude_bounds',\
+                           '/geolocation/latitude',\
+                           '/geolocation/longitude',\
+                           '/geolocation/solar_zenith_angle',\
+                           '/geolocation/viewing_zenith_angle',\
+                           '/geolocation/time',\
+                           '/product/main_data_quality_flag',\
+                           '/product/vertical_column_troposphere',\
+                           '/product/vertical_column_troposphere_uncertainty']    
+        if not data_fields_l2g:
+            # standardized variable names in l2g file. should map one-on-one to data_fields
+            data_fields_l2g = ['eff_cloud_fraction','amf_cloud_fraction','albedo',
+                               'surface_pressure','tropopause_pressure','terrain_height',
+                               'latitude_bounds','longitude_bounds','latc','lonc',
+                               'SolarZenithAngle','vza',
+                               'time','main_data_quality_flag',
+                               'column_amount','column_uncertainty']
+        self.logger.info('Read, subset, and store level 2 data to l2g_data')
+        l2g_data = {}
+        if not hasattr(self,'polygon'):
+            from shapely.geometry import Polygon
+            polygon = Polygon(np.array([[self.west,self.west,self.east,self.east],\
+                                        [self.south,self.north,self.north,self.south]]).T)
+        else:
+            polygon = self.polygon
+        for fn in l2_list:
+            if not os.path.exists(fn):
+                self.logger.warning('{} does not exist!!! Skipping...'.format(fn))
+                continue
+            self.logger.info('Loading '+os.path.split(fn)[-1])
+            with Dataset(fn,'r') as nc:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore",category=DeprecationWarning)
+                    xys = nc.geospatial_bounds.split('((')[-1].split('))')[0].split(',')
+                    ref_dt = datetime.datetime.strptime(nc.time_reference,'%Y-%m-%dT%H:%M:%SZ')
+                    t0 = ref_dt+datetime.timedelta(seconds=nc.time_coverage_start_since_epoch)
+                    t1 = ref_dt+datetime.timedelta(seconds=nc.time_coverage_end_since_epoch)
+                if t0 > self.end_python_datetime or t1 < self.start_python_datetime:
+                    self.logger.info(os.path.split(fn)[-1]+' does not overlap with the given time. Skipping...')
+                    continue
+                granule_bounds = np.array([xy.split(' ')[::-1] for xy in xys]).astype(float)
+                granule_poly = Polygon(granule_bounds)
+                if not polygon.intersects(granule_poly):
+                    self.logger.info(os.path.split(fn)[-1]+' does not intersects with popy domain. Skipping...')
+                    continue
+                if np.max(nc['geolocation/time'][:].mask) == True:
+                    self.logger.warning(os.path.split(fn)[-1]+' has invalid time stamp! Skipping...')
+                    continue
+                outp_nc = {}
+                for i,dfld in enumerate(data_fields):
+                    tmp = nc[dfld]
+                    if not data_fields_l2g:
+                        varname = tmp.name
+                    else:
+                        varname = data_fields_l2g[i]
+                    try:
+                        outp_nc[varname] = tmp[:].filled(np.nan)
+                    except:
+                        self.logger.debug('{} cannot be filled by nan or is not a masked array'.format(varname))
+                        outp_nc[varname] = tmp[:].data
+                UTC_matlab_datenum = np.array([datetime2datenum(ref_dt+datetime.timedelta(seconds=s)) \
+                                               for s in nc['geolocation/time'][:].data])
+                outp_nc['UTC_matlab_datenum'] = np.broadcast_to(UTC_matlab_datenum[:,np.newaxis],outp_nc['latc'].shape)
+                xtrack = nc.dimensions['xtrack'].size
+                outp_nc['across_track_position'] = np.broadcast_to(np.arange(1.,xtrack+1)[np.newaxis,:],\
+                                                                   outp_nc['latc'].shape).astype(int)
+                outp_nc['scan_num'] = np.full(outp_nc['latc'].shape,nc.scan_num,dtype=int)
+                outp_nc['granule_num'] = np.full(outp_nc['latc'].shape,nc.granule_num,dtype=int)
+                
+            f1 = (outp_nc['SolarZenithAngle'] <= maxsza) & (outp_nc['vza'] <= maxvza)
+            f2 = outp_nc['amf_cloud_fraction'] <= maxcf
+            f3 = (outp_nc['main_data_quality_flag'] <= max_MDQF) & (outp_nc['main_data_quality_flag'] >= min_MDQF)             
+            f4 = outp_nc['latc'] >= south
+            f5 = outp_nc['latc'] <= north
+            tmplon = outp_nc['lonc']-west
+            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+            f6 = tmplon >= 0
+            f7 = tmplon <= east-west
+            f8 = outp_nc['UTC_matlab_datenum'] >= self.start_matlab_datenum
+            f9 = outp_nc['UTC_matlab_datenum'] <= self.end_matlab_datenum
+            validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+            self.logger.info('You have {} valid L2 pixels'.format(np.nansum(validmask)))
+            l2g_data0 = {}
+            Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][:,:,0])[validmask]
+            Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][:,:,3])[validmask]
+            Lat_lowerright = np.squeeze(outp_nc['latitude_bounds'][:,:,1])[validmask]
+            Lat_upperright = np.squeeze(outp_nc['latitude_bounds'][:,:,2])[validmask]
+            Lon_lowerleft = np.squeeze(outp_nc['longitude_bounds'][:,:,0])[validmask]
+            Lon_upperleft = np.squeeze(outp_nc['longitude_bounds'][:,:,3])[validmask]
+            Lon_lowerright = np.squeeze(outp_nc['longitude_bounds'][:,:,1])[validmask]
+            Lon_upperright = np.squeeze(outp_nc['longitude_bounds'][:,:,2])[validmask]
+            l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
+            l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+            for key in outp_nc.keys():
+                if key not in {'latitude_bounds','longitude_bounds','time'}:
+                    l2g_data0[key] = outp_nc[key][validmask]
+            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        self.l2g_data = l2g_data
+        if not l2g_data:
+            self.nl2 = 0
+        else:
+            self.nl2 = len(l2g_data['latc'])
+    
     def F_subset_OMPSN20HCHO(self,path):
         """ 
         function to subset OMPS-N20 hcho level 2 data, calling self.F_read_S5P_nc
@@ -7120,8 +7300,7 @@ class popy(object):
             self.nl2 = len(l2g_data['latc'])
     
     def F_subset_IASINH3(self,l2_list=None,l2_path_pattern=None,
-                         path=None,which_metop='A',
-                         l2_path_structure=None,
+                         version=None,data_fields=None,
                          ellipse_lut_path='daysss.mat'):
         '''
         function to subset IASI NH3 level2 files
@@ -7130,64 +7309,54 @@ class popy(object):
         l2_path_pattern:
             a format string indicating the path structure of level 2 data. e.g.,
             r'C:/data/*O2-CH4_%Y%m%dT*CO2proxy.nc'
-        path:
-            l2 data root directory, only flat l2 file structure is supported
-        which_metop:
-            iasi-a or iasi-b
-        l2_path_structure:
-            None indicates that individual files are directly under path;
-            '%Y/' if files are like l2_dir/2017/*.nc;
-            '%Y/%m/%d/' if files are like l2_dir/2017/05/01/*.nc
+        version:
+            3, 3R, 4, or 4R. used to make sure backward compatible to version 3. infer if None
+        data_fields:
+            fields to read from l2 netcdf
         ellipse_lut_path:
             path to a look up table storing u, v, and t data to reconstruct IASI pixel ellipsis
         created on 2021/04/01 based on CrIS subset and matlab-based iasi subset function, work for iasi v3
         updated 2022/11/09
+        updated 2024/02/03 for version 4 based on the work of Daniel Moore. removing obsolete inputs
         '''
         from scipy.io import loadmat
         from scipy.interpolate import RegularGridInterpolator
-        if path is not None:
-            self.logger.warning('please use l2_list or l2_path_pattern instead')
-            l2_dir = path
+        if l2_list is None and l2_path_pattern is None:
+            self.logger.error('either l2_list or l2_path_pattern has to be provided!')
+            return
+        if l2_list is not None and l2_path_pattern is not None:
+            self.logger.info('both l2_list and l2_path_pattern are provided. l2_path_pattern will be overwritten')
+            l2_path_pattern = None
+
+        if l2_list is None:
             l2_list = []
-            cwd = os.getcwd()
-            os.chdir(l2_dir)
             start_date = self.start_python_datetime.date()
             end_date = self.end_python_datetime.date()
             days = (end_date-start_date).days+1
             DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
             for DATE in DATES:
-                if l2_path_structure == None:
-                    flist = glob.glob('IASI_METOP'+which_metop+'_L2_NH3_'+DATE.strftime("%Y%m%d")+'*.nc')
-                else:
-                    flist = glob.glob(DATE.strftime(l2_path_structure)+\
-                                      'IASI_METOP'+which_metop+'_L2_NH3_'+DATE.strftime("%Y%m%d")+'*.nc')
-                l2_list = l2_list+flist
-
-            os.chdir(cwd)
-            self.l2_dir = l2_dir
-            self.l2_list = l2_list
-        else:
-            if l2_list is None and l2_path_pattern is None:
-                self.logger.error('either l2_list or l2_path_pattern has to be provided!')
-                return
-            if l2_list is not None and l2_path_pattern is not None:
-                self.logger.info('both l2_list and l2_path_pattern are provided. l2_path_pattern will be overwritten')
-                l2_path_pattern = None
-            
-            if l2_list is None:
-                l2_list = []
-                start_date = self.start_python_datetime.date()
-                end_date = self.end_python_datetime.date()
-                days = (end_date-start_date).days+1
-                DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
-                for DATE in DATES:
-                    flist = glob.glob(DATE.strftime(l2_path_pattern))
-                    l2_list = l2_list+flist                 
-            self.l2_list = l2_list
+                flist = glob.glob(DATE.strftime(l2_path_pattern))
+                l2_list = l2_list+flist                 
+        self.l2_list = l2_list
         
-        varnames = ['time','latitude','longitude','solar_zenith_angle',
-                    'pixel_number','cloud_coverage','AMPM',
-                    'nh3_total_column','nh3_total_column_uncertainty']
+        if version is None:
+            if "V3." in os.path.split(l2_list[0])[-1]: version = '3'
+            if "V4." in os.path.split(l2_list[0])[-1]: version = '4'
+            self.logger.warning(f'version is not given, inferring V{version} from the first file name')
+        if data_fields is None:
+            if version in ['3','3R']:
+                data_fields = ['time','latitude','longitude','solar_zenith_angle',
+                            'pixel_number','cloud_coverage','AMPM',
+                            'nh3_total_column','nh3_total_column_uncertainty']
+                
+            elif version in ['4','4R']:
+                data_fields = ['AERIStime','latitude','longitude','solar_zenith_angle',
+                            'pixel_number','cloud_coverage','AMPM',
+                            'nh3_total_column','nh3_total_column_random_uncertainty',
+                            'nh3_total_column_systematic_uncertainty',
+                            'LS_mask', 'prefilter', 'postfilter','ground_height']
+        
+        ref_dt = datetime.datetime(2007,1,1,0,0,0)       
         west = self.west
         east = self.east
         south = self.south
@@ -7197,16 +7366,18 @@ class popy(object):
         f_uuu = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,121)),pixel_lut['uuu4']) 
         f_vvv = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,121)),pixel_lut['vvv4']) 
         f_ttt = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,121)),pixel_lut['ttt4']) 
-        ref_dt = datetime.datetime(2007,1,1,0,0,0)
+        
         for fn in l2_list:
             self.logger.info('Loading '+os.path.split(fn)[-1])
             try:
-                outp = F_ncread_selective(fn,varnames)
+                outp = F_ncread_selective(fn,data_fields)
             except:
                 self.logger.warning(fn+' cannot be read!')
                 continue
-            
-            outp['UTC_matlab_datenum'] = np.array([datetime2datenum(ref_dt+datetime.timedelta(seconds=t)) for t in outp['time']])
+            if version in ['3','3R']:
+                outp['UTC_matlab_datenum'] = np.array([datetime2datenum(ref_dt+datetime.timedelta(seconds=t)) for t in outp['time']])
+            elif version in ['4','4R']:
+                outp['UTC_matlab_datenum'] = np.array([datetime2datenum(ref_dt+datetime.timedelta(seconds=float(t))) for t in outp['AERIStime']])
             f1 = outp['cloud_coverage']/100 < self.maxcf
             f2 = ~np.isnan(outp['nh3_total_column'])
             f3 = outp['AMPM'] == 0
@@ -7219,6 +7390,12 @@ class popy(object):
             f8 = outp['UTC_matlab_datenum'] >= self.start_matlab_datenum
             f9 = outp['UTC_matlab_datenum'] <= self.end_matlab_datenum
             validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
+            if version in ['4','4R']:
+                f10 = outp['LS_mask'] == 1
+                f11 = outp['prefilter'] == 1
+                f12 = outp['postfilter'] == 1
+                f13 = outp['nh3_total_column'] < 1e36 # fill value is 9.97e36
+                validmask = validmask & f10 & f11 & f12 & f13
             self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
             l2g_data0 = {}
             if np.sum(validmask) == 0:
@@ -7231,12 +7408,17 @@ class popy(object):
             l2g_data0['v'] = f_vvv((l2g_data0['latc'],l2g_data0['ifov']))
             l2g_data0['t'] = f_ttt((l2g_data0['latc'],l2g_data0['ifov']))
             l2g_data0['column_amount'] = outp['nh3_total_column'][validmask]
-            l2g_data0['column_uncertainty'] = np.abs(outp['nh3_total_column_uncertainty'][validmask]/100*outp['nh3_total_column'][validmask])
+            if version in ['3','3R']:
+                l2g_data0['column_uncertainty'] = np.abs(outp['nh3_total_column_uncertainty'][validmask]/100*outp['nh3_total_column'][validmask])
+            elif version in ['4','4R']:
+                l2g_data0['column_uncertainty'] = np.abs(np.sqrt(outp['nh3_total_column_random_uncertainty']**2 + outp['nh3_total_column_systematic_uncertainty']**2)[validmask]/100*outp['nh3_total_column'][validmask])
             l2g_data0['UTC_matlab_datenum'] = outp['UTC_matlab_datenum'][validmask]
             l2g_data0['SolarZenithAngle'] = outp['solar_zenith_angle'][validmask]
             l2g_data0['cloud_fraction'] = outp['cloud_coverage'][validmask]/100
-            
+            if version in ['4','4R']:
+                l2g_data0['surface_altitude'] = outp['ground_height'][validmask]*1e3 # km to m
             l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+        
         self.l2g_data = l2g_data
         if not l2g_data:
             self.nl2 = 0
@@ -7339,8 +7521,8 @@ class popy(object):
             nobs = np.sum(validmask)
             # work out footprint number
             tmprunID = outp['Run_ID'][validmask]
-            tmpfov = np.asarray([np.float(tmprunID[i][-3:]) for i in range(nobs)])
-            tmpfor = np.asarray([np.float(tmprunID[i][-8:-4]) for i in range(nobs)])
+            tmpfov = np.asarray([float(tmprunID[i][-3:]) for i in range(nobs)])
+            tmpfor = np.asarray([float(tmprunID[i][-8:-4]) for i in range(nobs)])
             l2g_data0['ifov'] = (tmpfor-1)*9+tmpfov
             latc = outp['Latitude'][validmask]
             lonc = outp['Longitude'][validmask]
@@ -7607,8 +7789,8 @@ class popy(object):
             nobs = np.sum(validmask)
             # work out footprint number
             tmprunID = outp['Run_ID'][validmask]
-            tmpfov = np.asarray([np.float(tmprunID[i][-3:]) for i in range(nobs)])
-            tmpfor = np.asarray([np.float(tmprunID[i][-8:-4]) for i in range(nobs)])
+            tmpfov = np.asarray([float(tmprunID[i][-3:]) for i in range(nobs)])
+            tmpfor = np.asarray([float(tmprunID[i][-8:-4]) for i in range(nobs)])
             pressure0 = outp['pressure'][validmask,]
             xretv0 = outp['xretv'][validmask,]
             noise_error0 = outp['total_covariance_error'][validmask,]
@@ -8303,15 +8485,15 @@ class popy(object):
         l2g_data = {k:v[validmask,] for (k,v) in l2g_data.items()}
         nl2 = len(l2g_data['latc'])
         self.nl2 = nl2
-        self.l2g_data = l2g_data
+#         self.l2g_data = l2g_data
         self.logger.info('%d pixels in the L2g data' %nl20)
         if nl2 > 0:
             self.logger.info('%d pixels to be regridded...' %nl2)
         else:
             self.logger.info('No pixel to be regridded, returning...')
             return {}
-        nblock_row = np.max([np.floor(nrows/block_length),1]).astype(np.int)
-        nblock_col = np.max([np.floor(ncols/block_length),1]).astype(np.int)
+        nblock_row = np.max([np.floor(nrows/block_length),1]).astype(int)
+        nblock_col = np.max([np.floor(ncols/block_length),1]).astype(int)
         self.nblock_row = nblock_row
         self.nblock_col = nblock_col
         
@@ -8455,8 +8637,8 @@ class popy(object):
         else:
             self.logger.info('No pixel to be regridded, returning...')
             return {}
-        nblock_row = np.max([np.floor(nrows/block_length),1]).astype(np.int)
-        nblock_col = np.max([np.floor(ncols/block_length),1]).astype(np.int)
+        nblock_row = np.max([np.floor(nrows/block_length),1]).astype(int)
+        nblock_col = np.max([np.floor(ncols/block_length),1]).astype(int)
         self.nblock_row = nblock_row
         self.nblock_col = nblock_col
         
@@ -9385,7 +9567,7 @@ class popy(object):
                 lonc_local = lonc[sat_mask]
                 if_overlap = np.array([smoke_df['geometry'].iloc[ifire].contains(Point(lonc_local[il2],latc_local[il2]))
                                        for il2 in range(np.sum(sat_mask))])
-            smoke_density[sat_mask] = np.max(np.vstack((smoke_density[sat_mask],if_overlap*smoke_df['Density'].iloc[ifire].astype(np.int))),axis=0)
+            smoke_density[sat_mask] = np.max(np.vstack((smoke_density[sat_mask],if_overlap*smoke_df['Density'].iloc[ifire].astype(int))),axis=0)
             if np.sum(if_overlap) > 0:
                 overlapping_smoke_mask[ifire] = True
                 self.logger.info('found {} pixels overlapping with a plume starting at {}'.format(np.sum(if_overlap),datedev_py(smoke_df['s_datenum'].iloc[ifire]).strftime('%Y%m%dT%H:%M')))
@@ -9488,8 +9670,8 @@ class popy(object):
                 msg_str = msg_str+' %.1f'%(pbl_multiplier[count_pbl])+' x pbl thickness ([%.1f'%(np.nanmin(tmp)/1e2)+',%.1f] hPa)'%(np.nanmax(tmp)/1e2)
                 count_pbl = count_pbl+1
             else:# hPa to Pa
-                num_pressure_boundaries[:,ip] = np.float(pressure_boundaries[ip])*1e2
-                msg_str = msg_str+' %.1f hPa'%(np.float(pressure_boundaries[ip]))
+                num_pressure_boundaries[:,ip] = float(pressure_boundaries[ip])*1e2
+                msg_str = msg_str+' %.1f hPa'%(float(pressure_boundaries[ip]))
         self.logger.info(msg_str)
         self.l2g_data[subcolumn_field_header+'num_pressure_boundaries'] = num_pressure_boundaries
         nl2 = self.nl2

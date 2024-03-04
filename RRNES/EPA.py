@@ -3,10 +3,204 @@ import io
 import requests
 import pandas as pd
 import json
+import pickle
 import numpy as np
 import datetime as dt
 import logging
 import matplotlib.pyplot as plt
+from matplotlib.patches import Ellipse, Rectangle
+from scipy.interpolate import interp1d, RegularGridInterpolator
+import seaborn as sns
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+from matplotlib.axes import Axes
+from cartopy.mpl.geoaxes import GeoAxes
+GeoAxes._pcolormesh_patched = Axes.pcolormesh
+from netCDF4 import Dataset
+from popy import Level3_Data, Level3_List, F_center2edge
+
+class Point_Source(object):
+    '''class for a point emission source selected from CEMS facilities'''
+    def __init__(self,lon,lat,name=None,emission_df=None,window_km=200,
+                 start_km=5,end_km=100,nstep=20):
+        '''
+        lon/lat:
+            center coordinate of the point source
+        name:
+            text description of the point source
+        window_km:
+            +/- winodw_km box from lon/lat will be the domain of satelite data,
+            where fit_topo and fit_chem will be conducted
+        nstep:
+            number of distance steps to integrate flux to emission rate
+        start/end_km:
+            start/end of distances to integrate flux to emission rate
+        emission_df:
+            a dataframe for emission time series, i.e., indexed from CEMS.fedf
+        '''
+        self.logger = logging.getLogger(__name__)
+        self.lon = lon
+        self.lat = lat
+        self.name = name
+        self.emission_df = emission_df
+        self.window_km = window_km
+        self.nstep = nstep
+        self.start_km = start_km
+        self.end_km = end_km
+        
+        km_per_lat = 111
+        km_per_lon = 111*np.cos(lat/180*np.pi)
+        self.south = lat-window_km/km_per_lat
+        self.north = lat+window_km/km_per_lat
+        self.west = lon-window_km/km_per_lon
+        self.east = lon+window_km/km_per_lon
+        self.km_per_lat = km_per_lat
+        self.km_per_lon = km_per_lon
+        
+    def get_satellite_emissions(self,l3s,l3_all=None,fit_topo_kw=None,fit_chem_kw=None,
+                          chem_min_column_amount=None,chem_max_wind_column=None):
+        '''interface popy level 3 objects. 
+        l3s:
+            Level3_List object
+        l3_all:
+            aggregated l3 from l3s
+        fit_topo_kw:
+            keyword argument to fit_topography function
+        fit_chem_kw:
+            keyword argument to fit_chemistry function
+        chem_min_column_amount:
+            min column amount allowed in fit_chem
+        chem_max_wind_column:
+            max wind_column allowed in fit_chem
+        '''
+        l3_all = l3_all or l3s.aggregate()
+        fit_topo_kw = fit_topo_kw or dict(max_iter=1)
+        fit_chem_kw = fit_chem_kw or dict(resample_rule='month_of_year',
+                                          max_iter=1,return_resampled=True)
+        if 'resample_rule' not in fit_chem_kw.keys():
+            fit_chem_kw['resample_rule'] = 'month_of_year'
+        if 'return_resampled' not in fit_chem_kw.keys():
+            fit_chem_kw['return_resampled'] = True
+        if 'max_iter' not in fit_chem_kw.keys():
+            fit_chem_kw['max_iter'] = 1
+        ls = l3s.trim(west=self.west,east=self.east,south=self.south,north=self.north)
+        l_all = l3_all.trim(west=self.west,east=self.east,south=self.south,north=self.north)
+        
+        chem_mask = np.ones(l_all['column_amount'].shape,dtype=bool)
+        if chem_min_column_amount is not None:
+            chem_mask = chem_mask & (l_all['column_amount']>=chem_min_column_amount)
+        if chem_max_wind_column is not None:
+            chem_mask = chem_mask & (l_all['wind_column']<=chem_max_wind_column)
+        fit_chem_kw['mask'] = chem_mask
+        ls.fit_topography(**fit_topo_kw)
+        ls.fit_chemistry(**fit_chem_kw)
+        l_all = ls.aggregate()
+        lonmesh,latmesh = np.meshgrid(l_all['xgrid'],l_all['ygrid'])
+        dist_to_f_km = np.sqrt(np.square((lonmesh-self.lon)*self.km_per_lon)+\
+                               np.square((latmesh-self.lat)*self.km_per_lat)
+                               )
+        dist_steps_km = np.linspace(self.start_km,self.end_km,self.nstep)
+        emission_rates = np.empty((len(ls),self.nstep),dtype=object)
+        emission_rates_all = np.empty(self.nstep,dtype=object)
+        for idist,dist_step in enumerate(dist_steps_km):
+            mask = np.zeros(lonmesh.shape,dtype=bool)
+            mask[dist_to_f_km <= dist_step] = True
+            emission_rates_all[idist] = l_all.sum_by_mask(mask=mask)
+            for il,ll in enumerate(ls):
+                emission_rates[il,idist] = ll.sum_by_mask(mask=mask)
+        l_all['dist_to_f_km'] = dist_to_f_km
+        l_all['chem_mask'] = chem_mask
+        self.l3_all = l_all
+        # merge satellite emission rate and cems emission rate
+        l3_df = ls.df
+        fe0 = pd.DataFrame(self.emission_df['NOx (mol/s)'].resample(l3_df.index.freq).mean())
+        fe0.index = fe0.index.to_period()
+        fe0 = fe0.rename(columns={'NOx (mol/s)':'Facility NOx'})
+        l3_df = l3_df.merge(fe0,left_index=True,right_index=True)
+        if 'tropomi' in self.emission_df.keys():
+            fe1 = pd.DataFrame(self.emission_df.loc[
+                self.emission_df['tropomi']
+                ]['NOx (mol/s)'].resample(l3_df.index.freq).mean())
+            fe1.index = fe1.index.to_period()
+            fe1 = fe1.rename(columns={'NOx (mol/s)':'Facility NOx with coverage'})
+            l3_df = l3_df.merge(fe1,left_index=True,right_index=True)
+        self.l3_df = l3_df
+        self.dist_steps_km = dist_steps_km
+        self.emission_rates = emission_rates
+        self.emission_rates_all = emission_rates_all
+    
+    def slice_emission_rate(self,dist_slice=20,l3_flds=None):
+        '''calculate emission rate over all time and for each satellite l3 time step
+        within a given distance (dist_slice)'''
+        l3_flds = l3_flds or ['wind_column','wind_column_topo','wind_column_topo_chem']
+        self.emission_rate = {}
+        for fld in l3_flds:
+            y = [er[fld] for er in self.emission_rates_all]
+            f = interp1d(self.dist_steps_km,y,bounds_error=False,fill_value='extrapolate')
+            self.emission_rate[fld] = f(dist_slice)
+            self.l3_df['er_{}'.format(fld)] = np.zeros(self.l3_df.shape[0])
+            for il3,ers in enumerate(self.emission_rates):
+                y = [er[fld] for er in ers]
+                f = interp1d(self.dist_steps_km,y,bounds_error=False,fill_value='extrapolate')
+                self.l3_df.loc[self.l3_df.index[il3],'er_{}'.format(fld)] = f(dist_slice)
+        self.dist_slice = dist_slice
+    
+    def plot_4panel_diagnostic(self,figsize=(10,8),pc_kw=None,ts_kw=None,sns_kw=None):
+        pc_kw = pc_kw or dict(vmin=0,vmax=10,cmap='rainbow')
+        ts_kw = ts_kw or dict(ylim=[0,25])
+        sns_kw = sns_kw or dict(annot=True,xticklabels=['DD','DDT','DDTC','F0','F1'],
+                    yticklabels=['DD','DDT','DDTC','F0','F1'],fmt='.2f')
+        label_position = pc_kw.pop('label_position',[0.5,0.15,0.3,0.035])
+        map_position = pc_kw.pop('map_position',[0.05,0.8,0.2,0.18])
+        l3_flds = ['wind_column','wind_column_topo','wind_column_topo_chem']
+        l3_flds_alias = ['Directional derivative (DD)','DD+topography','DD+topography/chemstry']
+        brightcc = ['#4477AA', '#EE6677', '#228833', '#CCBB44', '#66CCEE',
+                    '#AA3377', '#BBBBBB', '#000000']
+        ts_color = ts_kw.pop('color',brightcc[0:5])
+        fig,axs = plt.subplots(2,2,figsize=figsize,constrained_layout=True)
+        ax = axs[0,0]
+        pc = ax.pcolormesh(*F_center2edge(self.l3_all['xgrid'],self.l3_all['ygrid']),
+                           self.l3_all['wind_column_topo_chem']*1e9,**pc_kw)
+        mapax = fig.add_axes(map_position,projection=ccrs.LambertConformal(),frameon=False)
+        mapax.plot(self.lon,self.lat,'r*',transform=ccrs.PlateCarree())
+        mapax.set_extent([-128,-65,22,50], ccrs.Geodetic())
+        mapax.add_feature(cfeature.STATES,zorder=1,linewidth=.5,edgecolor='gray')
+        cax = ax.inset_axes(label_position)
+        cb = fig.colorbar(pc,ax=ax,cax=cax,orientation='horizontal',label=r'nmol m$^{-2}$ s$^{-1}$')
+        ellipse = Ellipse((self.lon,self.lat), 
+                          self.dist_slice*2/self.km_per_lon, 
+                          self.dist_slice*2/self.km_per_lat, fill=False,ec='r',ls='--')
+        ax.add_patch(ellipse)
+        ellipse = Ellipse((self.lon,self.lat), 
+                          self.end_km*2/self.km_per_lon, 
+                          self.end_km*2/self.km_per_lat, fill=False,ec='r',ls='--')
+        ax.add_patch(ellipse)
+
+        ax = axs[0,1]
+        for ifld,fld in enumerate(l3_flds):
+            ax.plot(self.dist_steps_km,[er[fld] for er in self.emission_rates_all],
+                    color=brightcc[ifld],label=l3_flds_alias[ifld],zorder=2)
+        ax.axvline(self.dist_slice,ls='--',color='r',zorder=1,label='Integration distance')
+        ax.legend()
+        ax.grid(axis='both')
+        ax.set_xlabel('Distance from facility [km]')
+        ax.set_ylabel('Emission rate [mol/s]')
+
+        ax = axs[1,0]
+        self.l3_df.plot(ax=ax,y=['er_wind_column','er_wind_column_topo','er_wind_column_topo_chem',
+                               'Facility NOx','Facility NOx with coverage'],
+                      label=['Directional derivative (DD)','DD+topography (DDT)','DD+topography/chemstry (DDTC)',
+                             'Facility NOx (F0)','Facility NOx with coverage (F1)'],color=ts_color,
+                      **ts_kw)
+        ax.legend()
+        ax.set_ylabel('Emission rate [mol/s]')
+
+        ax = axs[1,1]
+        cor_mat = self.l3_df[['er_wind_column','er_wind_column_topo','er_wind_column_topo_chem',
+                               'Facility NOx','Facility NOx with coverage']].corr()
+        sns.heatmap(cor_mat,ax=ax,**sns_kw)
+        fig.suptitle(self.name)
+        return dict(fig=fig,cb=cb,axs=axs,mapax=mapax)
 
 class CEMS():
     '''this class builts upon EPA's clean air markets program data portal: https://campd.epa.gov/
@@ -39,6 +233,44 @@ class CEMS():
         '/projects/academic/kangsun/data/CEMS/attributes/trimmed_%Y.csv'
         self.emissions_path_pattern = emissions_path_pattern or \
         '/projects/academic/kangsun/data/CEMS/emissions/%Y/%m/%d/%Y%m%d.csv'
+    
+    def find_satellite_coverage(self,satellite_coverage_dict=None):
+        '''add a column to fedf indicating if the time step has satellite coverage
+        satellite_coverage_dict:
+            a dict mapping satellite name to path of l3 files containing num_samples
+        '''
+        satellite_coverage_dict = satellite_coverage_dict or \
+            {'tropomi':'/home/kangsun/data/S5PNO2/L3/num_samples/CONUS_%Y.pkl'}
+        fedf = self.fedf
+        fadf = self.fadf
+        
+        fids = fedf.index.levels[0]
+        flatlon = np.array([fadf.loc[fid][['latitude','longitude']] for fid in fids],dtype=float)
+        pdidx = pd.IndexSlice
+        for k,v in satellite_coverage_dict.items():
+            fedf = fedf.assign(**{k:np.zeros(fedf.shape[0],dtype=bool)})
+            if k.lower() in {'tropomi','s5p','s5pno2'}:
+                for yr in pd.period_range(self.start_dt,self.end_dt,freq='1Y'):
+                    # load annual num_samples file for tropomi
+                    fn = yr.strftime(v)
+                    with open(fn,'rb') as f:
+                        d = pickle.load(f)
+                    # loop over dates
+                    for date in pd.date_range(np.max([self.start_dt,yr.start_time]),
+                                                np.min([self.end_dt,yr.end_time]),freq='1D'):
+                        ns = d['num_samples'][d['dt_array']==date,...].squeeze()
+                        f = RegularGridInterpolator((d['ygrid'],d['xgrid']), ns,method='nearest',
+                                                    bounds_error=True,fill_value=0)
+                        coverage = f((flatlon[:,0],flatlon[:,1])).astype(bool)
+                        # loop over facilities
+                        for fid,cov in zip(fids,coverage):
+                            # tough one with multiindexing
+                            fedf.loc[pdidx[fid,fedf.index.get_level_values(1).date==date.date()],
+                                     pdidx[k]] = cov
+            else:
+                self.logger.warning('{} is not implemented yet, returning all false'.format(k))
+                continue
+        self.fedf = fedf
     
     def plot_facility_map(self,fadf=None,max_nfacility=None,ax=None,reset_extent=False,add_text=False,**kwargs):
         '''plot facilities as dots on a map. dot size corresponds to self.fadf[sdata_column], 
@@ -135,6 +367,9 @@ class CEMS():
     
     def get_facilities_emission_rate(self,fadf=None,emissions_path_pattern=None,states=None,
                                      local_hours=None):
+        '''
+        a more recent version of load_emissions
+        '''
         emissions_path_pattern = emissions_path_pattern or self.emissions_path_pattern
         if fadf is None:
             fadf = self.fadf
@@ -360,3 +595,90 @@ class CEMS():
                     filename = pd.to_datetime(date).strftime(emissions_path_pattern)
                     os.makedirs(os.path.split(filename)[0],exist_ok=True)
                     daily_df.to_csv(filename,index=False)
+
+class Geos_Cf():
+    '''paying a tribute to geos.py at
+    https://github.com/Kang-Sun-CfA/Methane/blob/master/l2_met/geos.py'''
+    def __init__(self,start_dt,end_dt,utc_hours=None,
+                 west=-130.,east=-63.,south=23.,north=52.,\
+                 time_collection='tavg_1hr',dir_pattern=None):
+        self.logger = logging.getLogger(__name__)
+        self.west = west
+        self.east = east
+        self.south = south
+        self.north = north
+        if time_collection=='tavg_1hr':
+            times = pd.date_range(start_dt.replace(microsecond=0,second=0,minute=30),
+                                  end_dt,freq='1h')
+        if utc_hours is not None:
+            times = times[times.hour.isin(utc_hours)]
+        self.times = times
+        self.dir_pattern = dir_pattern
+    
+    def download_and_resave(self,url_patterns=None,fields=None,dir_pattern=None,delete_nc4=False):
+        dir_pattern = dir_pattern or self.dir_pattern
+        if url_patterns is None:
+            url_patterns = ['https://portal.nccs.nasa.gov/datashare/gmao/geos-cf/v1/das/Y%Y/M%m/D%d/GEOS-CF.v01.rpl.chm_tavg_1hr_g1440x721_v36.%Y%m%d_%H%Mz.nc4']
+        if fields is None:
+            fields = [['NO2','NO']]
+        for time in self.times:
+            save_dir = time.strftime(dir_pattern)
+            if not os.path.exists(save_dir):
+                os.makedirs(save_dir)
+            os.chdir(save_dir)
+            for pattern,flds in zip(url_patterns,fields):
+                url = time.strftime(pattern)
+                fn = os.path.join(save_dir,url.split('/')[-1])
+                try:
+                    if not os.path.exists(fn):
+                        os.system(f'wget -np -q {url}')
+                        self.logger.info(f'{fn} downloaded')
+                        # r = requests.get(url)
+                        # with open(fn,'wb') as f:
+                        #     f.write(r.content)
+                        #     self.logger.info(f'{fn} downloaded')
+                    else:
+                        self.logger.warning(f'{fn} already exists, skip downloading...')
+                    d = {}
+                    with Dataset(fn,'r') as nc:
+                        lon = nc['lon'][:].filled(np.nan)
+                        lat = nc['lat'][:].filled(np.nan)
+                        xmask = (lon>=self.west)&(lon<self.east)
+                        ymask = (lat>=self.south)&(lat<self.north)
+                        lon = lon[xmask]
+                        lat = lat[ymask]
+                        for fld in flds:
+                            d[fld] = \
+                            nc[fld][0,:,ymask,xmask].filled(np.nan)
+                        d['lon'] = lon
+                        d['lat'] = lat
+                    pkl_fn = os.path.splitext(fn)[0]+'.pkl'
+                    with open(pkl_fn,'wb') as f:
+                        pickle.dump(d,f,pickle.HIGHEST_PROTOCOL)
+                        self.logger.info(f'{pkl_fn} resaved')
+                    if delete_nc4:
+                        os.remove(fn)
+                except Exception as e:
+                    self.logger.warning(f'{fn} gives error:')
+                    self.logger.warning(e)
+    
+    def load(self,collection_dict=None,dir_pattern=None):
+        if collection_dict is None:
+            collection_dict = {'chm_tavg_1hr_g1440x721_v36':['NO2','NO','OH_mmr']}
+        data = {k:{} for k in collection_dict.keys()}
+        dir_pattern = dir_pattern or self.dir_pattern
+        for itime,time in enumerate(self.times):
+            save_dir = time.strftime(dir_pattern)
+            for collection,fields in collection_dict.items():
+                pkl_fn = os.path.join(save_dir,f'{collection}.pkl')
+                with open(pkl_fn,'rb') as f:
+                    d = pickle.load(f)
+                if not hasattr(self,'xgrid'):
+                    self.xgrid = d['lon']
+                    self.ygrid = d['lat']
+                for field in fields:
+                    if field not in data[collection].keys():
+                        data[collection][field] = \
+                        np.zeros((len(self.times),*d[field].shape))
+                    data[collection][field][itime,...] = d[field]
+        self.data = data

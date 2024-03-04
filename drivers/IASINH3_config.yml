@@ -1,0 +1,24 @@
+popy_dir: /home/kangsun/Oversampling_matlab/
+region: conus
+start: '2020-07-01'
+end: '2020-07-01'
+if_standardize_year: false
+freq: 1D
+product: NH3
+instrum: IASI
+grid_size: 0.05
+flux_grid_size: 0.2
+if_use_presaved_l2g: false
+l2_path_pattern: /home/kangsun/Downloads/IASI_METOPA_L2_NH3_%Y%m%d_ULB-LATMOS_V4.0.0R.nc
+l3_path_pattern: /home/kangsun/data/IASINH3/L3/CONUS_%Y_%m_%d.nc
+met_path_pattern: /home/kangsun/data/ERA5/Y%Y/M%m/D%d/CONUS_2D_%Y%m%d.nc
+which_met: ERA5
+interp_fields:
+  - u100
+  - v100
+  - u10
+  - v10
+ellipse_lut_path: /home/kangsun/Downloads/daysss.mat
+error_model: ones
+ncores: 4
+block_length: 100
