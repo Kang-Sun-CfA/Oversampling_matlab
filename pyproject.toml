@@ -18,12 +18,12 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 dependencies = [
-    "pandas~=1.4.3", # necessary for Level3_List
+    "pandas~=1.4", # necessary for Level3_List
     "pyyaml>=6.0.1",
-    "netCDF4~=1.6.1", # necessary for input/output netcdf data, which is very commonly used
+    "netCDF4~=1.6", # necessary for input/output netcdf data, which is very commonly used
     "opencv-python~=4.5.3", # necessary for oversampling instruments with quadrilateral level 2 pixels
-    "scipy~=1.8.1",
-    "scikit-image>=0.20.0", # necessary for Level3_Data.block_reduce()
+    "scipy~=1.8",
+    "scikit-image>=0.20", # necessary for Level3_Data.block_reduce()
 ]
 version = "0.2.2"
 
