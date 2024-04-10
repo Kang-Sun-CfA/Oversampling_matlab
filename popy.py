@@ -2153,38 +2153,18 @@ class Level3_Data(dict):
         return precision
         
     def fit_topography(self,mask=None,min_windtopo=None,max_windtopo=None,
-                       max_iter=None,outlier_std=None,fit_chem=None,remove_intercept=False,
+                       max_iter=1,outlier_std=None,fit_chem=None,remove_intercept=False,
                        if_bootstrap=False,if_xyrs=False):
         '''infer scale height for the wind-topography term
         '''
         import statsmodels.formula.api as smf
         import pandas as pd
-        if self.instrum == 'TROPOMI' and self.product == 'NO2':
-            min_windtopo = min_windtopo or 0.001
-            max_windtopo = max_windtopo or 0.1
-            max_iter = max_iter or 5
-            outlier_std = outlier_std or 2
-            fit_chem = fit_chem or True
-        elif self.instrum == 'TROPOMI' and self.product == 'SO2':
-            min_windtopo = min_windtopo or 0.001
-            max_windtopo = max_windtopo or 0.1
-            max_iter = max_iter or 2
-            outlier_std = outlier_std or 2
-            fit_chem = fit_chem or True
-        elif self.instrum == 'TROPOMI' and self.product == 'CH4':
-            min_windtopo = min_windtopo or 0.001
-            max_windtopo = max_windtopo or 0.1
-            max_iter = max_iter or 2
-            outlier_std = outlier_std or 2
-            fit_chem = fit_chem or False
-        elif self.instrum == 'TROPOMI' and self.product == 'CO':
-            min_windtopo = min_windtopo or 0.001
-            max_windtopo = max_windtopo or 0.1
-            max_iter = max_iter or 2
-            outlier_std = outlier_std or 2
+        min_windtopo = min_windtopo or 0.
+        max_windtopo = max_windtopo or 0.001
+        if self.product in ['CO','CH4','CO2','N2O']:
             fit_chem = fit_chem or False
         else:
-            self.logger.debug('not supported for this product')
+            fit_chem = fit_chem or True
             
         if 'column_amount' in self.keys():
             vcd = self['column_amount']
@@ -2257,19 +2237,17 @@ class Level3_Data(dict):
             self['wind_column_topo_rs'] = wc_topo_rs
     
     def fit_chemistry(self,mask=None,min_windtopo=None,max_windtopo=None,
-                      max_wind_column=None,max_iter=None,outlier_std=None):
+                      max_wind_column=None,max_iter=1,outlier_std=None):
         '''infer lifetime for the chemical loss term
         '''
         import statsmodels.formula.api as smf
         import pandas as pd
-        if self.instrum == 'TROPOMI' and self.product == 'NO2':
-            min_windtopo = min_windtopo or 0.
-            max_windtopo = max_windtopo or 0.001
+        min_windtopo = min_windtopo or 0.
+        max_windtopo = max_windtopo or 0.001
+        if self.product == 'NO2':
             max_wind_column = max_wind_column or 0.5e-9
-            max_iter = max_iter or 5
-            outlier_std = outlier_std or 2
         else:
-            self.logger.debug('not supported for this product')
+            max_wind_column = max_wind_column or np.inf
             
         wt = np.abs(self['wind_topo']/self['column_amount'])
         if 'wind_column_topo' not in self.keys():
