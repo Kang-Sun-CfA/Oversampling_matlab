@@ -1781,7 +1781,9 @@ class Level3_Data(dict):
         wind_column_xy = dcdx*self['wind_e'] + dcdy*self['wind_n']
         wind_column_rs = dcdr*self['wind_ne'] + dcds*self['wind_nw'] \
             + r_dot_s*(dcdr*self['wind_nw'] + dcds*self['wind_ne'])
-        wind_column = np.nanmean(np.array([wind_column_xy,wind_column_rs]),axis=0)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(action='ignore', message='Mean of empty slice')
+            wind_column = np.nanmean(np.array([wind_column_xy,wind_column_rs]),axis=0)
         wind_column[np.isnan(wind_column_xy) & np.isnan(wind_column_rs)] = np.nan
         self['wind_column'] = wind_column
         if write_diagnostic:
@@ -1802,7 +1804,9 @@ class Level3_Data(dict):
             wind_topo_xy = vcd*(dcdx*self['wind_e'] + dcdy*self['wind_n'])
             wind_topo_rs = vcd*(dcdr*self['wind_ne'] + dcds*self['wind_nw'] \
                 + r_dot_s*(dcdr*self['wind_nw'] + dcds*self['wind_ne']))
-            wind_topo = np.nanmean(np.array([wind_topo_xy,wind_topo_rs]),axis=0)
+            with warnings.catch_warnings():
+                warnings.filterwarnings(action='ignore', message='Mean of empty slice')
+                wind_topo = np.nanmean(np.array([wind_topo_xy,wind_topo_rs]),axis=0)
             wind_topo[np.isnan(wind_topo_xy) & np.isnan(wind_topo_rs)] = np.nan
             self['wind_topo'] = wind_topo
             if write_diagnostic:

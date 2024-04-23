@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import geopandas as gpd
 import logging
-from popy import Level3_Data, F_center2edge, Level3_List
+from popy import Level3_Data, F_center2edge, Level3_List, popy, datedev_py
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 from matplotlib.axes import Axes
@@ -76,26 +76,74 @@ class TEMPO():
         if tmp: 
             self.xys = [([self.west,self.west,self.east,self.east],
                          [self.south,self.north,self.north,self.south])]   
+    
+    def load_l3_by_local_time(self,l3_path_pattern,
+                              fields_name=None,
+                              local_hour_centers=None,
+                              local_hour_spans=None):
         
-    def regrid_from_l2(self,l2_path_pattern,attach_data=False,save_data=True,
+        fields_name = fields_name or ['column_amount','local_hour','terrain_height']
+        if local_hour_centers is None: 
+            local_hour_centers = np.linspace(8,17,10)
+        if local_hour_spans is None: 
+            local_hour_spans = np.ones_like(local_hour_centers)
+        nhour = len(local_hour_centers)
+        
+        # create an empty list of Level3_Data for each local hour value
+        l3_lhs = np.array([Level3_Data() for i in range(nhour)])
+        dates = pd.date_range(self.start_dt,self.end_dt,freq='1D')
+        wesn_dict = dict(west=self.west,east=self.east,south=self.south,north=self.north)
+        for date in dates:
+            # level 3 files of the same day
+            day_flist = glob.glob(date.strftime(l3_path_pattern))
+            for fn in day_flist:
+                l3 = Level3_Data(
+                ).read_nc(fn,fields_name
+                         ).trim(**wesn_dict)
+                weight = l3['total_sample_weight'].copy()
+                num = l3['num_samples'].copy()
+                for ilh, (lh,lhs) in enumerate(zip(local_hour_centers,local_hour_spans)):
+                    mask = (l3['local_hour']>= lh-lhs/2) & (l3['local_hour'] < lh+lhs/2)
+                    if np.sum(mask) == 0:
+                        continue
+                    l3['total_sample_weight'][~mask] = 0
+                    l3['num_samples'][~mask] = 0
+                    l3_lhs[ilh] = l3_lhs[ilh].merge(l3)
+                    l3['total_sample_weight'] = weight.copy()
+                    l3['num_samples'] = num.copy()
+        self.l3_lhs = l3_lhs
+            
+    def regrid_from_l2(self,l2_path_pattern,attach_data=False,
                        l3_path_pattern=None,do_l4=True,
                        l4_path_pattern=None,gradient_kw=None,
+                       l3_save_fields=None,l4_save_fields=None,
                        maxsza=75,maxcf=0.3,
                        ncores=0,block_length=300):
         
-        if do_l4 and l4_path_pattern is None or gradient_kw is None:
+        if not attach_data and (l3_path_pattern is None) and (l4_path_pattern is None):
+            self.logger.error('attach data or provide level3/4 paths!')
+            return
+        
+        if do_l4 and (l4_path_pattern is None or gradient_kw is None):
             self.logger.warning('level 4 information unavailable, will do level 3 only')
             do_l4 = False
         
-        if save_data:
+        l3_save_fields = l3_save_fields or ['column_amount','local_hour','terrain_height']
+        l4_save_fields = l4_save_fields or \
+        ['column_amount','local_hour','terrain_height','wind_topo',\
+         'wind_column','wind_column_xy','wind_column_rs']
+        
+        if l3_path_pattern is not None:
             if 'S{0:03d}' not in l3_path_pattern:
                 lst = list(os.path.splitext(l3_path_pattern))
-                lst.insert(1,'-')
+                lst.insert(1,'S{0:03d}')
                 l3_path_pattern = ''.join(lst)
                 self.logger.warning('scan num is added to saved l3 file name')
+        
+        if l4_path_pattern is not None:
             if do_l4 and 'S{0:03d}' not in l4_path_pattern:
                 lst = list(os.path.splitext(l4_path_pattern))
-                lst.insert(1,'-')
+                lst.insert(1,'S{0:03d}')
                 l4_path_pattern = ''.join(lst)
                 self.logger.warning('scan num is added to saved l4 file name')
                 
@@ -163,18 +211,19 @@ class TEMPO():
                 if attach_data:
                     dt_array.append(l3.start_python_datetime)
                     l3s.append(l3)
-                if save_data:
-                    l3.save_nc(date.strftime(l3_path_pattern.format(int(scan_num))),
-                              ['column_amount','local_hour','terrain_height'])
+                if l3_path_pattern is not None:
+                    l3_fn = date.strftime(l3_path_pattern.format(int(scan_num)))
+                    os.makedirs(os.path.split(l3_fn)[0],exist_ok=True)
+                    l3.save_nc(l3_fn,l3_save_fields)
                 if do_l4:
-                    l4 = l3.block_reduce(flux_grid_size)
-                    l4.calculate_gradient(**t.calculate_gradient_kw)
+                    l4 = l3.block_reduce(self.flux_grid_size)
+                    l4.calculate_gradient(**tempo_l2_daily.calculate_gradient_kw)
                     if attach_data:
                         l4s.append(l4)
-                    if save_data:
-                        l4.save_nc(date.strftime(l4_path_pattern.format(int(scan_num))),
-                                   ['column_amount','local_hour','terrain_height','wind_topo',\
-                                       'wind_column','wind_column_xy','wind_column_rs'])
+                    if l4_path_pattern is not None:
+                        l4_fn = date.strftime(l4_path_pattern.format(int(scan_num)))
+                        os.makedirs(os.path.split(l4_fn)[0],exist_ok=True)
+                        l4.save_nc(l4_fn,l4_save_fields)
             if attach_data:
                 dt_array = pd.to_datetime(dt_array)
                 self.l3s = Level3_List(dt_array,**wesn_dict)
