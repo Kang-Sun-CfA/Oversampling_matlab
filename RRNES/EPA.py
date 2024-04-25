@@ -111,19 +111,22 @@ class Point_Source(object):
         l_all['dist_to_f_km'] = dist_to_f_km
         l_all['chem_mask'] = chem_mask
         self.l3_all = l_all
-        # merge satellite emission rate and cems emission rate
         l3_df = ls.df
-        fe0 = pd.DataFrame(self.emission_df['NOx (mol/s)'].resample(l3_df.index.freq).mean())
-        fe0.index = fe0.index.to_period()
-        fe0 = fe0.rename(columns={'NOx (mol/s)':'Facility NOx'})
-        l3_df = l3_df.merge(fe0,left_index=True,right_index=True)
-        if 'tropomi' in self.emission_df.keys():
-            fe1 = pd.DataFrame(self.emission_df.loc[
-                self.emission_df['tropomi']
-                ]['NOx (mol/s)'].resample(l3_df.index.freq).mean())
-            fe1.index = fe1.index.to_period()
-            fe1 = fe1.rename(columns={'NOx (mol/s)':'Facility NOx with coverage'})
-            l3_df = l3_df.merge(fe1,left_index=True,right_index=True)
+        if self.emission_df is None:
+            self.logger.warning('emission_df (CEMS emission) is not given')
+        else:
+            # merge satellite emission rate and cems emission rate
+            fe0 = pd.DataFrame(self.emission_df['NOx (mol/s)'].resample(l3_df.index.freq).mean())
+            fe0.index = fe0.index.to_period()
+            fe0 = fe0.rename(columns={'NOx (mol/s)':'Facility NOx'})
+            l3_df = l3_df.merge(fe0,left_index=True,right_index=True)
+            if 'tropomi' in self.emission_df.keys():
+                fe1 = pd.DataFrame(self.emission_df.loc[
+                    self.emission_df['tropomi']
+                    ]['NOx (mol/s)'].resample(l3_df.index.freq).mean())
+                fe1.index = fe1.index.to_period()
+                fe1 = fe1.rename(columns={'NOx (mol/s)':'Facility NOx with coverage'})
+                l3_df = l3_df.merge(fe1,left_index=True,right_index=True)
         self.l3_df = l3_df
         self.dist_steps_km = dist_steps_km
         self.emission_rates = emission_rates
