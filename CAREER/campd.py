@@ -463,7 +463,7 @@ class CEMS():
         for year in pd.period_range(self.start_dt,self.end_dt,freq='1Y'):
             csv_name = year.strftime(attributes_path_pattern)
             self.logger.info('loading attribute file {}'.format(csv_name))
-            adf = pd.read_csv(csv_name,index_col=0)
+            adf = pd.read_csv(csv_name)
             mask = (adf['longitude']>=self.west)&(adf['longitude']<=self.east)&\
             (adf['latitude']>=self.south)&(adf['latitude']<=self.north)
             if states is not None:

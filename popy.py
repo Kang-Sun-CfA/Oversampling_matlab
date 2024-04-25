@@ -1781,7 +1781,9 @@ class Level3_Data(dict):
         wind_column_xy = dcdx*self['wind_e'] + dcdy*self['wind_n']
         wind_column_rs = dcdr*self['wind_ne'] + dcds*self['wind_nw'] \
             + r_dot_s*(dcdr*self['wind_nw'] + dcds*self['wind_ne'])
-        wind_column = np.nanmean(np.array([wind_column_xy,wind_column_rs]),axis=0)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(action='ignore', message='Mean of empty slice')
+            wind_column = np.nanmean(np.array([wind_column_xy,wind_column_rs]),axis=0)
         wind_column[np.isnan(wind_column_xy) & np.isnan(wind_column_rs)] = np.nan
         self['wind_column'] = wind_column
         if write_diagnostic:
@@ -1802,7 +1804,9 @@ class Level3_Data(dict):
             wind_topo_xy = vcd*(dcdx*self['wind_e'] + dcdy*self['wind_n'])
             wind_topo_rs = vcd*(dcdr*self['wind_ne'] + dcds*self['wind_nw'] \
                 + r_dot_s*(dcdr*self['wind_nw'] + dcds*self['wind_ne']))
-            wind_topo = np.nanmean(np.array([wind_topo_xy,wind_topo_rs]),axis=0)
+            with warnings.catch_warnings():
+                warnings.filterwarnings(action='ignore', message='Mean of empty slice')
+                wind_topo = np.nanmean(np.array([wind_topo_xy,wind_topo_rs]),axis=0)
             wind_topo[np.isnan(wind_topo_xy) & np.isnan(wind_topo_rs)] = np.nan
             self['wind_topo'] = wind_topo
             if write_diagnostic:
@@ -2153,38 +2157,18 @@ class Level3_Data(dict):
         return precision
         
     def fit_topography(self,mask=None,min_windtopo=None,max_windtopo=None,
-                       max_iter=None,outlier_std=None,fit_chem=None,remove_intercept=False,
+                       max_iter=1,outlier_std=None,fit_chem=None,remove_intercept=False,
                        if_bootstrap=False,if_xyrs=False):
         '''infer scale height for the wind-topography term
         '''
         import statsmodels.formula.api as smf
         import pandas as pd
-        if self.instrum == 'TROPOMI' and self.product == 'NO2':
-            min_windtopo = min_windtopo or 0.001
-            max_windtopo = max_windtopo or 0.1
-            max_iter = max_iter or 5
-            outlier_std = outlier_std or 2
-            fit_chem = fit_chem or True
-        elif self.instrum == 'TROPOMI' and self.product == 'SO2':
-            min_windtopo = min_windtopo or 0.001
-            max_windtopo = max_windtopo or 0.1
-            max_iter = max_iter or 2
-            outlier_std = outlier_std or 2
-            fit_chem = fit_chem or True
-        elif self.instrum == 'TROPOMI' and self.product == 'CH4':
-            min_windtopo = min_windtopo or 0.001
-            max_windtopo = max_windtopo or 0.1
-            max_iter = max_iter or 2
-            outlier_std = outlier_std or 2
-            fit_chem = fit_chem or False
-        elif self.instrum == 'TROPOMI' and self.product == 'CO':
-            min_windtopo = min_windtopo or 0.001
-            max_windtopo = max_windtopo or 0.1
-            max_iter = max_iter or 2
-            outlier_std = outlier_std or 2
+        min_windtopo = min_windtopo or 0.
+        max_windtopo = max_windtopo or 0.001
+        if self.product in ['CO','CH4','CO2','N2O']:
             fit_chem = fit_chem or False
         else:
-            self.logger.debug('not supported for this product')
+            fit_chem = fit_chem or True
             
         if 'column_amount' in self.keys():
             vcd = self['column_amount']
@@ -2257,19 +2241,17 @@ class Level3_Data(dict):
             self['wind_column_topo_rs'] = wc_topo_rs
     
     def fit_chemistry(self,mask=None,min_windtopo=None,max_windtopo=None,
-                      max_wind_column=None,max_iter=None,outlier_std=None):
+                      max_wind_column=None,max_iter=1,outlier_std=None):
         '''infer lifetime for the chemical loss term
         '''
         import statsmodels.formula.api as smf
         import pandas as pd
-        if self.instrum == 'TROPOMI' and self.product == 'NO2':
-            min_windtopo = min_windtopo or 0.
-            max_windtopo = max_windtopo or 0.001
+        min_windtopo = min_windtopo or 0.
+        max_windtopo = max_windtopo or 0.001
+        if self.product == 'NO2':
             max_wind_column = max_wind_column or 0.5e-9
-            max_iter = max_iter or 5
-            outlier_std = outlier_std or 2
         else:
-            self.logger.debug('not supported for this product')
+            max_wind_column = max_wind_column or np.inf
             
         wt = np.abs(self['wind_topo']/self['column_amount'])
         if 'wind_column_topo' not in self.keys():
