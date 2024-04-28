@@ -19,10 +19,10 @@ GeoAxes._pcolormesh_patched = Axes.pcolormesh
 from netCDF4 import Dataset
 from popy import Level3_Data, Level3_List, F_center2edge
 
-class Point_Source(object):
+class PointSource(object):
     '''class for a point emission source selected from CEMS facilities'''
     def __init__(self,lon,lat,name=None,emission_df=None,window_km=200,
-                 start_km=5,end_km=100,nstep=20):
+                 start_km=5,end_km=100,nstep=20,start_dt=None,end_dt=None):
         '''
         lon/lat:
             center coordinate of the point source
@@ -37,6 +37,8 @@ class Point_Source(object):
             start/end of distances to integrate flux to emission rate
         emission_df:
             a dataframe for emission time series, i.e., indexed from CEMS.fedf
+        start/end_dt:
+            datetime objects
         '''
         self.logger = logging.getLogger(__name__)
         self.lon = lon
@@ -47,6 +49,8 @@ class Point_Source(object):
         self.nstep = nstep
         self.start_km = start_km
         self.end_km = end_km
+        self.start_dt = start_dt
+        self.end_dt = end_dt
         
         km_per_lat = 111
         km_per_lon = 111*np.cos(lat/180*np.pi)
@@ -56,7 +60,10 @@ class Point_Source(object):
         self.east = lon+window_km/km_per_lon
         self.km_per_lat = km_per_lat
         self.km_per_lon = km_per_lon
-        
+    
+    def regrid_tropomi(self,**kwargs):
+        instrum = kwargs.pop('instrum','TROPOMI')
+        product = kwargs.pop('product','NO2')
     def get_satellite_emissions(self,l3s,l3_all=None,fit_topo_kw=None,fit_chem_kw=None,
                           chem_min_column_amount=None,chem_max_wind_column=None):
         '''interface popy level 3 objects. 
@@ -237,6 +244,22 @@ class CEMS():
         self.emissions_path_pattern = emissions_path_pattern or \
         '/projects/academic/kangsun/data/CEMS/emissions/%Y/%m/%d/%Y%m%d.csv'
     
+    def return_PointSource(self,facilityId=None,rank=None,**kwargs):
+        '''return a PointSource instance from facilities within CEMS instance'''
+        if facilityId is None:
+            facilityId = self.fadf.loc[self.fadf['rank']==rank].index[0]
+        if not hasattr(self,'fedf'):
+            self.logger.warning('loading the facility''s emission only')
+            self.get_facilities_emission_rate(fadf=self.fadf.loc[[facilityId]])
+        return PointSource(
+            start_dt=self.start_dt,
+            end_dt=self.end_dt,
+            lon=self.fadf.loc[facilityId].longitude,
+            lat=self.fadf.loc[facilityId].latitude,
+            name=f'{self.fadf.loc[facilityId].facilityName}, {self.fadf.loc[facilityId].stateCode}',
+            emission_df=self.fedf.loc[facilityId],**kwargs
+        )
+        
     def find_satellite_coverage(self,satellite_coverage_dict=None):
         '''add a column to fedf indicating if the time step has satellite coverage
         satellite_coverage_dict:
