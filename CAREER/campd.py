@@ -17,7 +17,8 @@ from matplotlib.axes import Axes
 from cartopy.mpl.geoaxes import GeoAxes
 GeoAxes._pcolormesh_patched = Axes.pcolormesh
 from netCDF4 import Dataset
-from popy import Level3_Data, Level3_List, F_center2edge
+from popy import (Level3_Data, Level3_List, F_center2edge,
+                  popy, datetime2datenum, datedev_py)
 
 class PointSource(object):
     '''class for a point emission source selected from CEMS facilities'''
@@ -61,9 +62,132 @@ class PointSource(object):
         self.km_per_lat = km_per_lat
         self.km_per_lon = km_per_lon
     
-    def regrid_tropomi(self,**kwargs):
-        instrum = kwargs.pop('instrum','TROPOMI')
-        product = kwargs.pop('product','NO2')
+    def regrid_tropomi(self,l2_path_pattern,
+                       product='NO2',
+                       l2_freq='1M',
+                       attach_l3=False,attach_l2=False,
+                       l3_path_pattern=None,
+                       l4_path_pattern=None,
+                       l3_freq='1D',
+                       gradient_kw=None,
+                       l3_save_fields=None,l4_save_fields=None,
+                       maxsza=75,maxcf=0.3,
+                       ncores=0,block_length=300,
+                       grid_size=0.01,flux_grid_size=0.05):
+        
+        # nudge west/south to align flux_grid_size
+        westmost = -180
+        west = westmost+np.floor((self.west-westmost)/flux_grid_size)*flux_grid_size
+        southmost = -90
+        south = southmost+np.floor((self.south-southmost)/flux_grid_size)*flux_grid_size
+        east = self.east
+        north = self.north
+        wesn_dict = dict(west=west,east=east,south=south,north=north)
+        
+        if gradient_kw is None:
+            do_l4 = False
+        else:
+            do_l4 = True
+        
+        l3_save_fields = l3_save_fields or ['column_amount']
+        l4_save_fields = l4_save_fields or \
+        ['column_amount','surface_altitude','wind_topo',\
+         'wind_column','wind_column_xy','wind_column_rs']
+        
+        if attach_l3:
+            l3s = []
+            dt_array = []
+            if do_l4:
+                l4s = []
+        
+        if attach_l2:
+            l2s = []
+        
+        mons = pd.period_range(self.start_dt,self.end_dt,freq=l2_freq)
+        for mon in mons:
+            start_dict = {k:v for k,v in zip(
+                ['start_year','start_month','start_day','start_hour','start_minute','start_second'],
+                mon.start_time.timetuple()[0:6])}
+            end_dict = {k:v for k,v in zip(
+                ['end_year','end_month','end_day','end_hour','end_minute','end_second'],
+                mon.end_time.timetuple()[0:6])}
+            # use one popy instance per month
+            s5p_l2_monthly = popy(instrum='TROPOMI',product=product,
+                                  **wesn_dict,
+                                  **start_dict,**end_dict,
+                                  grid_size=grid_size,
+                                  flux_grid_size=flux_grid_size,
+                                  error_model='ones',
+                                  oversampling_list=[
+                                      'surface_altitude','column_amount'])
+            s5p_l2_monthly.maxsza = maxsza
+            s5p_l2_monthly.maxcf = maxcf
+            
+            l2_fn = mon.strftime(l2_path_pattern)
+            
+            if not os.path.exists(l2_fn):
+                self.logger.warning('{} does not exist'.format(l2_fn))
+                continue
+            
+            s5p_l2_monthly.F_mat_reader(l2_fn)
+            
+            if s5p_l2_monthly.nl2 == 0:
+                self.logger.warning('{} has no data'.format(l2_fn))
+                continue
+            
+            if do_l4:
+                s5p_l2_monthly.F_prepare_gradient(**gradient_kw)
+            days = pd.period_range(mon.start_time,mon.end_time,freq=l3_freq)
+            days = days[(days.start_time>=self.start_dt)&\
+                       (days.end_time<=self.end_dt)]
+            matlab_dn = s5p_l2_monthly.l2g_data['UTC_matlab_datenum']
+            
+            for day in days:
+                mask = (matlab_dn>=datetime2datenum(day.start_time))&\
+                (matlab_dn<datetime2datenum(day.end_time))
+                if np.sum(mask) == 0:
+                    continue
+                l2g = {k:v[mask,] for k,v in s5p_l2_monthly.l2g_data.items()}
+                
+                l3 = s5p_l2_monthly.F_parallel_regrid(
+                    l2g_data=l2g,
+                    ncores=ncores,
+                    block_length=block_length)
+                l3.start_python_datetime = datedev_py(np.nanmin(l2g['UTC_matlab_datenum']))
+                l3.end_python_datetime = datedev_py(np.nanmax(l2g['UTC_matlab_datenum']))
+                
+                if attach_l2:
+                    l2s.append(l2g)
+                if attach_l3:
+                    dt_array.append(l3.start_python_datetime)
+                    l3s.append(l3)
+                if l3_path_pattern is not None:
+                    l3_fn = date.strftime(l3_path_pattern)
+                    os.makedirs(os.path.split(l3_fn)[0],exist_ok=True)
+                    l3.save_nc(l3_fn,l3_save_fields)
+                if do_l4:
+                    l4 = l3.block_reduce(flux_grid_size)
+                    l4.calculate_gradient(**s5p_l2_monthly.calculate_gradient_kw)
+                    if attach_l3:
+                        l4s.append(l4)
+                    if l4_path_pattern is not None:
+                        l4_fn = date.strftime(l4_path_pattern)
+                        os.makedirs(os.path.split(l4_fn)[0],exist_ok=True)
+                        l4.save_nc(l4_fn,l4_save_fields)
+        
+        if attach_l3:
+            dt_array = pd.to_datetime(dt_array)
+            self.l3s = Level3_List(dt_array,**wesn_dict)
+            for l in l3s:
+                self.l3s.add(l)
+            if do_l4:
+                self.l4s = Level3_List(dt_array,**wesn_dict)
+                for l in l4s:
+                    self.l4s.add(l)
+        if attach_l2:
+            self.l2s = l2s
+        
+        
     def get_satellite_emissions(self,l3s,l3_all=None,fit_topo_kw=None,fit_chem_kw=None,
                           chem_min_column_amount=None,chem_max_wind_column=None):
         '''interface popy level 3 objects. 
