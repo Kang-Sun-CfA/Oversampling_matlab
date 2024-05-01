@@ -22,13 +22,16 @@ from popy import (Level3_Data, Level3_List, F_center2edge,
 
 class PointSource(object):
     '''class for a point emission source selected from CEMS facilities'''
-    def __init__(self,lon,lat,name=None,emission_df=None,window_km=200,
+    def __init__(self,lon,lat,name=None,facilityId=None,
+                 emission_df=None,window_km=200,
                  start_km=5,end_km=100,nstep=20,start_dt=None,end_dt=None):
         '''
         lon/lat:
             center coordinate of the point source
         name:
             text description of the point source
+        facilityId:
+            id from cems list
         window_km:
             +/- winodw_km box from lon/lat will be the domain of satelite data,
             where fit_topo and fit_chem will be conducted
@@ -45,6 +48,7 @@ class PointSource(object):
         self.lon = lon
         self.lat = lat
         self.name = name
+        self.facilityId = facilityId
         self.emission_df = emission_df
         self.window_km = window_km
         self.nstep = nstep
@@ -162,7 +166,7 @@ class PointSource(object):
                     dt_array.append(l3.start_python_datetime)
                     l3s.append(l3)
                 if l3_path_pattern is not None:
-                    l3_fn = date.strftime(l3_path_pattern)
+                    l3_fn = day.strftime(l3_path_pattern)
                     os.makedirs(os.path.split(l3_fn)[0],exist_ok=True)
                     l3.save_nc(l3_fn,l3_save_fields)
                 if do_l4:
@@ -171,7 +175,7 @@ class PointSource(object):
                     if attach_l3:
                         l4s.append(l4)
                     if l4_path_pattern is not None:
-                        l4_fn = date.strftime(l4_path_pattern)
+                        l4_fn = day.strftime(l4_path_pattern)
                         os.makedirs(os.path.split(l4_fn)[0],exist_ok=True)
                         l4.save_nc(l4_fn,l4_save_fields)
         
@@ -381,6 +385,7 @@ class CEMS():
             lon=self.fadf.loc[facilityId].longitude,
             lat=self.fadf.loc[facilityId].latitude,
             name=f'{self.fadf.loc[facilityId].facilityName}, {self.fadf.loc[facilityId].stateCode}',
+            facilityId=facilityId,
             emission_df=self.fedf.loc[facilityId],**kwargs
         )
         
