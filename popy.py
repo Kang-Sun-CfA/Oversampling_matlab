@@ -4270,7 +4270,7 @@ class popy(object):
         created on 2022/07/20
         '''
         if unique_layer_identifier is None:
-            self.logger.warning('make sure your l2 data are not overlapping too much, otherwise provide unique_layer_identifier')
+            self.logger.info('make sure your l2 data are not overlapping too much, otherwise provide unique_layer_identifier')
         
         interp_met_kw = interp_met_kw or {}
         calculate_gradient_kw = calculate_gradient_kw or {}

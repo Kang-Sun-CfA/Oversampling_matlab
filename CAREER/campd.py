@@ -9,6 +9,7 @@ import datetime as dt
 import logging
 import matplotlib.pyplot as plt
 from matplotlib.patches import Ellipse, Rectangle
+from matplotlib.collections import PolyCollection
 from scipy.interpolate import interp1d, RegularGridInterpolator
 import seaborn as sns
 import cartopy.crs as ccrs
@@ -66,6 +67,56 @@ class PointSource(object):
         self.km_per_lat = km_per_lat
         self.km_per_lon = km_per_lon
     
+    def plot_l2_quiver(self,date,**kwargs):
+        if hasattr(self,'dt_array'):
+            mask = self.dt_array.date == date
+        else:
+            mask = self.l3s.df.index.date == date
+        if np.sum(mask) != 1:
+            self.logger.error('{} l2 found'.format(np.sum(mask)))
+            return
+        l2 = self.l2s[np.nonzero(mask)[0][0]]
+        ax = kwargs.pop('ax',None)
+        if ax is None:
+            figsize = kwargs.pop('figsize',(10,5))
+            fig,ax = plt.subplots(1,1,constrained_layout=True,figsize=figsize,
+                                  subplot_kw={"projection": ccrs.PlateCarree()})
+        else:
+            fig = None
+        cmap = kwargs.pop('cmap','jet')
+        vmin = kwargs.pop('vmin',None)
+        vmax = kwargs.pop('vmax',None)
+        scale = kwargs.pop('scale',1e2)
+        width = kwargs.pop('width',0.005)
+        alpha = kwargs.pop('alpha',1)
+        edgecolors = kwargs.pop('edgecolors','none')
+        cartopy_scale = kwargs.pop('cartopy_scale','50m')
+        draw_colorbar = kwargs.pop('draw_colorbar',True)
+        label = kwargs.pop('label','column_amount')
+        shrink = kwargs.pop('shrink',0.75)
+        extent = kwargs.pop('extent',[self.west, self.east, self.south, self.north])
+        u = l2['wind_e']
+        v = l2['wind_n']
+        x = l2['lonc']
+        y = l2['latc']
+        verts = [np.array([lonr,latr]).T for lonr,latr in zip(l2['lonr'],l2['latr'])]
+        collection = PolyCollection(verts,
+                             array=l2['column_amount'],
+                         cmap=cmap,edgecolors=edgecolors)
+        collection.set_alpha(alpha)
+        collection.set_clim(vmin=vmin,vmax=vmax)
+        ax.add_collection(collection)
+        quiver = ax.quiver(x,y,u,v,scale=scale,width=width)
+        ax.coastlines(resolution=cartopy_scale, color='black', linewidth=1)
+        ax.add_feature(cfeature.STATES.with_scale(cartopy_scale), facecolor='None', edgecolor='k', 
+                           linestyle='-',zorder=0,lw=0.5)
+        if draw_colorbar:
+            cb = plt.colorbar(collection,ax=ax,label=label,shrink=shrink)
+        else:
+            cb = None
+        ax.set_extent(extent)
+        figout = dict(fig=fig,ax=ax,collection=collection,quiver=quiver,cb=cb)
+    
     def regrid_tropomi(self,l2_path_pattern,
                        product='NO2',
                        l2_freq='1M',
@@ -92,6 +143,8 @@ class PointSource(object):
             do_l4 = False
         else:
             do_l4 = True
+            # handle unique_layer_identifier seperately
+            unique_layer_identifier = gradient_kw.pop('unique_layer_identifier',None)
         
         l3_save_fields = l3_save_fields or ['column_amount']
         l4_save_fields = l4_save_fields or \
@@ -100,13 +153,15 @@ class PointSource(object):
         
         if attach_l3:
             l3s = []
-            dt_array = []
             if do_l4:
                 l4s = []
         
         if attach_l2:
             l2s = []
         
+        if attach_l2 or attach_l3:
+            dt_array = []
+            
         mons = pd.period_range(self.start_dt,self.end_dt,freq=l2_freq)
         for mon in mons:
             start_dict = {k:v for k,v in zip(
@@ -139,12 +194,14 @@ class PointSource(object):
                 self.logger.warning('{} has no data'.format(l2_fn))
                 continue
             
+            matlab_dn = s5p_l2_monthly.l2g_data['UTC_matlab_datenum']
+            
             if do_l4:
                 s5p_l2_monthly.F_prepare_gradient(**gradient_kw)
+            
             days = pd.period_range(mon.start_time,mon.end_time,freq=l3_freq)
             days = days[(days.start_time>=self.start_dt)&\
                        (days.end_time<=self.end_dt)]
-            matlab_dn = s5p_l2_monthly.l2g_data['UTC_matlab_datenum']
             
             for day in days:
                 mask = (matlab_dn>=datetime2datenum(day.start_time))&\
@@ -153,25 +210,43 @@ class PointSource(object):
                     continue
                 l2g = {k:v[mask,] for k,v in s5p_l2_monthly.l2g_data.items()}
                 
+                start_python_datetime = datedev_py(np.nanmin(l2g['UTC_matlab_datenum']))
+                end_python_datetime = datedev_py(np.nanmax(l2g['UTC_matlab_datenum']))
+                
+                if attach_l2:
+                    l2s.append(l2g)
+                
+                if attach_l2 or attach_l3:
+                    dt_array.append(start_python_datetime)
+                
                 l3 = s5p_l2_monthly.F_parallel_regrid(
                     l2g_data=l2g,
                     ncores=ncores,
                     block_length=block_length)
-                l3.start_python_datetime = datedev_py(np.nanmin(l2g['UTC_matlab_datenum']))
-                l3.end_python_datetime = datedev_py(np.nanmax(l2g['UTC_matlab_datenum']))
                 
-                if attach_l2:
-                    l2s.append(l2g)
+                l3.start_python_datetime = start_python_datetime
+                l3.end_python_datetime = end_python_datetime
+                
                 if attach_l3:
-                    dt_array.append(l3.start_python_datetime)
                     l3s.append(l3)
+                
                 if l3_path_pattern is not None:
                     l3_fn = day.strftime(l3_path_pattern)
                     os.makedirs(os.path.split(l3_fn)[0],exist_ok=True)
                     l3.save_nc(l3_fn,l3_save_fields)
+                
                 if do_l4:
-                    l4 = l3.block_reduce(flux_grid_size)
-                    l4.calculate_gradient(**s5p_l2_monthly.calculate_gradient_kw)
+                    if unique_layer_identifier not in l2g.keys():
+                        l4 = l3.block_reduce(flux_grid_size)
+                        l4.calculate_gradient(**s5p_l2_monthly.calculate_gradient_kw)
+                    else:
+                        self.logger.info('l2g_data will be divided into a list according to {}'.format(unique_layer_identifier))
+                        unique_values,unique_idx = np.unique(l2g[unique_layer_identifier],return_inverse=True)
+                        l2g = [{k:v[unique_idx==i,] for k,v in l2g.items()} for i in range(len(unique_values))]
+                        l4 = s5p_l2_monthly.F_parallel_regrid(
+                                            l2g_data=l2g,
+                                            ncores=ncores,
+                                            block_length=block_length)
                     if attach_l3:
                         l4s.append(l4)
                     if l4_path_pattern is not None:
@@ -179,8 +254,11 @@ class PointSource(object):
                         os.makedirs(os.path.split(l4_fn)[0],exist_ok=True)
                         l4.save_nc(l4_fn,l4_save_fields)
         
-        if attach_l3:
+        if attach_l2 or attach_l3:
             dt_array = pd.to_datetime(dt_array)
+            self.dt_array = dt_array
+        
+        if attach_l3:
             self.l3s = Level3_List(dt_array,**wesn_dict)
             for l in l3s:
                 self.l3s.add(l)
