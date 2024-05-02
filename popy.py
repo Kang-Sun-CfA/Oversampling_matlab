@@ -918,6 +918,68 @@ def F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,\
         sounding_interp[fn] = my_interpolating_function((sounding_lon,sounding_lat,sounding_datenum))
     return sounding_interp
 
+def F_interp_hrrr_grib2(sounding_lon,sounding_lat,sounding_datenum,
+                       searchString='GRD:80 m',
+                       interp_fields=None):
+    '''interpolate fields from hrrr data, handled by herbie
+    sounding_lon:
+        longitude for interpolation
+    sounding_lat:
+        latitude for interpolation
+    sounding_datenum:
+        time for interpolation in matlab datenum double format
+    searchString:
+        input to FastHerbie, grib2 files will be downloaded if not exist
+    interp_fields:
+        variables to interpolate from hrrr
+    created on 2024/05/02
+    '''
+    from scipy.interpolate import RegularGridInterpolator
+    from pyproj import Proj
+    from herbie import FastHerbie
+    if interp_fields is None:
+        interp_fields = ['u','v']
+    
+    p2 = Proj(proj='lcc',R=6371.229, lat_1=38.5, lat_2=38.5,lon_0=262.5,lat_0=38.5)
+    sounding_x,sounding_y = p2(sounding_lon,sounding_lat)
+        
+    hrrr_dn = []
+    hrrr_dt = []
+    for day_start_dn in arange_(np.floor(np.min(sounding_datenum)),
+                                np.ceil(np.max(sounding_datenum)),1):
+        mask = (sounding_datenum>=day_start_dn) &\
+            (sounding_datenum<day_start_dn+1)
+        if np.sum(mask) == 0:
+            continue
+        day_dn = sounding_datenum[mask]
+        day_start_dt = pd.to_datetime(datedev_py(np.min(day_dn)))
+        day_end_dt = pd.to_datetime(datedev_py(np.max(day_dn)))
+        herbie_hours = pd.date_range(day_start_dt.floor('h'),
+                                     day_end_dt.ceil('h'),freq='1H').to_series()
+        hrrr_datenum = np.array([datetime2datenum(hdt) for hdt in herbie_hours])
+        hrrr_dn = np.hstack((hrrr_dn,hrrr_datenum))
+        hrrr_dt.append(herbie_hours)
+    hrrr_dt = pd.DatetimeIndex(pd.concat(hrrr_dt))
+    
+    sounding_interp = {}
+    if len(hrrr_dt) == 0:
+        for fn in interp_fields:
+            sounding_interp[fn] = sounding_lon*np.nan
+        return sounding_interp
+    
+    FH = FastHerbie(hrrr_dt,fxx=[0])
+    ds = FH.xarray(searchString,remove_grib=False)
+    hrrr_x,hrrr_y = p2(ds['longitude'],ds['latitude'])
+    hrrr_x = np.mean(hrrr_x,axis=0)
+    hrrr_y = np.mean(hrrr_y,axis=1)
+    
+    for fn in interp_fields:
+        f = RegularGridInterpolator((hrrr_x,hrrr_y,hrrr_dn),
+                                    ds[fn].data.transpose((2,1,0)),
+                                    bounds_error=False,fill_value=np.nan)
+        sounding_interp[fn] = f((sounding_x,sounding_y,sounding_datenum))
+    return sounding_interp
+
 def F_interp_hrrr_mat(sounding_lon,sounding_lat,sounding_datenum,
                       file_pattern='/projects/academic/kangsun/data/hrrr/%Y%m%d/hrrr_sfc_uv.mat',
                       interp_fields=None):
@@ -9411,8 +9473,8 @@ class popy(object):
             self.l2g_data['gcrs_plevel'] = sounding_pEdge
             self.logger.info('GEOS-Chem profiles sampled at level 2 g locations')
     
-    def F_interp_met(self,which_met,met_dir,interp_fields,fn_header=None,
-                     time_collection='inst3'):
+    def F_interp_met(self,which_met,met_dir=None,interp_fields=None,fn_header=None,
+                     time_collection='inst3',searchString='GRD:80 m'):
         """
         finally made the decision to integrate all meteorological interopolation
         to the same framework.
@@ -9427,6 +9489,8 @@ class popy(object):
             in general should denote domain location of met data
         time_collection:
             only useful for geos fp. see F_interp_geos_mat
+        searchString:
+            only useful for hrrr. see F_interp_hrrr_grib2
         created on 2020/03/04
         """
         if self.nl2 == 0:
@@ -9473,8 +9537,9 @@ class popy(object):
                 self.logger.info(key+' from MERRA2 is sampled to L2g coordinate/time')
                 self.l2g_data['merra2_'+key] = np.float32(sounding_interp[key])
         elif which_met.lower() == 'hrrr':
-            sounding_interp = F_interp_hrrr_mat(sounding_lon,sounding_lat,sounding_datenum,
-                                                met_dir,interp_fields)
+            sounding_interp = F_interp_hrrr_grib2(sounding_lon,sounding_lat,sounding_datenum,
+                                                searchString=searchString,
+                                                interp_fields=interp_fields)
             for key in sounding_interp.keys():
                 self.logger.info(key+' from HRRR is sampled to L2g coordinate/time')
                 self.l2g_data['hrrr_'+key] = np.float32(sounding_interp[key])
