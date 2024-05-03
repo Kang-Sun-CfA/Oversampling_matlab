@@ -942,8 +942,7 @@ def F_interp_hrrr_grib2(sounding_lon,sounding_lat,sounding_datenum,
     
     p2 = Proj(proj='lcc',R=6371.229, lat_1=38.5, lat_2=38.5,lon_0=262.5,lat_0=38.5)
     sounding_x,sounding_y = p2(sounding_lon,sounding_lat)
-        
-    hrrr_dn = []
+    
     hrrr_dt = []
     for day_start_dn in arange_(np.floor(np.min(sounding_datenum)),
                                 np.ceil(np.max(sounding_datenum)),1):
@@ -956,10 +955,9 @@ def F_interp_hrrr_grib2(sounding_lon,sounding_lat,sounding_datenum,
         day_end_dt = pd.to_datetime(datedev_py(np.max(day_dn)))
         herbie_hours = pd.date_range(day_start_dt.floor('h'),
                                      day_end_dt.ceil('h'),freq='1H').to_series()
-        hrrr_datenum = np.array([datetime2datenum(hdt) for hdt in herbie_hours])
-        hrrr_dn = np.hstack((hrrr_dn,hrrr_datenum))
         hrrr_dt.append(herbie_hours)
     hrrr_dt = pd.DatetimeIndex(pd.concat(hrrr_dt))
+    hrrr_dn = np.array([datetime2datenum(hdt) for hdt in hrrr_dt])
     
     sounding_interp = {}
     if len(hrrr_dt) == 0:
@@ -969,6 +967,23 @@ def F_interp_hrrr_grib2(sounding_lon,sounding_lat,sounding_datenum,
     
     FH = FastHerbie(hrrr_dt,fxx=[0])
     ds = FH.xarray(searchString,remove_grib=False)
+    mask_data = hrrr_dt.isin(ds['time'].data)
+    count = 0
+    while any(~mask_data):
+        count += 1
+        logging.warning('hrrr data cannot be found at {}'.format(hrrr_dt[~mask_data]))
+        hrrr_dts = pd.Series(hrrr_dt)
+        hrrr_dts[~mask_data] = hrrr_dts[~mask_data]+datetime.timedelta(seconds=3600)
+        hrrr_dt = pd.DatetimeIndex(hrrr_dts)
+        logging.warning('they are replaced by data at {}'.format(hrrr_dt[~mask_data]))
+        hrrr_dt = hrrr_dt.drop_duplicates()
+        hrrr_dn = np.array([datetime2datenum(hdt) for hdt in hrrr_dt])
+        FH = FastHerbie(hrrr_dt,fxx=[0])
+        ds = FH.xarray(searchString,remove_grib=False)
+        mask_data = hrrr_dt.isin(ds['time'].data)
+        if count > 5:
+            logging.warning('too many missing hours!')
+    
     hrrr_x,hrrr_y = p2(ds['longitude'],ds['latitude'])
     hrrr_x = np.mean(hrrr_x,axis=0)
     hrrr_y = np.mean(hrrr_y,axis=1)
