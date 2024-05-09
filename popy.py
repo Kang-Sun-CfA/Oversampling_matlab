@@ -918,9 +918,7 @@ def F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,\
         sounding_interp[fn] = my_interpolating_function((sounding_lon,sounding_lat,sounding_datenum))
     return sounding_interp
 
-def F_interp_hrrr_grib2(sounding_lon,sounding_lat,sounding_datenum,
-                       searchString='GRD:80 m',
-                       interp_fields=None):
+def F_interp_hrrr_uv(sounding_lon,sounding_lat,sounding_datenum,altitudes=None):
     '''interpolate fields from hrrr data, handled by herbie
     sounding_lon:
         longitude for interpolation
@@ -928,18 +926,129 @@ def F_interp_hrrr_grib2(sounding_lon,sounding_lat,sounding_datenum,
         latitude for interpolation
     sounding_datenum:
         time for interpolation in matlab datenum double format
-    searchString:
-        input to FastHerbie, grib2 files will be downloaded if not exist
-    interp_fields:
-        variables to interpolate from hrrr
+    altitudes:
+        a list of atitude values at which to interpret hrrr 3d wind
+    created on 2024/05/07
+    '''
+    from scipy.interpolate import RegularGridInterpolator
+    from pyproj import Proj
+    from herbie import FastHerbie
+    
+    scale_height = 7500
+
+    pressures = [700,850,925,1000]
+    u_strs = [':UGRD:{} mb:anl'.format(p) for p in pressures]
+    v_strs = [':VGRD:{} mb:anl'.format(p) for p in pressures]
+
+    uv_search = '({})'.format('|'.join(u_strs+v_strs))
+    ps_search = ':PRES:surface:anl*'
+    
+    if altitudes is None:
+        altitudes = [500]
+    
+    p2 = Proj(proj='lcc',R=6371.229, lat_1=38.5, lat_2=38.5,lon_0=262.5,lat_0=38.5)
+    sounding_x,sounding_y = p2(sounding_lon,sounding_lat)
+
+    hrrr_dt = []
+    for day_start_dn in arange_(np.floor(np.min(sounding_datenum)),
+                                np.ceil(np.max(sounding_datenum)),1):
+        mask = (sounding_datenum>=day_start_dn) &\
+            (sounding_datenum<day_start_dn+1)
+        if np.sum(mask) == 0:
+            continue
+        day_dn = sounding_datenum[mask]
+        day_start_dt = pd.to_datetime(datedev_py(np.min(day_dn)))
+        day_end_dt = pd.to_datetime(datedev_py(np.max(day_dn)))
+        herbie_hours = pd.date_range(day_start_dt.floor('h'),
+                                     day_end_dt.ceil('h'),freq='1H').to_series()
+        hrrr_dt.append(herbie_hours)
+    hrrr_dt = pd.DatetimeIndex(pd.concat(hrrr_dt))
+    hrrr_dn = np.array([datetime2datenum(hdt) for hdt in hrrr_dt])
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", 'This pattern is interpreted as a regular expression')
+        FH = FastHerbie(hrrr_dt,fxx=[0])
+        ds_uv = FH.xarray(uv_search,remove_grib=False)
+        ds_ps = FH.xarray(ps_search,remove_grib=False)
+
+    mask_uv = hrrr_dt.isin(ds_uv['time'].data)
+    mask_ps = hrrr_dt.isin(ds_ps['time'].data)
+    if not np.array_equal(mask_uv,mask_ps):
+        logging.warning('uv and sp data missings are different around {}'.format(hrrr_dt[0]))
+    mask_data = (mask_uv & mask_ps)
+    
+    count = 0
+    while any(~mask_data):
+        count += 1
+        logging.warning('hrrr data cannot be found at {}'.format(hrrr_dt[~mask_data]))
+        hrrr_dts = pd.Series(hrrr_dt)
+        hrrr_dts[~mask_data] = hrrr_dts[~mask_data]+datetime.timedelta(seconds=3600)
+        hrrr_dt = pd.DatetimeIndex(hrrr_dts)
+        logging.warning('they are replaced by data at {}'.format(hrrr_dt[~mask_data]))
+        hrrr_dt = hrrr_dt.drop_duplicates()
+        hrrr_dn = np.array([datetime2datenum(hdt) for hdt in hrrr_dt])
+        del ds_uv,ds_ps,FH
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", 'This pattern is interpreted as a regular expression')
+            FH = FastHerbie(hrrr_dt,fxx=[0])
+            ds_uv = FH.xarray(uv_search,remove_grib=False)
+            ds_ps = FH.xarray(ps_search,remove_grib=False)
+
+        mask_uv = hrrr_dt.isin(ds_uv['time'].data)
+        mask_ps = hrrr_dt.isin(ds_ps['time'].data)
+        mask_data = (mask_uv & mask_ps)
+        if count > 5:
+            logging.warning('too many missing hours!')
+
+    hrrr_x,hrrr_y = p2(ds_ps['longitude'],ds_ps['latitude'])
+    hrrr_x = np.mean(hrrr_x,axis=0)
+    hrrr_y = np.mean(hrrr_y,axis=1)
+    hrrr_hPa = ds_uv['isobaricInhPa'].data
+    
+    sounding_interp = {}
+    f = RegularGridInterpolator((hrrr_x,hrrr_y,hrrr_dn),
+                                ds_ps['sp'].data.transpose((2,1,0)),
+                                bounds_error=False,fill_value=np.nan)
+    sounding_interp['sp'] = f((sounding_x,sounding_y,sounding_datenum))
+    
+    for altitude in altitudes:
+        sounding_hPa = sounding_interp['sp']/100*np.exp(-altitude/scale_height)
+        mask = sounding_hPa>np.max(hrrr_hPa)
+        if any(mask):
+            logging.warning(
+                'At {}m, {} sounding_hPa larger than bound {}'.format(
+                    altitude,sum(mask),np.max(hrrr_hPa)))
+            sounding_hPa[mask] = np.max(hrrr_hPa)
+        mask = sounding_hPa<np.min(hrrr_hPa)
+        if any(mask):
+            logging.warning(
+                'At {}m, {} sounding_hPa smaller than bound {}'.format(
+                    altitude,sum(mask),np.min(hrrr_hPa)))
+            sounding_hPa[mask] = np.min(hrrr_hPa)
+        for fn in ['u','v']:
+            f = RegularGridInterpolator((hrrr_x,hrrr_y,hrrr_hPa,hrrr_dn),
+                                        ds_uv[fn].data.transpose((3,2,1,0)),
+                                        bounds_error=False,fill_value=np.nan)
+            sounding_interp['{}{}'.format(fn,altitude)] = f(
+                (sounding_x,sounding_y,sounding_hPa,sounding_datenum))
+        
+    del ds_uv,ds_ps,FH
+    return sounding_interp
+
+def F_interp_hrrr_uv80(sounding_lon,sounding_lat,sounding_datenum):
+    '''interpolate fields from hrrr data, handled by herbie
+    sounding_lon:
+        longitude for interpolation
+    sounding_lat:
+        latitude for interpolation
+    sounding_datenum:
+        time for interpolation in matlab datenum double format
     created on 2024/05/02
     '''
     from scipy.interpolate import RegularGridInterpolator
     from pyproj import Proj
     from herbie import FastHerbie
-    if interp_fields is None:
-        interp_fields = ['u','v']
-    
+    search = 'GRD:80 m'
     p2 = Proj(proj='lcc',R=6371.229, lat_1=38.5, lat_2=38.5,lon_0=262.5,lat_0=38.5)
     sounding_x,sounding_y = p2(sounding_lon,sounding_lat)
     
@@ -961,12 +1070,12 @@ def F_interp_hrrr_grib2(sounding_lon,sounding_lat,sounding_datenum,
     
     sounding_interp = {}
     if len(hrrr_dt) == 0:
-        for fn in interp_fields:
-            sounding_interp[fn] = sounding_lon*np.nan
+        for fn in ['u','v']:
+            sounding_interp[fn+'80'] = sounding_lon*np.nan
         return sounding_interp
     
     FH = FastHerbie(hrrr_dt,fxx=[0])
-    ds = FH.xarray(searchString,remove_grib=False)
+    ds = FH.xarray(search,remove_grib=False)
     mask_data = hrrr_dt.isin(ds['time'].data)
     count = 0
     while any(~mask_data):
@@ -979,7 +1088,7 @@ def F_interp_hrrr_grib2(sounding_lon,sounding_lat,sounding_datenum,
         hrrr_dt = hrrr_dt.drop_duplicates()
         hrrr_dn = np.array([datetime2datenum(hdt) for hdt in hrrr_dt])
         FH = FastHerbie(hrrr_dt,fxx=[0])
-        ds = FH.xarray(searchString,remove_grib=False)
+        ds = FH.xarray(search,remove_grib=False)
         mask_data = hrrr_dt.isin(ds['time'].data)
         if count > 5:
             logging.warning('too many missing hours!')
@@ -988,84 +1097,11 @@ def F_interp_hrrr_grib2(sounding_lon,sounding_lat,sounding_datenum,
     hrrr_x = np.mean(hrrr_x,axis=0)
     hrrr_y = np.mean(hrrr_y,axis=1)
     
-    for fn in interp_fields:
+    for fn in ['u','v']:
         f = RegularGridInterpolator((hrrr_x,hrrr_y,hrrr_dn),
                                     ds[fn].data.transpose((2,1,0)),
                                     bounds_error=False,fill_value=np.nan)
-        sounding_interp[fn] = f((sounding_x,sounding_y,sounding_datenum))
-    return sounding_interp
-
-def F_interp_hrrr_mat(sounding_lon,sounding_lat,sounding_datenum,
-                      file_pattern='/projects/academic/kangsun/data/hrrr/%Y%m%d/hrrr_sfc_uv.mat',
-                      interp_fields=None):
-    '''interpolate fields from hrrr data, concatenated as daily mat files
-    sounding_lon:
-        longitude for interpolation
-    sounding_lat:
-        latitude for interpolation
-    sounding_datenum:
-        time for interpolation in matlab datenum double format
-    file_pattern:
-        pattern of daily met files, similar to l2_path_pattern
-    interp_fields:
-        variables to interpolate from hrrr, only 2d fields are supported
-    created on 2022/06/13
-    '''
-    from scipy.io import loadmat
-    from scipy.interpolate import RegularGridInterpolator
-    from pyproj import Proj
-    import glob
-
-    interp_fields = interp_fields or ['u80','v80']
-    p2 = Proj(proj='lcc',R=6371.229, lat_1=38.5, lat_2=38.5,lon_0=262.5,lat_0=38.5)
-    sounding_x,sounding_y = p2(sounding_lon,sounding_lat)
-    start_datenum = np.amin(sounding_datenum)
-    end_datenum = np.amax(sounding_datenum)
-    start_datetime = datedev_py(start_datenum)
-    end_datetime = datedev_py(end_datenum)
-    
-    days = (end_datetime-start_datetime).days+1
-    DATES = [start_datetime + datetime.timedelta(days=d) for d in range(days)]
-    hrrr_data = {}
-    
-    for date in DATES:
-        flist = glob.glob(date.strftime(file_pattern))
-        if len(flist) == 0:
-            logging.warning('no file found on '+date.strftime('%Y%m%d'))
-            continue
-        if len(flist) > 1:
-            logging.warning('{} files found on {}, using the first one'.format(len(flist),date.strftime('%Y%m%d')))
-        fn = flist[0]
-        
-        if not hrrr_data:
-            d = loadmat(fn,squeeze_me=True)
-            hrrr_data['x'] = d['x']
-            hrrr_data['y'] = d['y']
-            
-            hrrr_data['datenum'] = d['datenum']
-            for field in interp_fields:
-                # was read in as 3-d array in time, y, x; transpose to x, y, time
-                hrrr_data[field] = d[field].transpose((2,1,0))
-                
-        else:
-            d = loadmat(fn,squeeze_me=True)
-            hrrr_data['datenum'] = np.append(hrrr_data['datenum'],d['datenum'])
-            for field in interp_fields:
-                # was read in as 3-d array in time, y, x; transpose to x, y, time
-                hrrr_data[field] = np.append(hrrr_data[field],d[field].transpose((2,1,0)),axis=2)
-        
-        
-    sounding_interp = {}
-    if not hrrr_data:
-        for fn in interp_fields:
-            sounding_interp[fn] = sounding_lon*np.nan
-        return sounding_interp
-    # interpolate
-    for fn in interp_fields:
-        my_interpolating_function = \
-        RegularGridInterpolator((hrrr_data['x'],hrrr_data['y'],hrrr_data['datenum']),\
-                                hrrr_data[fn],bounds_error=False,fill_value=np.nan)
-        sounding_interp[fn] = my_interpolating_function((sounding_x,sounding_y,sounding_datenum))
+        sounding_interp[fn+'80'] = f((sounding_x,sounding_y,sounding_datenum))
     return sounding_interp
 
 def F_interp_geos_mat(sounding_lon,sounding_lat,sounding_datenum,\
@@ -9489,7 +9525,7 @@ class popy(object):
             self.logger.info('GEOS-Chem profiles sampled at level 2 g locations')
     
     def F_interp_met(self,which_met,met_dir=None,interp_fields=None,fn_header=None,
-                     time_collection='inst3',searchString='GRD:80 m'):
+                     time_collection='inst3',altitudes=None):
         """
         finally made the decision to integrate all meteorological interopolation
         to the same framework.
@@ -9499,13 +9535,13 @@ class popy(object):
             directory containing those met data, data structure should be consistently
             Y%Y/M%M/D%D, except for HRRR (implemented in 2022 and file_path should be used)
         interp_fields:
-            variables to interpolate from met data, only 2d fields are supported
+            variables to interpolate from met data
         fn_header:
             in general should denote domain location of met data
         time_collection:
             only useful for geos fp. see F_interp_geos_mat
-        searchString:
-            only useful for hrrr. see F_interp_hrrr_grib2
+        altitudes:
+            a list of values in meter to sample hrrr 3d wind
         created on 2020/03/04
         """
         if self.nl2 == 0:
@@ -9551,13 +9587,21 @@ class popy(object):
             for key in sounding_interp.keys():
                 self.logger.info(key+' from MERRA2 is sampled to L2g coordinate/time')
                 self.l2g_data['merra2_'+key] = np.float32(sounding_interp[key])
-        elif which_met.lower() == 'hrrr':
-            sounding_interp = F_interp_hrrr_grib2(sounding_lon,sounding_lat,sounding_datenum,
-                                                searchString=searchString,
-                                                interp_fields=interp_fields)
-            for key in sounding_interp.keys():
-                self.logger.info(key+' from HRRR is sampled to L2g coordinate/time')
-                self.l2g_data['hrrr_'+key] = np.float32(sounding_interp[key])
+        elif which_met.lower() in ['hrrr']:
+            if 'u80' in (interp_fields or []):
+                sounding_interp = F_interp_hrrr_uv80(sounding_lon,sounding_lat,sounding_datenum)
+                for key in sounding_interp.keys():
+                    self.logger.info(key+' from HRRR is sampled to L2g coordinate/time')
+                    self.l2g_data['hrrr_'+key] = np.float32(sounding_interp[key])
+            if altitudes is not None:
+                if 80 in altitudes:
+                    altitudes = np.array(altitudes)
+                    self.logger.warning('altitude of 80 m is replaced by 81 m')
+                    altitudes[altitudes==80] = 81
+                sounding_interp = F_interp_hrrr_uv(sounding_lon,sounding_lat,sounding_datenum,altitudes)
+                for key in sounding_interp.keys():
+                    self.logger.info(key+' from HRRR is sampled to L2g coordinate/time')
+                    self.l2g_data['hrrr_'+key] = np.float32(sounding_interp[key])
     
     def F_label_HMS(self,HMS_dir,fn_date_identifier='%Y/%m/%d/hms_smoke%Y%m%d.shp'):
         '''

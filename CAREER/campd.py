@@ -87,8 +87,9 @@ class PointSource(object):
         vmin = kwargs.pop('vmin',None)
         vmax = kwargs.pop('vmax',None)
         scale = kwargs.pop('scale',1e2)
-        width = kwargs.pop('width',0.005)
+        width = kwargs.pop('width',0.002)
         alpha = kwargs.pop('alpha',1)
+        func = kwargs.pop('func',lambda x:x)
         edgecolors = kwargs.pop('edgecolors','none')
         cartopy_scale = kwargs.pop('cartopy_scale','50m')
         draw_colorbar = kwargs.pop('draw_colorbar',True)
@@ -101,7 +102,7 @@ class PointSource(object):
         y = l2['latc']
         verts = [np.array([lonr,latr]).T for lonr,latr in zip(l2['lonr'],l2['latr'])]
         collection = PolyCollection(verts,
-                             array=l2['column_amount'],
+                             array=func(l2['column_amount']),
                          cmap=cmap,edgecolors=edgecolors)
         collection.set_alpha(alpha)
         collection.set_clim(vmin=vmin,vmax=vmax)
@@ -116,6 +117,7 @@ class PointSource(object):
             cb = None
         ax.set_extent(extent)
         figout = dict(fig=fig,ax=ax,collection=collection,quiver=quiver,cb=cb)
+        return figout
     
     def regrid_tropomi(self,l2_path_pattern,
                        product='NO2',
