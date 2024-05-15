@@ -4102,7 +4102,7 @@ class popy(object):
             self.min_Quality_Flag = 3
             self.pixel_shape = 'elliptical'
             self.default_subset_function = 'F_subset_CrISNH3_Lite'
-            self.default_column_unit = 'molec/cm2'
+            self.default_column_unit = 'mol/m2'
         elif(instrum == "TES"):
             k1 = k1 or 4
             k2 = k2 or 4
@@ -7527,6 +7527,7 @@ class popy(object):
         '''
         subsetting lite version of CrIS NH3 files
         created on 2021/04/07
+        updated on 2024/05/15 for version 1.6.4
         '''
         from scipy.io import loadmat
         from scipy.interpolate import RegularGridInterpolator
@@ -7571,7 +7572,7 @@ class popy(object):
         
         varnames = ['DOF','Day_Night_Flag','LandFraction','Latitude','Longitude',
                     'Quality_Flag','Run_ID','mdate','rvmr','tot_col','xretv','pressure',
-                    'tot_col_total_error']
+                    'tot_col_total_error','Cloud_Flag']
         
         west = self.west
         east = self.east
@@ -7592,7 +7593,8 @@ class popy(object):
             except:
                 self.logger.warning(fn+' cannot be read!')
                 continue
-            outp['UTC_matlab_datenum'] = outp['mdate']+366.
+            # mdate defined as days since 1970-01-01
+            outp['UTC_matlab_datenum'] = outp['mdate']+719529.
             f1 = outp['LandFraction'] >= min_LandFraction
             f2 = outp['DOF'] >= self.mindofs
             f3 = (outp['Quality_Flag'] >= min_Quality_Flag) & \
@@ -7627,13 +7629,16 @@ class popy(object):
             l2g_data0['u'] = f_uuu((latc,l2g_data0['ifov']))
             l2g_data0['v'] = f_vvv((latc,l2g_data0['ifov']))
             l2g_data0['t'] = f_ttt((latc,l2g_data0['ifov']))
-            l2g_data0['column_amount'] = outp['tot_col'][validmask]
-            l2g_data0['column_uncertainty'] = outp['tot_col_total_error'][validmask]
+            l2g_data0['column_amount'] = outp['tot_col'][validmask]/6.02214e19
+            l2g_data0['column_uncertainty'] = outp['tot_col_total_error'][validmask]/6.02214e19
             l2g_data0['UTC_matlab_datenum'] = outp['UTC_matlab_datenum'][validmask]
             l2g_data0['dofs'] = outp['DOF'][validmask]
+            l2g_data0['Quality_Flag'] = outp['Quality_Flag'][validmask]
+            l2g_data0['Cloud_Flag'] = outp['Cloud_Flag'][validmask]
             nobs = np.sum(validmask)
             l2g_data0['sfcvmr'] = np.zeros((nobs))
             l2g_data0['surface_pressure'] = np.zeros((nobs))
+            
             # loop over observations
             for io in range(nobs):
                 index = (outp['pressure'][validmask,][io,] > 0)
@@ -7642,6 +7647,8 @@ class popy(object):
                 l2g_data0['sfcvmr'][io] = xretv[0]
                 l2g_data0['surface_pressure'][io] = pressure[0]
             
+            # no surface altitude provided, estimate roughly
+            l2g_data0['surface_altitude'] = np.log(1013.25/l2g_data0['surface_pressure'])*7500
             l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
         
         self.l2g_data = l2g_data
@@ -7787,9 +7794,9 @@ class popy(object):
             l2g_data0['u'] = f_uuu((latc,l2g_data0['ifov']))
             l2g_data0['v'] = f_vvv((latc,l2g_data0['ifov']))
             l2g_data0['t'] = f_ttt((latc,l2g_data0['ifov']))
-            l2g_data0['colnh3_simple'] = tot_col_test
-            l2g_data0['column_amount'] = outp['Column'][validmask,0]
-            l2g_data0['column_uncertainty'] = outp['Column_Error'][validmask,0]
+            l2g_data0['colnh3_simple'] = tot_col_test/6.02214e19
+            l2g_data0['column_amount'] = outp['Column'][validmask,0]/6.02214e19
+            l2g_data0['column_uncertainty'] = outp['Column_Error'][validmask,0]/6.02214e19
             l2g_data0['surface_pressure'] = ps
             l2g_data0['sfcvmr'] = sfcvmr
             l2g_data0['UTC_matlab_datenum'] = outp['UTC_matlab_datenum'][validmask]
@@ -7929,9 +7936,9 @@ class popy(object):
             l2g_data0['u'] = f_uuu((latc,l2g_data0['ifov']))
             l2g_data0['v'] = f_vvv((latc,l2g_data0['ifov']))
             l2g_data0['t'] = f_ttt((latc,l2g_data0['ifov']))
-            l2g_data0['colnh3_simple'] = tot_col_test
-            l2g_data0['column_amount'] = outp['tot_col'][validmask]
-            l2g_data0['column_uncertainty'] = noise_error_colm
+            l2g_data0['colnh3_simple'] = tot_col_test/6.02214e19
+            l2g_data0['column_amount'] = outp['tot_col'][validmask]/6.02214e19
+            l2g_data0['column_uncertainty'] = noise_error_colm/6.02214e19
             l2g_data0['surface_pressure'] = ps
             l2g_data0['sfcvmr'] = sfcvmr
             l2g_data0['utc'] = outp['UTC_matlab_datenum'][validmask]
