@@ -35,10 +35,7 @@ import logging
 import warnings
 import inspect
 from calendar import monthrange
-try:
-    import pandas as pd
-except:
-    logging.warning('Level3_List requires Pandas')
+import pandas as pd
 
 def F_wrapper_l3(instrum,product,grid_size,
                  start_year=None,start_month=None,end_year=None,end_month=None,
@@ -918,7 +915,7 @@ def F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,\
         sounding_interp[fn] = my_interpolating_function((sounding_lon,sounding_lat,sounding_datenum))
     return sounding_interp
 
-def F_interp_hrrr_uv(sounding_lon,sounding_lat,sounding_datenum,altitudes=None):
+def F_interp_hrrr_uv(sounding_lon,sounding_lat,sounding_datenum,altitudes=None,save_dir=None):
     '''interpolate fields from hrrr data, handled by herbie
     sounding_lon:
         longitude for interpolation
@@ -928,6 +925,8 @@ def F_interp_hrrr_uv(sounding_lon,sounding_lat,sounding_datenum,altitudes=None):
         time for interpolation in matlab datenum double format
     altitudes:
         a list of atitude values at which to interpret hrrr 3d wind
+    save_dir:
+        where hrrr data is. input to (Fast)Herbie
     created on 2024/05/07
     '''
     from scipy.interpolate import RegularGridInterpolator
@@ -960,14 +959,17 @@ def F_interp_hrrr_uv(sounding_lon,sounding_lat,sounding_datenum,altitudes=None):
         day_start_dt = pd.to_datetime(datedev_py(np.min(day_dn)))
         day_end_dt = pd.to_datetime(datedev_py(np.max(day_dn)))
         herbie_hours = pd.date_range(day_start_dt.floor('h'),
-                                     day_end_dt.ceil('h'),freq='1H').to_series()
+                                     day_end_dt.ceil('h'),freq='1h').to_series()
         hrrr_dt.append(herbie_hours)
     hrrr_dt = pd.DatetimeIndex(pd.concat(hrrr_dt))
     hrrr_dn = np.array([datetime2datenum(hdt) for hdt in hrrr_dt])
 
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", 'This pattern is interpreted as a regular expression')
-        FH = FastHerbie(hrrr_dt,fxx=[0])
+        if save_dir is None:
+            FH = FastHerbie(hrrr_dt,fxx=[0])
+        else:
+            FH = FastHerbie(hrrr_dt,fxx=[0],save_dir=save_dir)
         ds_uv = FH.xarray(uv_search,remove_grib=False)
         ds_ps = FH.xarray(ps_search,remove_grib=False)
 
@@ -990,7 +992,10 @@ def F_interp_hrrr_uv(sounding_lon,sounding_lat,sounding_datenum,altitudes=None):
         del ds_uv,ds_ps,FH
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", 'This pattern is interpreted as a regular expression')
-            FH = FastHerbie(hrrr_dt,fxx=[0])
+            if save_dir is None:
+                FH = FastHerbie(hrrr_dt,fxx=[0])
+            else:
+                FH = FastHerbie(hrrr_dt,fxx=[0],save_dir=save_dir)
             ds_uv = FH.xarray(uv_search,remove_grib=False)
             ds_ps = FH.xarray(ps_search,remove_grib=False)
 
@@ -1035,7 +1040,7 @@ def F_interp_hrrr_uv(sounding_lon,sounding_lat,sounding_datenum,altitudes=None):
     del ds_uv,ds_ps,FH
     return sounding_interp
 
-def F_interp_hrrr_uv80(sounding_lon,sounding_lat,sounding_datenum):
+def F_interp_hrrr_uv80(sounding_lon,sounding_lat,sounding_datenum,save_dir=None):
     '''interpolate fields from hrrr data, handled by herbie
     sounding_lon:
         longitude for interpolation
@@ -1043,6 +1048,8 @@ def F_interp_hrrr_uv80(sounding_lon,sounding_lat,sounding_datenum):
         latitude for interpolation
     sounding_datenum:
         time for interpolation in matlab datenum double format
+    save_dir:
+        where hrrr data is. input to (Fast)Herbie
     created on 2024/05/02
     '''
     from scipy.interpolate import RegularGridInterpolator
@@ -1063,7 +1070,7 @@ def F_interp_hrrr_uv80(sounding_lon,sounding_lat,sounding_datenum):
         day_start_dt = pd.to_datetime(datedev_py(np.min(day_dn)))
         day_end_dt = pd.to_datetime(datedev_py(np.max(day_dn)))
         herbie_hours = pd.date_range(day_start_dt.floor('h'),
-                                     day_end_dt.ceil('h'),freq='1H').to_series()
+                                     day_end_dt.ceil('h'),freq='1h').to_series()
         hrrr_dt.append(herbie_hours)
     hrrr_dt = pd.DatetimeIndex(pd.concat(hrrr_dt))
     hrrr_dn = np.array([datetime2datenum(hdt) for hdt in hrrr_dt])
@@ -1074,7 +1081,11 @@ def F_interp_hrrr_uv80(sounding_lon,sounding_lat,sounding_datenum):
             sounding_interp[fn+'80'] = sounding_lon*np.nan
         return sounding_interp
     
-    FH = FastHerbie(hrrr_dt,fxx=[0])
+    if save_dir is None:
+        FH = FastHerbie(hrrr_dt,fxx=[0])
+    else:
+        FH = FastHerbie(hrrr_dt,fxx=[0],save_dir=save_dir)
+    
     ds = FH.xarray(search,remove_grib=False)
     mask_data = hrrr_dt.isin(ds['time'].data)
     count = 0
@@ -1087,7 +1098,11 @@ def F_interp_hrrr_uv80(sounding_lon,sounding_lat,sounding_datenum):
         logging.warning('they are replaced by data at {}'.format(hrrr_dt[~mask_data]))
         hrrr_dt = hrrr_dt.drop_duplicates()
         hrrr_dn = np.array([datetime2datenum(hdt) for hdt in hrrr_dt])
-        FH = FastHerbie(hrrr_dt,fxx=[0])
+        if save_dir is None:
+            FH = FastHerbie(hrrr_dt,fxx=[0])
+        else:
+            FH = FastHerbie(hrrr_dt,fxx=[0],save_dir=save_dir)
+        
         ds = FH.xarray(search,remove_grib=False)
         mask_data = hrrr_dt.isin(ds['time'].data)
         if count > 5:
@@ -9540,7 +9555,7 @@ class popy(object):
             a string, choosen from 'ERA5', 'NARR', 'GEOS-FP', 'MERRA-2', 'HRRR'
         met_dir:
             directory containing those met data, data structure should be consistently
-            Y%Y/M%M/D%D, except for HRRR (implemented in 2022 and file_path should be used)
+            Y%Y/M%M/D%D, except for HRRR, which inputs to save_dir of Herbie
         interp_fields:
             variables to interpolate from met data
         fn_header:
@@ -9596,7 +9611,7 @@ class popy(object):
                 self.l2g_data['merra2_'+key] = np.float32(sounding_interp[key])
         elif which_met.lower() in ['hrrr']:
             if 'u80' in (interp_fields or []):
-                sounding_interp = F_interp_hrrr_uv80(sounding_lon,sounding_lat,sounding_datenum)
+                sounding_interp = F_interp_hrrr_uv80(sounding_lon,sounding_lat,sounding_datenum,met_dir)
                 for key in sounding_interp.keys():
                     self.logger.info(key+' from HRRR is sampled to L2g coordinate/time')
                     self.l2g_data['hrrr_'+key] = np.float32(sounding_interp[key])
@@ -9605,7 +9620,7 @@ class popy(object):
                     altitudes = np.array(altitudes)
                     self.logger.warning('altitude of 80 m is replaced by 81 m')
                     altitudes[altitudes==80] = 81
-                sounding_interp = F_interp_hrrr_uv(sounding_lon,sounding_lat,sounding_datenum,altitudes)
+                sounding_interp = F_interp_hrrr_uv(sounding_lon,sounding_lat,sounding_datenum,altitudes,met_dir)
                 for key in sounding_interp.keys():
                     self.logger.info(key+' from HRRR is sampled to L2g coordinate/time')
                     self.l2g_data['hrrr_'+key] = np.float32(sounding_interp[key])
