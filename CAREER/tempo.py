@@ -113,22 +113,24 @@ class TEMPO():
                     l3['num_samples'] = num.copy()
         self.l3_lhs = l3_lhs
             
-    def regrid_from_l2(self,l2_path_pattern,attach_data=False,
-                       l3_path_pattern=None,do_l4=True,
+    def regrid_from_l2(self,l2_path_pattern,
+                       attach_l3=False,attach_l2=False,
+                       l3_path_pattern=None,
                        l4_path_pattern=None,gradient_kw=None,
                        l3_save_fields=None,l4_save_fields=None,
                        maxsza=75,maxcf=0.3,
                        ncores=0,block_length=300):
         
-        if not attach_data and (l3_path_pattern is None) and (l4_path_pattern is None):
-            self.logger.error('attach data or provide level3/4 paths!')
+        if not attach_l2 and not attach_l3 and (l3_path_pattern is None) and (l4_path_pattern is None):
+            self.logger.error('attach l2/l3 data or provide level3/4 paths!')
             return
         
-        if do_l4 and (l4_path_pattern is None or gradient_kw is None):
-            self.logger.warning('level 4 information unavailable, will do level 3 only')
+        if gradient_kw is None:
             do_l4 = False
+        else:
+            do_l4 = True
         
-        l3_save_fields = l3_save_fields or ['column_amount','local_hour','terrain_height']
+        l3_save_fields = l3_save_fields or ['column_amount']
         l4_save_fields = l4_save_fields or \
         ['column_amount','local_hour','terrain_height','wind_topo',\
          'wind_column','wind_column_xy','wind_column_rs']
@@ -150,11 +152,16 @@ class TEMPO():
         dates = pd.date_range(self.start_dt,self.end_dt,freq='1D')
         wesn_dict = dict(west=self.west,east=self.east,south=self.south,north=self.north)
         
-        if attach_data:
+        if attach_l3:
             l3s = []
-            dt_array = []
             if do_l4:
                 l4s = []
+        
+        if attach_l2:
+            l2s = []
+            
+        if attach_l2 or attach_l3:
+            dt_array = []
         
         for date in dates:
             next_date = date+pd.DateOffset(1)
@@ -202,15 +209,19 @@ class TEMPO():
                         date.strftime('%Y%m%d'),scan_num))
                     continue
                 l2g = {k:v[mask,] for k,v in tempo_l2_daily.l2g_data.items()}
+                if attach_l2:
+                    l2s.append(l2g)
                 l3 = tempo_l2_daily.F_parallel_regrid(
                     l2g_data=l2g,
                     ncores=ncores,
                     block_length=block_length)
                 l3.start_python_datetime = datedev_py(np.nanmin(l2g['UTC_matlab_datenum']))
                 l3.end_python_datetime = datedev_py(np.nanmax(l2g['UTC_matlab_datenum']))
-                if attach_data:
-                    dt_array.append(l3.start_python_datetime)
+                if attach_l3:
                     l3s.append(l3)
+                if attach_l2 or attach_l3:
+                    dt_array.append(l3.start_python_datetime)
+                
                 if l3_path_pattern is not None:
                     l3_fn = date.strftime(l3_path_pattern.format(int(scan_num)))
                     os.makedirs(os.path.split(l3_fn)[0],exist_ok=True)
@@ -218,14 +229,16 @@ class TEMPO():
                 if do_l4:
                     l4 = l3.block_reduce(self.flux_grid_size)
                     l4.calculate_gradient(**tempo_l2_daily.calculate_gradient_kw)
-                    if attach_data:
+                    if attach_l3:
                         l4s.append(l4)
                     if l4_path_pattern is not None:
                         l4_fn = date.strftime(l4_path_pattern.format(int(scan_num)))
                         os.makedirs(os.path.split(l4_fn)[0],exist_ok=True)
                         l4.save_nc(l4_fn,l4_save_fields)
-            if attach_data:
+            if attach_l2 or attach_l3:
                 dt_array = pd.to_datetime(dt_array)
+                self.dt_array = dt_array
+            if attach_l3:
                 self.l3s = Level3_List(dt_array,**wesn_dict)
                 for l in l3s:
                     self.l3s.add(l)
@@ -233,3 +246,5 @@ class TEMPO():
                     self.l4s = Level3_List(dt_array,**wesn_dict)
                     for l in l4s:
                         self.l4s.add(l)
+            if attach_l2:
+                self.l2s = l2s

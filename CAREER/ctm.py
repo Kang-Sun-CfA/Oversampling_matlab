@@ -8,6 +8,7 @@ import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 from scipy.io import loadmat
 from pyproj import Proj
+from netCDF4 import Dataset
 
 mw_g_mol = dict(no=30,no2=46)
 SCALE_HEIGHT = 7500
@@ -21,6 +22,29 @@ class CTM(dict):
         self.south = south
         self.north = north
         self.name = name
+    
+    def get_SUSTech_CMAQ_columns(self,nlayer_to_sum=8):
+        '''calculate columns
+        keys:
+            3D mixing ratio fields to integrate
+        nlayer_to_sum:
+            first 8 layers ~ 830 hPa, 1.5 km, 9 layers ~ 670 hPa, 3 km
+        '''
+        # pressure thickness of layers, Pa
+        p_intervals = -np.diff(
+            np.array(
+                [self['VGTOP'] + vglvl * (self['PRSFC']-self['VGTOP']) \
+                 for vglvl in self['VGLVLS']]
+            ).transpose([1,0,2,3]),
+            axis=1)
+        
+        for key in ['NO','NO2']:
+            # mol/m2
+            self['{}_COL'.format(key)] = np.sum(p_intervals[:,:nlayer_to_sum,:,:] \
+            * self[key][:,:nlayer_to_sum,:,:]/9.8/0.02896*1e-6,axis=1)
+        
+        self['f'] = (self['NO_COL'] + self['NO2_COL']) / self['NO2_COL']
+        
     
     def load_SUSTech_CMAQ(self,time,
                           file_to_var_mapper=None,
@@ -54,6 +78,8 @@ class CTM(dict):
                         time_mask = nc_time.isin(time)
                         # assume all files have the same spatial coordinates
                         if imon == 0:
+                            self['VGTOP'] = nc.VGTOP
+                            self['VGLVLS'] = nc.VGLVLS
                             # create the x and y grids
                             xgrid = np.arange(nc.NCOLS)*nc.XCELL+nc.XORIG + nc.XCELL/2
                             ygrid = np.arange(nc.NROWS)*nc.YCELL+nc.YORIG + nc.YCELL/2
@@ -71,6 +97,9 @@ class CTM(dict):
                             self['ygrid'] = ygrid
                             self['lonmesh'] = lonmesh
                             self['latmesh'] = latmesh
+                            if (self.west,self.east,self.south,self.north) == (-180,180,-90,90):
+                                (self.west,self.east,self.south,self.north) = \
+                                (lonmesh.min(),lonmesh.max(),latmesh.min(),latmesh.max())
                     
                     # loop over fields in each file
                     for field in fields:
@@ -81,42 +110,42 @@ class CTM(dict):
                                 (self[field],nc[field][time_mask,]),
                                 axis=0)
     
-    def load_NAQPMS(self,lonlat_path,pressure=None,time=None,**kwargs):
-        import h5py
-        if pressure is not None:
-            self['pressure'] = pressure
-        else:
-            self['pressure'] = np.array([1000,950,925,900,850,800,
-                                         750,700,650,600,550,500])
-        # UTC
-        if time is not None:
-            self['time'] = time
-        else:
-            self['time'] = pd.date_range(dt.datetime(2023,5,1),
-                                         dt.datetime(2023,5,1,23),
-                                         freq='1h')-dt.timedelta(seconds=8*3600)
-        lonlat = loadmat(lonlat_path)
-        self['lonmesh'] = lonlat['lonM'].T
-        self['latmesh'] = lonlat['latM'].T
-        lon_center = np.mean([self.west,self.east])
-        lat_center = np.mean([self.south,self.north])
-        distance2center = np.sqrt(np.square(self['lonmesh']-lon_center)
-                                  +np.square(self['latmesh']-lat_center))
-        ind = np.unravel_index(np.argmin(distance2center),distance2center.shape)
-        lon_mask = (self['lonmesh'][ind[0],] >= self.west) & \
-        (self['lonmesh'][ind[0],] < self.east)
-        lat_mask = (self['latmesh'][:,ind[1]] >= self.south) & \
-        (self['latmesh'][:,ind[1]] < self.north)
-        ijmesh = np.ix_(lat_mask,lon_mask)
-        self['lonmesh'] = self['lonmesh'][ijmesh]
-        self['latmesh'] = self['latmesh'][ijmesh]
-        # to do: properly remove the day dimension
-        for k,v in kwargs.items():
-            with h5py.File(v) as f:
-                self[k] = f['model_{}'.format(k)][()][...,*ijmesh][0]
-            # to do: confirm missing data
-            if k in ['psfc','pbl']:
-                self[k][self[k]==9999.] = np.nan
+#     def load_NAQPMS(self,lonlat_path,pressure=None,time=None,**kwargs):
+#         import h5py
+#         if pressure is not None:
+#             self['pressure'] = pressure
+#         else:
+#             self['pressure'] = np.array([1000,950,925,900,850,800,
+#                                          750,700,650,600,550,500])
+#         # UTC
+#         if time is not None:
+#             self['time'] = time
+#         else:
+#             self['time'] = pd.date_range(dt.datetime(2023,5,1),
+#                                          dt.datetime(2023,5,1,23),
+#                                          freq='1h')-dt.timedelta(seconds=8*3600)
+#         lonlat = loadmat(lonlat_path)
+#         self['lonmesh'] = lonlat['lonM'].T
+#         self['latmesh'] = lonlat['latM'].T
+#         lon_center = np.mean([self.west,self.east])
+#         lat_center = np.mean([self.south,self.north])
+#         distance2center = np.sqrt(np.square(self['lonmesh']-lon_center)
+#                                   +np.square(self['latmesh']-lat_center))
+#         ind = np.unravel_index(np.argmin(distance2center),distance2center.shape)
+#         lon_mask = (self['lonmesh'][ind[0],] >= self.west) & \
+#         (self['lonmesh'][ind[0],] < self.east)
+#         lat_mask = (self['latmesh'][:,ind[1]] >= self.south) & \
+#         (self['latmesh'][:,ind[1]] < self.north)
+#         ijmesh = np.ix_(lat_mask,lon_mask)
+#         self['lonmesh'] = self['lonmesh'][ijmesh]
+#         self['latmesh'] = self['latmesh'][ijmesh]
+#         # to do: properly remove the day dimension
+#         for k,v in kwargs.items():
+#             with h5py.File(v) as f:
+#                 self[k] = f['model_{}'.format(k)][()][...,*ijmesh][0]
+#             # to do: confirm missing data
+#             if k in ['psfc','pbl']:
+#                 self[k][self[k]==9999.] = np.nan
     
     def get_NAQPMS_columns(self,keys,if_use_pbl=True,pressure_thickness=200.):
         
