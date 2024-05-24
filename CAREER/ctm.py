@@ -21,7 +21,7 @@ class CTM(dict):
         self.east = east
         self.south = south
         self.north = north
-        self.name = name
+        self.name = name or 'CTM'
     
     def get_SUSTech_CMAQ_columns(self,nlayer_to_sum=8):
         '''calculate columns
@@ -30,6 +30,11 @@ class CTM(dict):
         nlayer_to_sum:
             first 8 layers ~ 830 hPa, 1.5 km, 9 layers ~ 670 hPa, 3 km
         '''
+        p_high = self['VGTOP'] + self['VGLVLS'][nlayer_to_sum] * (self['PRSFC']-self['VGTOP'])
+        h_high_mean = np.nanmean(np.log(self['PRSFC']/p_high)*7500)
+        self.logger.warning(
+            'suming layers 0-{} for columns, roughly topping at {:.0f} hPa, {:.0f} m'.format(
+                    nlayer_to_sum,np.nanmean(p_high)/100,h_high_mean))
         # pressure thickness of layers, Pa
         p_intervals = -np.diff(
             np.array(
@@ -43,8 +48,47 @@ class CTM(dict):
             self['{}_COL'.format(key)] = np.sum(p_intervals[:,:nlayer_to_sum,:,:] \
             * self[key][:,:nlayer_to_sum,:,:]/9.8/0.02896*1e-6,axis=1)
         
-        self['f'] = (self['NO_COL'] + self['NO2_COL']) / self['NO2_COL']
+        self['NOx_COL'] = self['NO_COL'] + self['NO2_COL']
+        self['f'] = self['NOx_COL'] / self['NO2_COL']
         
+    def get_directional_derivative(self,keys=None,wind_layer=6,ukey='UWIND',vkey='VWIND'):
+        
+        if keys is None:
+            keys = ['NO_COL','NOx_COL','NO2_COL','f']
+        if self.name.lower() in ['cmaq']:
+            p_low = self['VGTOP'] + self['VGLVLS'][wind_layer] * (self['PRSFC']-self['VGTOP'])
+            p_high = self['VGTOP'] + self['VGLVLS'][wind_layer+1] * (self['PRSFC']-self['VGTOP'])
+            h_low_mean = np.nanmean(np.log(self['PRSFC']/p_low)*7500)
+            h_high_mean = np.nanmean(np.log(self['PRSFC']/p_high)*7500)
+            p_low_mean = np.nanmean(p_low)
+            p_high_mean = np.nanmean(p_high)
+            self.logger.warning(
+                'using layer {} wind, roughly at {:.0f}-{:.0f} hPa, {:.0f}-{:.0f} m'.format(
+                    wind_layer,p_low_mean/100,p_high_mean/100,h_low_mean,h_high_mean))
+        
+        u = self[ukey][:,wind_layer,:,:]
+        v = self[vkey][:,wind_layer,:,:]
+        # to do: dx_vec for lon lat grid
+        dx = self['XCELL']
+        for key in keys:
+            vcd = self[key]
+            dcdx = np.full_like(vcd,np.nan)
+            dcdy = np.full_like(vcd,np.nan)
+            dcdr = np.full_like(vcd,np.nan)
+            dcds = np.full_like(vcd,np.nan)
+            dcdx[:,:,1:-1] = (vcd[:,:,2:]-vcd[:,:,:-2])/(dx*2)
+            dcdy[:,1:-1,:] = (vcd[:,2:,:]-vcd[:,:-2,:])/(dx*2)
+            dcdr[:,1:-1,1:-1] = (vcd[:,2:,2:]-vcd[:,:-2,:-2])/(dx*np.sqrt(2)*2)
+            dcds[:,1:-1,1:-1] = (vcd[:,2:,:-2]-vcd[:,:-2,2:])/(dx*np.sqrt(2)*2)
+
+            self[key+'_DD_XY'] = dcdx * u + dcdy * v
+            self[key+'_DD_RS'] = dcdr * (u * np.cos(np.pi/4) + v * np.sin(np.pi/4)) \
+            + dcds * (u * (-np.cos(np.pi/4)) + v * np.sin(np.pi/4))
+            self[key+'_DD'] = 0.5 * (self[key+'_DD_XY'] + self[key+'_DD_RS'])
+        if all(np.isin(['NO2_COL','NO2_COL_DD','f','f_DD'],list(self.keys()))):
+            self.logger.warning('calculating contribution of f to emissions')
+            self['fxNO2_COL_DD'] = self['f'] * self['NO2_COL_DD']
+            self['f_DDxNO2_COL'] = self['f_DD'] * self['NO2_COL']
     
     def load_SUSTech_CMAQ(self,time,
                           file_to_var_mapper=None,
@@ -80,6 +124,7 @@ class CTM(dict):
                         if imon == 0:
                             self['VGTOP'] = nc.VGTOP
                             self['VGLVLS'] = nc.VGLVLS
+                            self['XCELL'] = nc.XCELL
                             # create the x and y grids
                             xgrid = np.arange(nc.NCOLS)*nc.XCELL+nc.XORIG + nc.XCELL/2
                             ygrid = np.arange(nc.NROWS)*nc.YCELL+nc.YORIG + nc.YCELL/2
@@ -195,10 +240,13 @@ class CTM(dict):
                 ] for itime in range(key_shape[0])
             ])
         
-    def plot(self,key,time,pressure=None,**kwargs):
-        time_mask = self['time'] == time
-        if pressure is not None:
-            pressure_mask = self['pressure'] == pressure
+    def plot(self,key,time=None,layer_index=None,**kwargs):
+        if time is None:
+            self.logger.warning('plotting time average')
+            time_mask = np.ones(self['time'].shape,dtype=bool)
+        else:
+            time_mask = self['time'] == time
+        
         ax = kwargs.pop('ax',None)
         if ax is None:
             figsize = kwargs.pop('figsize',(10,5))
@@ -216,10 +264,12 @@ class CTM(dict):
         shrink = kwargs.pop('shrink',0.75)
         extent = kwargs.pop('extent',[self.west, self.east, self.south, self.north])
         
-        if pressure is not None:
-            data = self[key][time_mask,pressure_mask,].squeeze()
+        if layer_index is not None:
+            data = self[key][time_mask,layer_index,].squeeze()
         else:
             data = self[key][time_mask,].squeeze()
+        if time is None:
+            data = np.mean(data,axis=0)
         pc = ax.pcolormesh(self['lonmesh'],self['latmesh'],
                            func(data),cmap=cmap,vmax=vmax,vmin=vmin,**kwargs)
         ax.coastlines(resolution=cartopy_scale, color='black', linewidth=1)
