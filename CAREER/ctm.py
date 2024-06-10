@@ -50,6 +50,11 @@ class CTM(dict):
         
         self['NOx_COL'] = self['NO_COL'] + self['NO2_COL']
         self['f'] = self['NOx_COL'] / self['NO2_COL']
+        # sum layered emissions to a single one
+        if all(np.isin(['NO_emis','NO2_emis'],list(self.keys()))):
+            self['NO_emis_COL'] = np.nansum(self['NO_emis'],axis=1)
+            self['NO2_emis_COL'] = np.nansum(self['NO2_emis'],axis=1)
+            self['NOx_emis_COL'] = self['NO_emis_COL'] + self['NO2_emis_COL']
         
     def get_directional_derivative(self,keys=None,wind_layer=6,ukey='UWIND',vkey='VWIND'):
         
@@ -105,16 +110,20 @@ class CTM(dict):
         file_to_var_mapper = file_to_var_mapper or\
         {'CONC_NOx':['NO','NO2'],
         'MET':['UWIND','VWIND','PBLH'],
-        'PRSFC':['PRSFC']}
+        'PRSFC':['PRSFC'],
+        'NOx_emis':['NO','NO2']}
         # loop over monthly files
         for imon,mon in enumerate(pd.period_range(time.min(),time.max(),freq='1M')):
             # loop over each file
             for ifile,(file_header,fields) in enumerate(file_to_var_mapper.items()):
                 fn = mon.strftime(file_path_pattern.replace('*',file_header))
+                # emis files are only available on the first day
+                if file_header == 'NOx_emis':
+                    fn = '01'.join(os.path.splitext(fn))
                 self.logger.info('loading {}'.format(fn))
                 with Dataset(fn,'r') as nc:
-                    # assume all files in a month have the same timestamp
-                    if ifile == 0:
+                    # assume all files in a month have the same timestamp, except emis
+                    if file_header == 'CONC_NOx':
                         nc_time = pd.to_datetime(
                             ['{0}'.format(d[0])+'{0:0>6}'.format(d[1])
                              for d in nc['TFLAG'][:,0,:]],
@@ -125,6 +134,7 @@ class CTM(dict):
                             self['VGTOP'] = nc.VGTOP
                             self['VGLVLS'] = nc.VGLVLS
                             self['XCELL'] = nc.XCELL
+                            self['YCELL'] = nc.YCELL
                             # create the x and y grids
                             xgrid = np.arange(nc.NCOLS)*nc.XCELL+nc.XORIG + nc.XCELL/2
                             ygrid = np.arange(nc.NROWS)*nc.YCELL+nc.YORIG + nc.YCELL/2
@@ -145,14 +155,27 @@ class CTM(dict):
                             if (self.west,self.east,self.south,self.north) == (-180,180,-90,90):
                                 (self.west,self.east,self.south,self.north) = \
                                 (lonmesh.min(),lonmesh.max(),latmesh.min(),latmesh.max())
+                    elif file_header == 'NOx_emis':
+                        nc_time = pd.to_datetime(
+                            ['{0}'.format(d[0])+'{0:0>6}'.format(d[1])
+                             for d in nc['TFLAG'][:,0,:]],
+                            format='%Y%j%H%M%S')
+                        time_mask = nc_time.hour.isin(time.hour.unique())
                     
                     # loop over fields in each file
                     for field in fields:
-                        if imon == 0:
-                            self[field] = nc[field][time_mask,]
+                        if file_header == 'NOx_emis':
+                            fld = field+'_emis'
+                            # mol/s to mol/s/m2
+                            factor = 1/(self['XCELL']*self['YCELL'])
                         else:
-                            self[field] = np.concatenate(
-                                (self[field],nc[field][time_mask,]),
+                            fld = field
+                            factor = 1
+                        if imon == 0:
+                            self[fld] = nc[field][time_mask,] * factor
+                        else:
+                            self[fld] = np.concatenate(
+                                (self[fld],nc[field][time_mask,] * factor),
                                 axis=0)
     
 #     def load_NAQPMS(self,lonlat_path,pressure=None,time=None,**kwargs):
@@ -243,7 +266,7 @@ class CTM(dict):
     def plot(self,key,time=None,layer_index=None,**kwargs):
         if time is None:
             self.logger.warning('plotting time average')
-            time_mask = np.ones(self['time'].shape,dtype=bool)
+            time_mask = np.ones(self[key].shape[0],dtype=bool)
         else:
             time_mask = self['time'] == time
         
