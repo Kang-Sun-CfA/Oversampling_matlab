@@ -7538,7 +7538,7 @@ class popy(object):
     def F_subset_CrISNH3_Lite(self,path,
                               l2_path_structure='%Y/%m/%d/',
                               ellipse_lut_path='CrIS_footprint.mat',
-                              min_Quality_Flag=None,min_LandFraction=0.):
+                              min_Quality_Flag=5,min_LandFraction=0.):
         '''
         subsetting lite version of CrIS NH3 files
         created on 2021/04/07
@@ -7613,7 +7613,8 @@ class popy(object):
             f1 = outp['LandFraction'] >= min_LandFraction
             f2 = outp['DOF'] >= self.mindofs
             f3 = (outp['Quality_Flag'] >= min_Quality_Flag) & \
-            (outp['Day_Night_Flag'] == 1)
+            (outp['Day_Night_Flag'] == 1) & \
+            np.isin(outp['Cloud_Flag'],[0,2,3])#clear(0), the smoke filled(2), and the filled non-detect pixels(3). remove cloudy(1)
             f4 = outp['Latitude'] >= south
             f5 = outp['Latitude'] <= north
             tmplon = outp['Longitude']-west
