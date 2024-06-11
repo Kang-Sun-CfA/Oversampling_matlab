@@ -9,6 +9,7 @@ import cartopy.feature as cfeature
 from scipy.io import loadmat
 from pyproj import Proj
 from netCDF4 import Dataset
+import statsmodels.formula.api as smf
 
 mw_g_mol = dict(no=30,no2=46)
 SCALE_HEIGHT = 7500
@@ -32,7 +33,7 @@ class CTM(dict):
         '''
         p_high = self['VGTOP'] + self['VGLVLS'][nlayer_to_sum] * (self['PRSFC']-self['VGTOP'])
         h_high_mean = np.nanmean(np.log(self['PRSFC']/p_high)*7500)
-        self.logger.warning(
+        self.logger.info(
             'suming layers 0-{} for columns, roughly topping at {:.0f} hPa, {:.0f} m'.format(
                     nlayer_to_sum,np.nanmean(p_high)/100,h_high_mean))
         # pressure thickness of layers, Pa
@@ -55,11 +56,93 @@ class CTM(dict):
             self['NO_emis_COL'] = np.nansum(self['NO_emis'],axis=1)
             self['NO2_emis_COL'] = np.nansum(self['NO2_emis'],axis=1)
             self['NOx_emis_COL'] = self['NO_emis_COL'] + self['NO2_emis_COL']
-        
-    def get_directional_derivative(self,keys=None,wind_layer=6,ukey='UWIND',vkey='VWIND'):
-        
+    
+    def fit_topo(self,resample_rule='1M',NOxorNO2='NOx',mask=None,fit_chem=True):
+        '''generate topo fit coefficients, see fit_topography in popy
+        '''
+        if mask is None:
+            mask = np.ones((len(self['ygrid']),len(self['xgrid'])),dtype=bool)
+        if 'wind_topo' not in self.keys():
+            self['wind_topo'] = self['surface_altitude_DD'] * self[f'{NOxorNO2}_COL']
+        resampler = self.resample(resample_rule,
+                                  ['wind_topo',f'{NOxorNO2}_COL_DD',f'{NOxorNO2}_COL'])
+        self['<wind_column_topo>'] = np.full_like(self['<wind_topo>'],np.nan)
+        self.topo_fits = []
+        for i,(k,v) in enumerate(resampler.indices.items()):
+            df = pd.DataFrame(dict(y=self[f'<{NOxorNO2}_COL_DD>'][i,][mask],
+                                   wt=self['<wind_topo>'][i,][mask],
+                                   vcd=self[f'<{NOxorNO2}_COL>'][i,][mask])).dropna()
+            if fit_chem:
+                topo_fit = smf.ols('y ~ wt + vcd', data=df).fit()
+            else:
+                topo_fit = smf.ols('y ~ wt', data=df).fit()
+            self.topo_fits.append(topo_fit)
+            self['<wind_column_topo>'][i,] = self[f'<{NOxorNO2}_COL_DD>'][i,]\
+            -topo_fit.params['wt']*self['<wind_topo>'][i,]
+        self.df['topo_scale_height'] = [-1/topo_fit.params['wt'] for topo_fit in self.topo_fits]
+        self.df['topo_rmse'] = [np.sqrt(topo_fit.mse_resid) for topo_fit in self.topo_fits]
+        self.df['topo_r2'] = [topo_fit.rsquared for topo_fit in self.topo_fits]
+    
+    def fit_chem(self,resample_rule='1M',NOxorNO2='NOx',mask=None,chem_fit_order=1):
+        '''generate chem fit coefficients, see fit_chemistry in popy
+        '''
+        if mask is None:
+            mask = np.ones((len(self['ygrid']),len(self['xgrid'])),dtype=bool)
+        if 'wind_topo' not in self.keys():
+            self['wind_topo'] = self['surface_altitude_DD'] * self[f'{NOxorNO2}_COL']
+        resampler = self.resample(resample_rule,
+                                  ['wind_topo',f'{NOxorNO2}_COL_DD',f'{NOxorNO2}_COL'])
+        if '<wind_column_topo>' not in self.keys():
+            self.logger.warning('topo fit was not done. doing it now')
+            self.fit_topo(resample_rule,NOxorNO2,mask)
+        self['<wind_column_topo_chem>'] = self['<wind_column_topo>'].copy()
+        self.chem_fits = []
+        reg_formula = 'y ~'
+        for i,(k,v) in enumerate(resampler.indices.items()):
+            df = pd.DataFrame(dict(y=self['<wind_column_topo>'][i,][mask]))
+            for order in range(1,1+chem_fit_order):
+                df['vcd{}'.format(order)] = self[f'<{NOxorNO2}_COL>'][i,][mask]**order
+                reg_formula += ' + vcd{}'.format(order)
+            df = df.dropna()
+            chem_fit = smf.ols(reg_formula, data=df).fit()
+            self.chem_fits.append(chem_fit)
+            for order in range(1,1+chem_fit_order):
+                self['<wind_column_topo_chem>'][i,] -= \
+                chem_fit.params['vcd{}'.format(order)]*self[f'<{NOxorNO2}_COL>'][i,]**order
+        self.df['chem_lifetime'] = [-1/chem_fit.params['vcd1']/3600 for chem_fit in self.chem_fits]
+        self.df['chem_rmse'] = [np.sqrt(chem_fit.mse_resid) for chem_fit in self.chem_fits]
+        self.df['chem_r2'] = [chem_fit.rsquared for chem_fit in self.chem_fits]
+    
+    def resample(self,resample_rule,keys):
+        '''resample data into lower freq intervals. average data fields
+        resample_rule:
+            freq input to df.resample
+        keys:
+            each key will be averaged to <key> at the freq given by resample_rule
+        '''
+        resampler = pd.DataFrame(
+            index=self['time']).resample(
+            resample_rule,label='right')
+        self.df = pd.DataFrame(index=resampler.indices.keys())
+        for i,(k,v) in enumerate(resampler.indices.items()):
+            for key in keys:
+                if i == 0:
+                    self[f'<{key}>'] = np.full((self.df.shape[0],*(self[key].shape[1:])),np.nan)
+                self[f'<{key}>'][i,] = np.nanmean(self[key][v,],axis=0)
+        return resampler
+    
+    def get_directional_derivative(self,keys=None,wind_layer=6,
+                                   topo_wind_layer=0,ukey='UWIND',vkey='VWIND'):
+        '''get the directional derivative terms, vec{u} dot grad(key)
+        keys:
+            2D fields in self to calculate gradient
+        (topo_)wind_layer:
+            layer index in 3D wind for the 2D wind vector. separate for the wind topo term
+        u/vkey:
+            U/VWIND for cmaq
+        '''
         if keys is None:
-            keys = ['NO_COL','NOx_COL','NO2_COL','f']
+            keys = ['NO_COL','NOx_COL','NO2_COL','f','surface_altitude']
         if self.name.lower() in ['cmaq']:
             p_low = self['VGTOP'] + self['VGLVLS'][wind_layer] * (self['PRSFC']-self['VGTOP'])
             p_high = self['VGTOP'] + self['VGLVLS'][wind_layer+1] * (self['PRSFC']-self['VGTOP'])
@@ -67,15 +150,34 @@ class CTM(dict):
             h_high_mean = np.nanmean(np.log(self['PRSFC']/p_high)*7500)
             p_low_mean = np.nanmean(p_low)
             p_high_mean = np.nanmean(p_high)
-            self.logger.warning(
+            self.logger.info(
                 'using layer {} wind, roughly at {:.0f}-{:.0f} hPa, {:.0f}-{:.0f} m'.format(
                     wind_layer,p_low_mean/100,p_high_mean/100,h_low_mean,h_high_mean))
-        
-        u = self[ukey][:,wind_layer,:,:]
-        v = self[vkey][:,wind_layer,:,:]
+            if 'surface_altitude' in keys:
+                p_low = self['VGTOP'] + self['VGLVLS'][topo_wind_layer] * (self['PRSFC']-self['VGTOP'])
+                p_high = self['VGTOP'] + self['VGLVLS'][topo_wind_layer+1] * (self['PRSFC']-self['VGTOP'])
+                h_low_mean = np.nanmean(np.log(self['PRSFC']/p_low)*7500)
+                h_high_mean = np.nanmean(np.log(self['PRSFC']/p_high)*7500)
+                p_low_mean = np.nanmean(p_low)
+                p_high_mean = np.nanmean(p_high)
+                self.logger.info(
+                    'using layer {} wind for topography, roughly at {:.0f}-{:.0f} hPa, {:.0f}-{:.0f} m'.format(
+                        topo_wind_layer,p_low_mean/100,p_high_mean/100,h_low_mean,h_high_mean))
+        else:
+            self.logger.error('this ctm is not supported yet')
+            return
+        u_col = self[ukey][:,wind_layer,:,:]
+        v_col = self[vkey][:,wind_layer,:,:]
+        if 'surface_altitude' in keys:
+            u_topo = self[ukey][:,topo_wind_layer,:,:]
+            v_topo = self[vkey][:,topo_wind_layer,:,:]
         # to do: dx_vec for lon lat grid
         dx = self['XCELL']
         for key in keys:
+            if key == 'surface_altitude':
+                u = u_topo; v = v_topo
+            else:
+                u = u_col; v = v_col
             vcd = self[key]
             dcdx = np.full_like(vcd,np.nan)
             dcdy = np.full_like(vcd,np.nan)
@@ -91,7 +193,7 @@ class CTM(dict):
             + dcds * (u * (-np.cos(np.pi/4)) + v * np.sin(np.pi/4))
             self[key+'_DD'] = 0.5 * (self[key+'_DD_XY'] + self[key+'_DD_RS'])
         if all(np.isin(['NO2_COL','NO2_COL_DD','f','f_DD'],list(self.keys()))):
-            self.logger.warning('calculating contribution of f to emissions')
+            self.logger.info('calculating contribution of f to emissions')
             self['fxNO2_COL_DD'] = self['f'] * self['NO2_COL_DD']
             self['f_DDxNO2_COL'] = self['f_DD'] * self['NO2_COL']
     
@@ -105,13 +207,18 @@ class CTM(dict):
         '''
         if file_path_pattern is not None:
             time = pd.date_range(dt.datetime(2017,1,1),dt.datetime(2017,12,31),freq='1h')
+            if 'PRSFC' in self.keys():
+                self.logger.warning('PRSFC is already loaded. Temporarily replace it to get surface altitude')
+                prsfc = self['PRSFC'].copy()
             file_to_var_mapper = {'PRSFC':['PRSFC']}
             self.load_SUSTech_CMAQ(time,file_to_var_mapper,file_path_pattern)
-            self['surface_altitude'] = np.log(101325/np.nanmean(self['PRSFC'],axis=0))*7500
+            self['surface_altitude'] = np.log(101325/np.nanmean(self['PRSFC'],axis=0)[np.newaxis,:,:])*7500
+            self['PRSFC'] = prsfc.copy()
             with Dataset(path,'w') as nc:
+                nc.createDimension('TSTEP',1)
                 nc.createDimension('ROW',len(self['ygrid']))
                 nc.createDimension('COL',len(self['xgrid']))
-                vid = nc.createVariable('surface_altitude',np.float32,dimensions=('ROW','COL'))
+                vid = nc.createVariable('surface_altitude',np.float32,dimensions=('TSTEP','ROW','COL'))
                 vid[:] = np.ma.masked_invalid(np.float32(self['surface_altitude']))
         else:
             with Dataset(path,'r') as nc:
@@ -288,12 +395,14 @@ class CTM(dict):
             ])
         
     def plot(self,key,time=None,layer_index=None,**kwargs):
+        # remove time dimension
         if time is None:
             self.logger.warning('plotting time average')
-            time_mask = np.ones(self[key].shape[0],dtype=bool)
+            data = np.nanmean(self[key],axis=0)
         else:
-            time_mask = self['time'] == time
-        
+            data = self[key][np.nonzero(self['time'] == time)[0][0]]
+        if layer_index is not None:
+            data = data[layer_index,]
         ax = kwargs.pop('ax',None)
         if ax is None:
             figsize = kwargs.pop('figsize',(10,5))
@@ -311,12 +420,6 @@ class CTM(dict):
         shrink = kwargs.pop('shrink',0.75)
         extent = kwargs.pop('extent',[self.west, self.east, self.south, self.north])
         
-        if layer_index is not None:
-            data = self[key][time_mask,layer_index,].squeeze()
-        else:
-            data = self[key][time_mask,].squeeze()
-        if time is None:
-            data = np.mean(data,axis=0)
         pc = ax.pcolormesh(self['lonmesh'],self['latmesh'],
                            func(data),cmap=cmap,vmax=vmax,vmin=vmin,**kwargs)
         ax.coastlines(resolution=cartopy_scale, color='black', linewidth=1)
