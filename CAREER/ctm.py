@@ -95,6 +95,28 @@ class CTM(dict):
             self['fxNO2_COL_DD'] = self['f'] * self['NO2_COL_DD']
             self['f_DDxNO2_COL'] = self['f_DD'] * self['NO2_COL']
     
+    def get_SUSTech_CMAQ_surface_altitude(self,path,file_path_pattern=None):
+        '''
+        save or load surface altitude
+        path:
+            path to save (if file_path_pattern is not None) or load (otherwise) surface pressure data
+        file_path_pattern:
+            sth like '/projects/academic/kangsun/data/CTM/SUSTech/*_%Y%m.nc', see load_SUSTech_CMAQ
+        '''
+        if file_path_pattern is not None:
+            time = pd.date_range(dt.datetime(2017,1,1),dt.datetime(2017,12,31),freq='1h')
+            file_to_var_mapper = {'PRSFC':['PRSFC']}
+            self.load_SUSTech_CMAQ(time,file_to_var_mapper,file_path_pattern)
+            self['surface_altitude'] = np.log(101325/np.nanmean(self['PRSFC'],axis=0))*7500
+            with Dataset(path,'w') as nc:
+                nc.createDimension('ROW',len(self['ygrid']))
+                nc.createDimension('COL',len(self['xgrid']))
+                vid = nc.createVariable('surface_altitude',np.float32,dimensions=('ROW','COL'))
+                vid[:] = np.ma.masked_invalid(np.float32(self['surface_altitude']))
+        else:
+            with Dataset(path,'r') as nc:
+                self['surface_altitude'] = nc['surface_altitude'][:].data
+                
     def load_SUSTech_CMAQ(self,time,
                           file_to_var_mapper=None,
                           file_path_pattern='/projects/academic/kangsun/data/CTM/SUSTech/*_%Y%m.nc'):
@@ -114,6 +136,7 @@ class CTM(dict):
         'NOx_emis':['NO','NO2']}
         # loop over monthly files
         for imon,mon in enumerate(pd.period_range(time.min(),time.max(),freq='1M')):
+            initialized = False
             # loop over each file
             for ifile,(file_header,fields) in enumerate(file_to_var_mapper.items()):
                 fn = mon.strftime(file_path_pattern.replace('*',file_header))
@@ -123,7 +146,8 @@ class CTM(dict):
                 self.logger.info('loading {}'.format(fn))
                 with Dataset(fn,'r') as nc:
                     # assume all files in a month have the same timestamp, except emis
-                    if file_header == 'CONC_NOx':
+                    if file_header != 'NOx_emis' and not initialized:
+                        initialized = True
                         nc_time = pd.to_datetime(
                             ['{0}'.format(d[0])+'{0:0>6}'.format(d[1])
                              for d in nc['TFLAG'][:,0,:]],
