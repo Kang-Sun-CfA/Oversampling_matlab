@@ -83,7 +83,7 @@ class CTM(dict):
         self.df['topo_rmse'] = [np.sqrt(topo_fit.mse_resid) for topo_fit in self.topo_fits]
         self.df['topo_r2'] = [topo_fit.rsquared for topo_fit in self.topo_fits]
     
-    def fit_chem(self,resample_rule='1M',NOxorNO2='NOx',mask=None,chem_fit_order=1):
+    def fit_chem(self,resample_rule='1M',NOxorNO2='NOx',mask=None,chem_fit_order=1,remove_intercept=False):
         '''generate chem fit coefficients, see fit_chemistry in popy
         '''
         if mask is None:
@@ -109,6 +109,8 @@ class CTM(dict):
             for order in range(1,1+chem_fit_order):
                 self['<wind_column_topo_chem>'][i,] -= \
                 chem_fit.params['vcd{}'.format(order)]*self[f'<{NOxorNO2}_COL>'][i,]**order
+            if remove_intercept:
+                self['<wind_column_topo_chem>'][i,] -= chem_fit.params['Intercept']
         self.df['chem_lifetime'] = [-1/chem_fit.params['vcd1']/3600 for chem_fit in self.chem_fits]
         self.df['chem_rmse'] = [np.sqrt(chem_fit.mse_resid) for chem_fit in self.chem_fits]
         self.df['chem_r2'] = [chem_fit.rsquared for chem_fit in self.chem_fits]
@@ -427,8 +429,13 @@ class CTM(dict):
         else:
             fig = None
         cmap = kwargs.pop('cmap','jet')
-        vmin = kwargs.pop('vmin',None)
-        vmax = kwargs.pop('vmax',None)
+        
+        scale = kwargs.pop('scale','linear')
+        if scale == 'log':
+            from matplotlib.colors import LogNorm
+            vmin = kwargs.pop('vmin',None)
+            vmax = kwargs.pop('vmax',None)
+            kwargs['norm'] = LogNorm(vmin=vmin,vmax=vmax)
         func = kwargs.pop('func',lambda x:x)
         cartopy_scale = kwargs.pop('cartopy_scale','50m')
         draw_colorbar = kwargs.pop('draw_colorbar',True)
@@ -437,7 +444,7 @@ class CTM(dict):
         extent = kwargs.pop('extent',[self.west, self.east, self.south, self.north])
         
         pc = ax.pcolormesh(self['lonmesh'],self['latmesh'],
-                           func(data),cmap=cmap,vmax=vmax,vmin=vmin,**kwargs)
+                           func(data),cmap=cmap,**kwargs)
         ax.coastlines(resolution=cartopy_scale, color='black', linewidth=1)
         ax.add_feature(cfeature.STATES.with_scale(cartopy_scale), facecolor='None', edgecolor='k', 
                            linestyle='-',lw=0.5)
