@@ -24,17 +24,18 @@ class CTM(dict):
         self.north = north
         self.name = name or 'CTM'
     
-    def get_SUSTech_CMAQ_columns(self,nlayer_to_sum=8):
+    def get_SUSTech_CMAQ_columns(self,nlayer_to_sum=None):
         '''calculate columns
         keys:
             3D mixing ratio fields to integrate
         nlayer_to_sum:
             first 8 layers ~ 830 hPa, 1.5 km, 9 layers ~ 670 hPa, 3 km
         '''
+        nlayer_to_sum = nlayer_to_sum or self['NO2'].shape[1]
         p_high = self['VGTOP'] + self['VGLVLS'][nlayer_to_sum] * (self['PRSFC']-self['VGTOP'])
         h_high_mean = np.nanmean(np.log(self['PRSFC']/p_high)*7500)
         self.logger.info(
-            'suming layers 0-{} for columns, roughly topping at {:.0f} hPa, {:.0f} m'.format(
+            'suming {} layers for columns, roughly topping at {:.0f} hPa, {:.0f} m'.format(
                     nlayer_to_sum,np.nanmean(p_high)/100,h_high_mean))
         # pressure thickness of layers, Pa
         p_intervals = -np.diff(
@@ -139,6 +140,79 @@ class CTM(dict):
                 self[f'<{key}>'][i,] = np.nanmean(self[key][v,],axis=0)
         return resampler
     
+    def get_flux_divergence(self,wind_layer=None):
+        '''calculate divergence of horizontal flux'''
+        # get xy and rs divergences given the xy and rs decomposition of vector, simplified from popy
+        def F_divs(fe,fn,fne,fnw,dxy,drs):
+            dfedx = np.full_like(fe,np.nan)
+            dfedx[...,:,1:-1] = (fe[...,:,2:]-fe[...,:,0:-2])/(2*dxy)
+
+            dfndy = np.full_like(fn,np.nan)
+            dfndy[...,1:-1,] = (fn[...,2:,]-fn[...,0:-2,])/(2*dxy)
+
+            dfnedr = np.full_like(fne,np.nan)
+            dfnedr[...,1:-1,1:-1] = (fne[...,2:,2:]-fne[...,:-2,:-2])/(2*drs)
+
+            dfnwds = np.full_like(fnw,np.nan)
+            dfnwds[...,1:-1,1:-1] = (fnw[...,2:,:-2]-fnw[...,:-2,2:])/(2*drs)
+
+            div_xy = dfedx+dfndy
+            div_rs = dfnedr+dfnwds
+            return div_xy,div_rs
+        
+        if wind_layer is not None:
+            ux = self['UWIND'][:,wind_layer,:,:]
+            uy = self['VWIND'][:,wind_layer,:,:]
+            ur = ux * np.cos(np.pi/4) + uy * np.sin(np.pi/4)
+            us = ux * (-np.cos(np.pi/4)) + uy * np.sin(np.pi/4)
+            if 'NO2_COL' not in self.keys():
+                self.get_SUSTech_CMAQ_columns(nlayer_to_sum=None)
+            self['NOx_DIV_XY'],self['NOx_DIV_RS'] = F_divs(
+                fe=ux*self['NOx_COL'],fn=uy*self['NOx_COL'],
+                fne=ur*self['NOx_COL'],fnw=us*self['NOx_COL'],
+                dxy=self['XCELL'],drs=self['XCELL']*np.sqrt(2))
+            self['NOx_DIV'] = 0.5 * (self['NOx_DIV_XY'] + self['NOx_DIV_RS'])
+            self['NO2_DIV_XY'],self['NO2_DIV_RS'] = F_divs(
+                fe=ux*self['NO2_COL'],fn=uy*self['NO2_COL'],
+                fne=ur*self['NO2_COL'],fnw=us*self['NO2_COL'],
+                dxy=self['XCELL'],drs=self['XCELL']*np.sqrt(2))
+            self['NO2_DIV'] = 0.5 * (self['NO2_DIV_XY'] + self['NO2_DIV_RS'])
+        else:
+            # pressure thickness of layers, Pa
+            p_intervals = -np.diff(
+                np.array(
+                    [self['VGTOP'] + vglvl * (self['PRSFC']-self['VGTOP']) \
+                     for vglvl in self['VGLVLS']]
+                ).transpose([1,0,2,3]),
+                axis=1)
+            
+            ur = self['UWIND'] * np.cos(np.pi/4) + self['VWIND'] * np.sin(np.pi/4)
+            us = self['UWIND'] * (-np.cos(np.pi/4)) + self['VWIND'] * np.sin(np.pi/4)
+            
+            self['NOx_DIV_XY'],self['NOx_DIV_RS'] = F_divs(
+                fe=self['UWIND']*(self['NO2']+self['NO'])*p_intervals/9.8/0.02896*1e-6,
+                fn=self['VWIND']*(self['NO2']+self['NO'])*p_intervals/9.8/0.02896*1e-6,
+                fne=ur*(self['NO2']+self['NO'])*p_intervals/9.8/0.02896*1e-6,
+                fnw=us*(self['NO2']+self['NO'])*p_intervals/9.8/0.02896*1e-6,
+                dxy=self['XCELL'],drs=self['XCELL']*np.sqrt(2))
+            
+            self['NOx_DIV_XY'] = np.nansum(self['NOx_DIV_XY'],axis=1)
+            self['NOx_DIV_RS'] = np.nansum(self['NOx_DIV_RS'],axis=1)
+            self['NOx_DIV'] = 0.5 * (self['NOx_DIV_XY'] + self['NOx_DIV_RS'])
+            
+            self['NO2_DIV_XY'],self['NO2_DIV_RS'] = F_divs(
+                fe=self['UWIND']*(self['NO2'])*p_intervals/9.8/0.02896*1e-6,
+                fn=self['VWIND']*(self['NO2'])*p_intervals/9.8/0.02896*1e-6,
+                fne=ur*(self['NO2'])*p_intervals/9.8/0.02896*1e-6,
+                fnw=us*(self['NO2'])*p_intervals/9.8/0.02896*1e-6,
+                dxy=self['XCELL'],drs=self['XCELL']*np.sqrt(2))
+            
+            self['NO2_DIV_XY'] = np.nansum(self['NO2_DIV_XY'],axis=1)
+            self['NO2_DIV_RS'] = np.nansum(self['NO2_DIV_RS'],axis=1)
+            self['NO2_DIV'] = 0.5 * (self['NO2_DIV_XY'] + self['NO2_DIV_RS'])
+            
+            del ur,us
+            
     def get_directional_derivative(self,keys=None,wind_layer=6,
                                    topo_wind_layer=0,ukey='UWIND',vkey='VWIND'):
         '''get the directional derivative terms, vec{u} dot grad(key)
