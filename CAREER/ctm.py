@@ -7,6 +7,7 @@ import logging
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 from scipy.io import loadmat
+from scipy.ndimage import gaussian_filter
 from pyproj import Proj
 from netCDF4 import Dataset
 import statsmodels.formula.api as smf
@@ -24,6 +25,67 @@ class CTM(dict):
         self.north = north
         self.name = name or 'CTM'
     
+    def plot_taylor_diagram(self,xdata=None,ydata=None,xkey=None,ykey=None,
+                           gaussian_filter_sigma=None,squeeze_time=True,
+                           fig=None,figsize=(7,7),dia=None,**kwargs):
+        '''plot taylor diagram of a data field to evaluate emission estimators
+        '''
+        xdata = xdata or self[xkey]
+        ydata = ydata or self[ykey]
+        if squeeze_time:
+            xdata = np.nanmean(xdata,axis=0)
+            ydata = np.nanmean(ydata,axis=0)
+            if gaussian_filter_sigma is not None:
+                xdata = gaussian_filter(xdata,sigma=gaussian_filter_sigma)
+        else:
+            if gaussian_filter_sigma is not None:
+                xdata = np.array([gaussian_filter(d,sigma=gaussian_filter_sigma) for d in xdata])
+
+        mask = ~np.isnan(xdata) & ~np.isnan(ydata)
+        xdata = xdata[mask]
+        ydata = ydata[mask]
+        
+        if dia is None:
+            fig = fig or plt.figure(figsize=figsize)
+            dia = TaylorDiagram(refstd=1,fig=fig,rect=111)
+            contours = dia.add_contours(levels=5, colors='0.5')  # 5 levels in grey
+            plt.clabel(contours, inline=1, fontsize=10, fmt='%.1f')
+
+            dia.add_grid()                                  # Add grid
+            dia._ax.axis[:].major_ticks.set_tick_out(True)  # Put ticks outward
+        dia.add_sample(np.std(ydata,ddof=1)/np.std(xdata,ddof=1),
+                       np.corrcoef(xdata,ydata)[0,1],**kwargs)
+        return dia
+        
+    def get_agreement_metrics(self,xdata=None,ydata=None,xkey=None,ykey=None,
+                              gaussian_filter_sigma=None,squeeze_time=True):
+        '''calculate agreements between to data fields to evaluate emission estimators
+        return:
+            a dict of pearson, mean bias, ols slope, mae, rmse
+        '''
+        xdata = xdata or self[xkey]
+        ydata = ydata or self[ykey]
+        if squeeze_time:
+            xdata = np.nanmean(xdata,axis=0)
+            ydata = np.nanmean(ydata,axis=0)
+            if gaussian_filter_sigma is not None:
+                xdata = gaussian_filter(xdata,sigma=gaussian_filter_sigma)
+        else:
+            if gaussian_filter_sigma is not None:
+                xdata = np.array([gaussian_filter(d,sigma=gaussian_filter_sigma) for d in xdata])
+
+        mask = ~np.isnan(xdata) & ~np.isnan(ydata)
+        xdata = xdata[mask]
+        ydata = ydata[mask]
+        return dict(r=np.corrcoef(xdata,ydata)[0,1],
+                    slope=np.linalg.lstsq(
+                        np.vstack([xdata, np.ones(len(xdata))]).T, 
+                        ydata, rcond=None)[0][0],
+                    mb=np.mean(ydata-xdata),
+                    mae=np.mean(np.abs(ydata-xdata)),
+                    rmse=np.sqrt(np.mean(np.square(ydata-xdata)))
+                   )
+                    
     def get_SUSTech_CMAQ_columns(self,nlayer_to_sum=None):
         '''calculate columns
         keys:
@@ -148,7 +210,7 @@ class CTM(dict):
             dfedx[...,:,1:-1] = (fe[...,:,2:]-fe[...,:,0:-2])/(2*dxy)
 
             dfndy = np.full_like(fn,np.nan)
-            dfndy[...,1:-1,] = (fn[...,2:,]-fn[...,0:-2,])/(2*dxy)
+            dfndy[...,1:-1,:] = (fn[...,2:,:]-fn[...,0:-2,:])/(2*dxy)
 
             dfnedr = np.full_like(fne,np.nan)
             dfnedr[...,1:-1,1:-1] = (fne[...,2:,2:]-fne[...,:-2,:-2])/(2*drs)
