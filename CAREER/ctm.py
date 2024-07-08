@@ -86,12 +86,14 @@ class CTM(dict):
                     rmse=np.sqrt(np.mean(np.square(ydata-xdata)))
                    )
                     
-    def get_SUSTech_CMAQ_columns(self,nlayer_to_sum=None):
+    def get_SUSTech_CMAQ_columns(self,nlayer_to_sum=None,nlayer_for_f=None):
         '''calculate columns
         keys:
             3D mixing ratio fields to integrate
         nlayer_to_sum:
             first 8 layers ~ 830 hPa, 1.5 km, 9 layers ~ 670 hPa, 3 km
+        nlayer_for_f:
+            if specified, use different column definition for f = NOx col/NO2 col
         '''
         nlayer_to_sum = nlayer_to_sum or self['NO2'].shape[1]
         p_high = self['VGTOP'] + self['VGLVLS'][nlayer_to_sum] * (self['PRSFC']-self['VGTOP'])
@@ -113,7 +115,15 @@ class CTM(dict):
             * self[key][:,:nlayer_to_sum,:,:]/9.8/0.02896*1e-6,axis=1)
         
         self['NOx_COL'] = self['NO_COL'] + self['NO2_COL']
-        self['f'] = self['NOx_COL'] / self['NO2_COL']
+        
+        if nlayer_for_f is None:
+            self['f'] = self['NOx_COL'] / self['NO2_COL']
+        else:
+            tmp_no = np.sum(p_intervals[:,:nlayer_for_f,:,:] \
+            * self['NO'][:,:nlayer_for_f,:,:]/9.8/0.02896*1e-6,axis=1)
+            tmp_no2 = np.sum(p_intervals[:,:nlayer_for_f,:,:] \
+            * self['NO2'][:,:nlayer_for_f,:,:]/9.8/0.02896*1e-6,axis=1)
+            self['f'] = ( tmp_no + tmp_no2 ) / tmp_no2
         # sum layered emissions to a single one
         if all(np.isin(['NO_emis','NO2_emis'],list(self.keys()))):
             self['NO_emis_COL'] = np.nansum(self['NO_emis'],axis=1)
@@ -129,7 +139,7 @@ class CTM(dict):
             self['wind_topo'] = self['surface_altitude_DD'] * self[f'{NOxorNO2}_COL']
         resampler = self.resample(resample_rule,
                                   ['wind_topo',f'{NOxorNO2}_COL_DD',f'{NOxorNO2}_COL'])
-        self['<wind_column_topo>'] = np.full_like(self['<wind_topo>'],np.nan)
+        self[f'<{NOxorNO2}_COL_DD_topo>'] = np.full_like(self['<wind_topo>'],np.nan)
         self.topo_fits = []
         for i,(k,v) in enumerate(resampler.indices.items()):
             df = pd.DataFrame(dict(y=self[f'<{NOxorNO2}_COL_DD>'][i,][mask],
@@ -140,11 +150,11 @@ class CTM(dict):
             else:
                 topo_fit = smf.ols('y ~ wt', data=df).fit()
             self.topo_fits.append(topo_fit)
-            self['<wind_column_topo>'][i,] = self[f'<{NOxorNO2}_COL_DD>'][i,]\
+            self[f'<{NOxorNO2}_COL_DD_topo>'][i,] = self[f'<{NOxorNO2}_COL_DD>'][i,]\
             -topo_fit.params['wt']*self['<wind_topo>'][i,]
-        self.df['topo_scale_height'] = [-1/topo_fit.params['wt'] for topo_fit in self.topo_fits]
-        self.df['topo_rmse'] = [np.sqrt(topo_fit.mse_resid) for topo_fit in self.topo_fits]
-        self.df['topo_r2'] = [topo_fit.rsquared for topo_fit in self.topo_fits]
+        self.df[f'{NOxorNO2}_topo_scale_height'] = [-1/topo_fit.params['wt'] for topo_fit in self.topo_fits]
+        self.df[f'{NOxorNO2}_topo_rmse'] = [np.sqrt(topo_fit.mse_resid) for topo_fit in self.topo_fits]
+        self.df[f'{NOxorNO2}_topo_r2'] = [topo_fit.rsquared for topo_fit in self.topo_fits]
     
     def fit_chem(self,resample_rule='1M',NOxorNO2='NOx',mask=None,chem_fit_order=1,remove_intercept=False):
         '''generate chem fit coefficients, see fit_chemistry in popy
@@ -155,14 +165,14 @@ class CTM(dict):
             self['wind_topo'] = self['surface_altitude_DD'] * self[f'{NOxorNO2}_COL']
         resampler = self.resample(resample_rule,
                                   ['wind_topo',f'{NOxorNO2}_COL_DD',f'{NOxorNO2}_COL'])
-        if '<wind_column_topo>' not in self.keys():
+        if f'<{NOxorNO2}_COL_DD_topo>' not in self.keys():
             self.logger.warning('topo fit was not done. doing it now')
             self.fit_topo(resample_rule,NOxorNO2,mask)
-        self['<wind_column_topo_chem>'] = self['<wind_column_topo>'].copy()
+        self[f'<{NOxorNO2}_COL_DD_chem>'] = self[f'<{NOxorNO2}_COL_DD_topo>'].copy()
         self.chem_fits = []
         reg_formula = 'y ~'
         for i,(k,v) in enumerate(resampler.indices.items()):
-            df = pd.DataFrame(dict(y=self['<wind_column_topo>'][i,][mask]))
+            df = pd.DataFrame(dict(y=self[f'<{NOxorNO2}_COL_DD_topo>'][i,][mask]))
             for order in range(1,1+chem_fit_order):
                 df['vcd{}'.format(order)] = self[f'<{NOxorNO2}_COL>'][i,][mask]**order
                 reg_formula += ' + vcd{}'.format(order)
@@ -170,13 +180,13 @@ class CTM(dict):
             chem_fit = smf.ols(reg_formula, data=df).fit()
             self.chem_fits.append(chem_fit)
             for order in range(1,1+chem_fit_order):
-                self['<wind_column_topo_chem>'][i,] -= \
+                self[f'<{NOxorNO2}_COL_DD_chem>'][i,] -= \
                 chem_fit.params['vcd{}'.format(order)]*self[f'<{NOxorNO2}_COL>'][i,]**order
             if remove_intercept:
-                self['<wind_column_topo_chem>'][i,] -= chem_fit.params['Intercept']
-        self.df['chem_lifetime'] = [-1/chem_fit.params['vcd1']/3600 for chem_fit in self.chem_fits]
-        self.df['chem_rmse'] = [np.sqrt(chem_fit.mse_resid) for chem_fit in self.chem_fits]
-        self.df['chem_r2'] = [chem_fit.rsquared for chem_fit in self.chem_fits]
+                self[f'<{NOxorNO2}_COL_DD_chem>'][i,] -= chem_fit.params['Intercept']
+        self.df[f'{NOxorNO2}_chem_lifetime'] = [-1/chem_fit.params['vcd1']/3600 for chem_fit in self.chem_fits]
+        self.df[f'{NOxorNO2}_chem_rmse'] = [np.sqrt(chem_fit.mse_resid) for chem_fit in self.chem_fits]
+        self.df[f'{NOxorNO2}_chem_r2'] = [chem_fit.rsquared for chem_fit in self.chem_fits]
     
     def resample(self,resample_rule,keys):
         '''resample data into lower freq intervals. average data fields
