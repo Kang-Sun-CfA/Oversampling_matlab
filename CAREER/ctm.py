@@ -30,8 +30,10 @@ class CTM(dict):
                            fig=None,figsize=(7,7),dia=None,**kwargs):
         '''plot taylor diagram of a data field to evaluate emission estimators
         '''
-        xdata = xdata or self[xkey]
-        ydata = ydata or self[ykey]
+        if xdata is None:
+            xdata = self[xkey]
+        if ydata is None:
+            ydata = self[ykey]
         if squeeze_time:
             xdata = np.nanmean(xdata,axis=0)
             ydata = np.nanmean(ydata,axis=0)
@@ -63,8 +65,10 @@ class CTM(dict):
         return:
             a dict of pearson, mean bias, ols slope, mae, rmse
         '''
-        xdata = xdata or self[xkey]
-        ydata = ydata or self[ykey]
+        if xdata is None:
+            xdata = self[xkey]
+        if ydata is None:
+            ydata = self[ykey]
         if squeeze_time:
             xdata = np.nanmean(xdata,axis=0)
             ydata = np.nanmean(ydata,axis=0)
@@ -212,6 +216,58 @@ class CTM(dict):
                 self[f'<{key}>'][i,] = np.nanmean(self[key][v,],axis=0)
         return resampler
     
+    def get_wind_divergence(self,wind_layer=5,nlayer_to_sum=6):
+        '''test \Omega_b (\nabla \cdot \vec{u})\approx \int_{z_0}^{z_1} C(\nabla \cdot (u,v))\dif{z}'''
+        # get xy and rs divergences given the xy and rs decomposition of vector, simplified from popy
+        def F_divs(fe,fn,fne,fnw,dxy,drs):
+            dfedx = np.full_like(fe,np.nan)
+            dfedx[...,:,1:-1] = (fe[...,:,2:]-fe[...,:,0:-2])/(2*dxy)
+
+            dfndy = np.full_like(fn,np.nan)
+            dfndy[...,1:-1,:] = (fn[...,2:,:]-fn[...,0:-2,:])/(2*dxy)
+
+            dfnedr = np.full_like(fne,np.nan)
+            dfnedr[...,1:-1,1:-1] = (fne[...,2:,2:]-fne[...,:-2,:-2])/(2*drs)
+
+            dfnwds = np.full_like(fnw,np.nan)
+            dfnwds[...,1:-1,1:-1] = (fnw[...,2:,:-2]-fnw[...,:-2,2:])/(2*drs)
+
+            div_xy = dfedx+dfndy
+            div_rs = dfnedr+dfnwds
+            return div_xy,div_rs
+        
+        # calculate \Omega_b (\nabla \cdot \vec{u})
+        ux = self['UWIND'][:,wind_layer,:,:]
+        uy = self['VWIND'][:,wind_layer,:,:]
+        ur = ux * np.cos(np.pi/4) + uy * np.sin(np.pi/4)
+        us = ux * (-np.cos(np.pi/4)) + uy * np.sin(np.pi/4)
+        self.get_SUSTech_CMAQ_columns(nlayer_to_sum=nlayer_to_sum)
+        ubar_div_xy,ubar_div_rs = F_divs(fe=ux,fn=uy,fne=ur,fnw=us,
+            dxy=self['XCELL'],drs=self['XCELL']*np.sqrt(2))
+        self['ubar_div'] = 0.5 * (ubar_div_xy + ubar_div_rs) * self['NOx_COL']
+        # calculate \int_{z_0}^{z_1} C(\nabla \cdot (u,v))\dif{z}
+        # pressure thickness of layers, Pa
+        p_intervals = -np.diff(
+            np.array(
+                [self['VGTOP'] + vglvl * (self['PRSFC']-self['VGTOP']) \
+                 for vglvl in self['VGLVLS']]
+            ).transpose([1,0,2,3]),
+            axis=1)[:,:nlayer_to_sum,:,:]
+
+        ur = self['UWIND'][:,:nlayer_to_sum,:,:] * np.cos(np.pi/4) + self['VWIND'][:,:nlayer_to_sum,:,:] * np.sin(np.pi/4)
+        us = self['UWIND'][:,:nlayer_to_sum,:,:] * (-np.cos(np.pi/4)) + self['VWIND'][:,:nlayer_to_sum,:,:] * np.sin(np.pi/4)
+
+        uint_div_xy,uint_div_rs = F_divs(
+            fe=self['UWIND'][:,:nlayer_to_sum,:,:],
+            fn=self['VWIND'][:,:nlayer_to_sum,:,:],
+            fne=ur,
+            fnw=us,
+            dxy=self['XCELL'],drs=self['XCELL']*np.sqrt(2))
+        
+        nox = (self['NO2'][:,:nlayer_to_sum,:,:]+self['NO'][:,:nlayer_to_sum,:,:])*p_intervals/9.8/0.02896*1e-6
+        self['uint_div'] = 0.5*(np.nansum(nox*uint_div_xy,axis=1)+np.nansum(nox*uint_div_rs,axis=1))
+        del ur, us, nox
+            
     def get_flux_divergence(self,wind_layer=None):
         '''calculate divergence of horizontal flux'''
         # get xy and rs divergences given the xy and rs decomposition of vector, simplified from popy
