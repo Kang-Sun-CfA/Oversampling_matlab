@@ -134,40 +134,70 @@ class CTM(dict):
             self['NO2_emis_COL'] = np.nansum(self['NO2_emis'],axis=1)
             self['NOx_emis_COL'] = self['NO_emis_COL'] + self['NO2_emis_COL']
     
-    def fit_topo(self,resample_rule='1M',NOxorNO2='NOx',mask=None,fit_chem=True):
+    def fit_topo(self,resample_rule='1M',NOxorNO2='NOx',mask=None,fit_chem=True,if_bootstrap=False):
         '''generate topo fit coefficients, see fit_topography in popy
         '''
         if mask is None:
             mask = np.ones((len(self['ygrid']),len(self['xgrid'])),dtype=bool)
         if 'wind_topo' not in self.keys():
-            self['wind_topo'] = self['surface_altitude_DD'] * self[f'{NOxorNO2}_COL']
-        resampler = self.resample(resample_rule,
+            if NOxorNO2 == 'fNO2':
+                self['wind_topo'] = self['surface_altitude_DD'] * self['NO2_COL']
+            else:
+                self['wind_topo'] = self['surface_altitude_DD'] * self[f'{NOxorNO2}_COL']
+        if NOxorNO2 == 'fNO2':
+            resampler = self.resample(resample_rule,
+                                  ['wind_topo','NO2_COL_DD','NO2_COL'])
+        else:
+            resampler = self.resample(resample_rule,
                                   ['wind_topo',f'{NOxorNO2}_COL_DD',f'{NOxorNO2}_COL'])
         self[f'<{NOxorNO2}_COL_DD_topo>'] = np.full_like(self['<wind_topo>'],np.nan)
         self.topo_fits = []
         for i,(k,v) in enumerate(resampler.indices.items()):
-            df = pd.DataFrame(dict(y=self[f'<{NOxorNO2}_COL_DD>'][i,][mask],
-                                   wt=self['<wind_topo>'][i,][mask],
-                                   vcd=self[f'<{NOxorNO2}_COL>'][i,][mask])).dropna()
+            if NOxorNO2 == 'fNO2':
+                df = pd.DataFrame(dict(y=self['<NO2_COL_DD>'][i,][mask]*self['<f>'][i,][mask]\
+                                       +self['<NO2_COL>'][i,][mask]*self['<f_DD>'][i,][mask],
+                                       wt=self['<wind_topo>'][i,][mask]*self['<f>'][i,][mask],
+                                       vcd=self['<NO2_COL>'][i,][mask]*self['<f>'][i,][mask])
+                                 ).dropna()
+            else:
+                df = pd.DataFrame(dict(y=self[f'<{NOxorNO2}_COL_DD>'][i,][mask],
+                                       wt=self['<wind_topo>'][i,][mask],
+                                       vcd=self[f'<{NOxorNO2}_COL>'][i,][mask])
+                                 ).dropna()
+            if if_bootstrap:
+                df = df.sample(frac=1,replace=True)
             if fit_chem:
                 topo_fit = smf.ols('y ~ wt + vcd', data=df).fit()
             else:
                 topo_fit = smf.ols('y ~ wt', data=df).fit()
             self.topo_fits.append(topo_fit)
-            self[f'<{NOxorNO2}_COL_DD_topo>'][i,] = self[f'<{NOxorNO2}_COL_DD>'][i,]\
+            if NOxorNO2 == 'fNO2':
+                self[f'<{NOxorNO2}_COL_DD_topo>'][i,] = self['<f>'][i,]*self['<NO2_COL_DD>'][i,]\
+                +self['<f_DD>'][i,]*self['<NO2_COL>'][i,]\
+                -topo_fit.params['wt']*self['<wind_topo>'][i,]*self['<f>'][i,]
+            else:
+                self[f'<{NOxorNO2}_COL_DD_topo>'][i,] = self[f'<{NOxorNO2}_COL_DD>'][i,]\
             -topo_fit.params['wt']*self['<wind_topo>'][i,]
         self.df[f'{NOxorNO2}_topo_scale_height'] = [-1/topo_fit.params['wt'] for topo_fit in self.topo_fits]
         self.df[f'{NOxorNO2}_topo_rmse'] = [np.sqrt(topo_fit.mse_resid) for topo_fit in self.topo_fits]
         self.df[f'{NOxorNO2}_topo_r2'] = [topo_fit.rsquared for topo_fit in self.topo_fits]
     
-    def fit_chem(self,resample_rule='1M',NOxorNO2='NOx',mask=None,chem_fit_order=1,remove_intercept=False):
+    def fit_chem(self,resample_rule='1M',NOxorNO2='NOx',mask=None,
+                 chem_fit_order=1,remove_intercept=False,if_bootstrap=False):
         '''generate chem fit coefficients, see fit_chemistry in popy
         '''
         if mask is None:
             mask = np.ones((len(self['ygrid']),len(self['xgrid'])),dtype=bool)
         if 'wind_topo' not in self.keys():
-            self['wind_topo'] = self['surface_altitude_DD'] * self[f'{NOxorNO2}_COL']
-        resampler = self.resample(resample_rule,
+            if NOxorNO2 == 'fNO2':
+                self['wind_topo'] = self['surface_altitude_DD'] * self['NO2_COL']
+            else:
+                self['wind_topo'] = self['surface_altitude_DD'] * self[f'{NOxorNO2}_COL']
+        if NOxorNO2 == 'fNO2':
+            resampler = self.resample(resample_rule,
+                                  ['wind_topo','NO2_COL_DD','NO2_COL'])
+        else:
+            resampler = self.resample(resample_rule,
                                   ['wind_topo',f'{NOxorNO2}_COL_DD',f'{NOxorNO2}_COL'])
         if f'<{NOxorNO2}_COL_DD_topo>' not in self.keys():
             self.logger.warning('topo fit was not done. doing it now')
@@ -178,13 +208,22 @@ class CTM(dict):
         for i,(k,v) in enumerate(resampler.indices.items()):
             df = pd.DataFrame(dict(y=self[f'<{NOxorNO2}_COL_DD_topo>'][i,][mask]))
             for order in range(1,1+chem_fit_order):
-                df['vcd{}'.format(order)] = self[f'<{NOxorNO2}_COL>'][i,][mask]**order
+                if NOxorNO2 == 'fNO2':
+                    df['vcd{}'.format(order)] = (self['<NO2_COL>'][i,][mask]*self['<f>'][i,][mask])**order
+                else:
+                    df['vcd{}'.format(order)] = self[f'<{NOxorNO2}_COL>'][i,][mask]**order
                 reg_formula += ' + vcd{}'.format(order)
             df = df.dropna()
+            if if_bootstrap:
+                df = df.sample(frac=1,replace=True)
             chem_fit = smf.ols(reg_formula, data=df).fit()
             self.chem_fits.append(chem_fit)
             for order in range(1,1+chem_fit_order):
-                self[f'<{NOxorNO2}_COL_DD_chem>'][i,] -= \
+                if NOxorNO2 == 'fNO2':
+                    self[f'<{NOxorNO2}_COL_DD_chem>'][i,] -= \
+                chem_fit.params['vcd{}'.format(order)]*(self['<NO2_COL>'][i,]*self['<f>'][i,])**order
+                else:
+                    self[f'<{NOxorNO2}_COL_DD_chem>'][i,] -= \
                 chem_fit.params['vcd{}'.format(order)]*self[f'<{NOxorNO2}_COL>'][i,]**order
             if remove_intercept:
                 self[f'<{NOxorNO2}_COL_DD_chem>'][i,] -= chem_fit.params['Intercept']
