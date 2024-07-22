@@ -13,6 +13,7 @@ from cartopy.mpl.geoaxes import GeoAxes
 GeoAxes._pcolormesh_patched = Axes.pcolormesh
 from matplotlib import path 
 import shapely
+from netCDF4 import Dataset
 
 class TEMPO():
     '''class for a TEMPO-observed region'''
@@ -77,12 +78,141 @@ class TEMPO():
             self.xys = [([self.west,self.west,self.east,self.east],
                          [self.south,self.north,self.north,self.south])]   
     
+    def load_scans(self,l3_path_pattern,
+                   min_utc_hour=1,max_utc_hour=23,
+                   fields_name=None,
+                   tendency=None,
+                   local_hour_centers=None,
+                   local_hour_spans=None):
+        '''load l3/l4 scans
+        l3_path_pattern:
+            use %Y and *
+        min/max_utc_hour:
+            limit scan time within these hours
+        fields_name:
+            fields to load from the l3/4 data files
+        tendency:
+            no tendency if None, otherwise central, backward, forward
+        local_hour_centers:
+            if provided, calculate local hour l3/4 data each day
+        local_hour_spans:
+            widths of local hour windows
+        '''
+        if fields_name is None:
+            fields_name = ['wind_column','wind_topo',
+                           'column_amount','local_hour','terrain_height']
+        
+        dates = pd.date_range(self.start_dt,self.end_dt,freq='1D')
+        wesn_dict = dict(west=self.west,east=self.east,south=self.south,north=self.north)
+        days_df = np.empty(len(dates),dtype=object)
+        for idate,date in enumerate(dates):
+            # level 3 files of the same day
+            day_flist = np.array(glob.glob(date.strftime(l3_path_pattern)))
+            nscan = len(day_flist)
+            day_df = pd.DataFrame(dict(scan_num=np.zeros(nscan,dtype=int),
+                                       time=np.zeros(nscan),
+                                       start_time=np.zeros(nscan),
+                                       end_time=np.zeros(nscan),
+                                       path=np.empty(nscan,dtype=str)))
+            for iscan in range(nscan):
+                with Dataset(day_flist[iscan],'r') as nc:
+                    scan_num = int(nc.scan_num)
+                    day_df.loc[iscan,'scan_num'] = nc.scan_num
+                    day_df.loc[iscan,'path'] = day_flist[iscan]
+                    t1 = dt.datetime.strptime(nc.time_coverage_start,'%Y-%m-%dT%H:%M:%SZ')
+                    t2 = dt.datetime.strptime(nc.time_coverage_end,'%Y-%m-%dT%H:%M:%SZ')
+                    day_df.loc[iscan,'start_time'] = t1
+                    day_df.loc[iscan,'end_time'] = t2
+                    day_df.loc[iscan,'time'] = t1 + (t2-t1)/2
+            day_df = day_df.set_index('time').sort_index()
+            mask = (day_df.index.hour >= min_utc_hour) & (day_df.index.hour <= max_utc_hour)
+            days_df[idate] = day_df[mask]
+
+        days_df = pd.concat(days_df)
+        l3s = Level3_List(dt_array=days_df.index,**wesn_dict)
+        l3s.df['start_time'] = days_df['start_time']
+        l3s.df['end_time'] = days_df['end_time']
+        l3s.df['scan_num'] = days_df['scan_num']
+        for iscan,(irow,row) in enumerate(days_df.iterrows()):
+            l3s.add(Level3_Data().read_nc(row.path,fields_name))
+        self.l3s = l3s
+        if tendency is not None:
+            for idate,date in enumerate(dates):
+                day_df = l3s.df[pd.to_datetime(l3s.df.index.date) == date]
+                nscan = day_df.shape[0]
+                for iscan,(irow,row) in enumerate(day_df.iterrows()):
+                    l3s[row['count']]['column_amount_tendency'] = \
+                    np.full(l3s[row['count']]['column_amount'].shape,np.nan)
+                    # tendency defaults to nan if only 1 scan exist for the day
+                    if nscan == 1:
+                        continue
+                    # vcd tendency, mol/m2/s
+                    if iscan == 0:
+                        l3s[row['count']]['column_amount_tendency'] = \
+                        (l3s[row['count']+1]['column_amount']-l3s[row['count']]['column_amount'])/ \
+                        (l3s[row['count']+1]['local_hour']-l3s[row['count']]['local_hour'])/3600
+                    elif iscan == nscan-1:
+                        l3s[row['count']]['column_amount_tendency'] = \
+                        (l3s[row['count']]['column_amount']-l3s[row['count']-1]['column_amount'])/ \
+                        (l3s[row['count']]['local_hour']-l3s[row['count']-1]['local_hour'])/3600
+                    else:
+                        if tendency.lower() in ['forward']:
+                            l3s[row['count']]['column_amount_tendency'] = \
+                            (l3s[row['count']+1]['column_amount']-l3s[row['count']]['column_amount'])/ \
+                            (l3s[row['count']+1]['local_hour']-l3s[row['count']]['local_hour'])/3600
+                        elif tendency.lower() in ['backward']:
+                            l3s[row['count']]['column_amount_tendency'] = \
+                            (l3s[row['count']]['column_amount']-l3s[row['count']-1]['column_amount'])/ \
+                            (l3s[row['count']]['local_hour']-l3s[row['count']-1]['local_hour'])/3600
+                        else:
+                            l3s[row['count']]['column_amount_tendency'] = \
+                            (l3s[row['count']+1]['column_amount']-l3s[row['count']-1]['column_amount'])/ \
+                            (l3s[row['count']+1]['local_hour']-l3s[row['count']-1]['local_hour'])/3600
+                
+        if local_hour_centers is not None:
+            if local_hour_spans is None: 
+                local_hour_spans = np.ones_like(local_hour_centers)*\
+                np.abs(np.mean(np.diff(local_hour_centers)))
+            nhour = len(local_hour_centers)
+            for idate,date in enumerate(dates):
+                day_dts = pd.to_datetime([
+                    date+dt.timedelta(hours=h) for h in local_hour_centers
+                ])
+                # create an empty list of Level3_Data for each local hour value
+                l3_lhs_day = np.array([Level3_Data() for i in range(nhour)])
+                day_df = l3s.df[pd.to_datetime(l3s.df.index.date) == date]
+                # loop over scans of the day
+                for iscan,(irow,row) in enumerate(day_df.iterrows()):
+                    l3 = l3s[row['count']]
+                    weight = l3['total_sample_weight'].copy()
+                    num = l3['num_samples'].copy()
+                    for ilh, (lh,lhs) in enumerate(zip(local_hour_centers,local_hour_spans)):
+                        mask = (l3['local_hour']>= lh-lhs/2) & (l3['local_hour'] < lh+lhs/2)
+                        if np.sum(mask) == 0:
+                            continue
+                        l3['total_sample_weight'][~mask] = 0
+                        l3['num_samples'][~mask] = 0
+                        l3_lhs_day[ilh] = l3_lhs_day[ilh].merge(l3)
+                        l3['total_sample_weight'] = weight.copy()
+                        l3['num_samples'] = num.copy()
+                if idate == 0:
+                    dt_array = day_dts
+                    l3_lhs = l3_lhs_day
+                else:
+                    dt_array = pd.DatetimeIndex(
+                        pd.concat([pd.Series(dt_array),pd.Series(day_dts)]))
+                    l3_lhs = np.concatenate((l3_lhs,l3_lhs_day))
+            self.l3_lhs = Level3_List(dt_array=dt_array,**wesn_dict)
+            for l3 in l3_lhs:
+                self.l3_lhs.add(l3)
+                    
     def load_l3_by_local_time(self,l3_path_pattern,
                               fields_name=None,
                               local_hour_centers=None,
                               local_hour_spans=None):
         
-        fields_name = fields_name or ['column_amount','local_hour','terrain_height']
+        if fields_name is None:
+            fields_name = ['column_amount','local_hour','terrain_height']
         if local_hour_centers is None: 
             local_hour_centers = np.linspace(8,17,10)
         if local_hour_spans is None: 
