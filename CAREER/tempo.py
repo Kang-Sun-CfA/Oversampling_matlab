@@ -119,7 +119,8 @@ class TEMPO():
                        l4_path_pattern=None,gradient_kw=None,
                        l3_save_fields=None,l4_save_fields=None,
                        maxsza=75,maxcf=0.3,
-                       ncores=0,block_length=300):
+                       ncores=0,block_length=300,
+                       l3_ncattr_dict=None,l4_ncattr_dict=None):
         
         if not attach_l2 and not attach_l3 and (l3_path_pattern is None) and (l4_path_pattern is None):
             self.logger.error('attach l2/l3 data or provide level3/4 paths!')
@@ -136,6 +137,10 @@ class TEMPO():
          'wind_column','wind_column_xy','wind_column_rs']
         
         if l3_path_pattern is not None:
+            l3_ncattr_dict = l3_ncattr_dict or {
+                'description':'Level 3 data created using physical oversampling (https://doi.org/10.5194/amt-11-6679-2018)',
+                'institution':'University at Buffalo',
+                'contact':'Kang Sun, kangsun@buffalo.edu'}
             if 'S{0:03d}' not in l3_path_pattern:
                 lst = list(os.path.splitext(l3_path_pattern))
                 lst.insert(1,'S{0:03d}')
@@ -143,6 +148,13 @@ class TEMPO():
                 self.logger.warning('scan num is added to saved l3 file name')
         
         if l4_path_pattern is not None:
+            if do_l4:
+                l4_ncattr_dict = l4_ncattr_dict or {
+                    'description':'Level 4 data created using directional derivative approach (https://doi.org/10.1029/2022GL101102)',
+                    'institution':'University at Buffalo',
+                    'contact':'Kang Sun, kangsun@buffalo.edu',
+                    'x_wind_field':gradient_kw['x_wind_field'],
+                    'y_wind_field':gradient_kw['y_wind_field']}
             if do_l4 and 'S{0:03d}' not in l4_path_pattern:
                 lst = list(os.path.splitext(l4_path_pattern))
                 lst.insert(1,'S{0:03d}')
@@ -225,7 +237,13 @@ class TEMPO():
                 if l3_path_pattern is not None:
                     l3_fn = date.strftime(l3_path_pattern.format(int(scan_num)))
                     os.makedirs(os.path.split(l3_fn)[0],exist_ok=True)
-                    l3.save_nc(l3_fn,l3_save_fields)
+                    l3_ncattr_dict['scan_num'] = int(scan_num)
+                    l3_ncattr_dict['time_coverage_start'] = \
+                    datedev_py(np.nanmin(l2g['UTC_matlab_datenum'])).strftime('%Y-%m-%dT%H:%M:%SZ')
+                    l3_ncattr_dict['time_coverage_end'] = \
+                    datedev_py(np.nanmax(l2g['UTC_matlab_datenum'])).strftime('%Y-%m-%dT%H:%M:%SZ')
+                    l3_ncattr_dict['history'] = 'Created '+dt.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+                    l3.save_nc(l3_fn,l3_save_fields,ncattr_dict=l3_ncattr_dict)
                 if do_l4:
                     l4 = l3.block_reduce(self.flux_grid_size)
                     l4.calculate_gradient(**tempo_l2_daily.calculate_gradient_kw)
@@ -234,7 +252,13 @@ class TEMPO():
                     if l4_path_pattern is not None:
                         l4_fn = date.strftime(l4_path_pattern.format(int(scan_num)))
                         os.makedirs(os.path.split(l4_fn)[0],exist_ok=True)
-                        l4.save_nc(l4_fn,l4_save_fields)
+                        l4_ncattr_dict['scan_num'] = float(scan_num)
+                        l4_ncattr_dict['time_coverage_start'] = \
+                        datedev_py(np.nanmin(l2g['UTC_matlab_datenum'])).strftime('%Y-%m-%dT%H:%M:%SZ')
+                        l4_ncattr_dict['time_coverage_end'] = \
+                        datedev_py(np.nanmax(l2g['UTC_matlab_datenum'])).strftime('%Y-%m-%dT%H:%M:%SZ')
+                        l4_ncattr_dict['history'] = 'Created '+dt.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+                        l4.save_nc(l4_fn,l4_save_fields,ncattr_dict=l4_ncattr_dict)
             if attach_l2 or attach_l3:
                 dt_array = pd.to_datetime(dt_array)
                 self.dt_array = dt_array
