@@ -915,6 +915,95 @@ def F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,\
         sounding_interp[fn] = my_interpolating_function((sounding_lon,sounding_lat,sounding_datenum))
     return sounding_interp
 
+def F_interp_era5_uv(sounding_lon,sounding_lat,sounding_datenum,
+                     era5_3d_path_pattern='/projects/academic/kangsun/data/ERA5/Y%Y/M%m/D%d/CONUS_3D_%Y%m%d.nc',
+                     era5_2d_path_pattern=None,
+                     interp_fields_2d=['u10','v10'],
+                     altitudes=None):
+    """
+    sample a field from era5 data in .nc format, following F_interp_era5 and F_interp_hrrr_uv
+    see era5.py for era5 downloading/subsetting
+    sounding_lon:
+        longitude for interpolation
+    sounding_lat:
+        latitude for interpolation
+    sounding_datenum:
+        time for interpolation in matlab datenum double format
+    era5_3d/2d_path_pattern:
+        file path pattern of 3d/2d files
+    interp_fields_2d:
+        fields to get from 2d files. sp is added if not there
+    altitudes:
+        a list of atitude values at which to interpret era5 3d wind
+    created on 2024/07/25
+    """
+    from scipy.interpolate import RegularGridInterpolator
+    from netCDF4 import Dataset
+    scale_height = 7500
+    era5_2d_path_pattern = era5_2d_path_pattern or era5_3d_path_pattern.replace('3D','2D')
+    if 'sp' not in interp_fields_2d:
+        interp_fields_2d += ['sp']
+    if altitudes is None:
+        altitudes = [500]
+    dates = pd.date_range(datedev_py(sounding_datenum.min()),
+                          datedev_py(sounding_datenum.max()),freq='1d')
+    era5_data = {}
+    for idate,date in enumerate(dates):
+        fn3 = date.strftime(era5_3d_path_pattern)
+        fn2 = date.strftime(era5_2d_path_pattern)
+        with Dataset(fn3,'r') as nc3, Dataset(fn2,'r') as nc2:
+            if not np.array_equal(nc3['time'][:],nc2['time'][:]):
+                logging.error('{} and {} do not have the same time!'.format(fn2,fn3))
+                return
+            dn = nc3['time'][:]/24.+693962.
+            u = nc3['u'][:].transpose((3,2,1,0))[:,::-1,:,:]
+            v = nc3['v'][:].transpose((3,2,1,0))[:,::-1,:,:]
+            if idate == 0:
+                era5_data['lon'] = nc3['longitude'][:]
+                era5_data['lat'] = nc3['latitude'][:][::-1]
+                era5_data['hPa'] = nc3['level'][:]
+                era5_data['dn'] = dn
+                era5_data['u'] = u
+                era5_data['v'] = v
+                for fld in interp_fields_2d:
+                    era5_data[fld] = nc2[fld][:].transpose((2,1,0))[:,::-1,:]
+            else:
+                era5_data['dn'] = np.concatenate((era5_data['dn'],dn),axis=0)
+                era5_data['u'] = np.concatenate((era5_data['u'],u),axis=3)
+                era5_data['v'] = np.concatenate((era5_data['v'],v),axis=3)
+                for fld in interp_fields_2d:
+                    era5_data[fld] = np.concatenate((era5_data[fld],
+                        nc2[fld][:].transpose((2,1,0))[:,::-1,:]),axis=2)
+
+    sounding_interp = {}
+    for fld in interp_fields_2d:
+        f = RegularGridInterpolator(
+            (era5_data['lon'],era5_data['lat'],era5_data['dn']),
+            era5_data[fld],bounds_error=False,fill_value=np.nan)
+        sounding_interp[fld] = f((sounding_lon,sounding_lat,sounding_datenum))
+
+    for altitude in altitudes:
+        sounding_hPa = sounding_interp['sp']/100*np.exp(-altitude/scale_height)
+        mask = sounding_hPa>np.max(era5_data['hPa'])
+        if any(mask):
+            logging.warning(
+                'At {}m, {:3f}% sounding_hPa larger than bound {}'.format(
+                    altitude,sum(mask)/len(mask)*100,np.max(era5_data['hPa'])))
+            sounding_hPa[mask] = np.max(era5_data['hPa'])
+        mask = sounding_hPa<np.min(era5_data['hPa'])
+        if any(mask):
+            logging.warning(
+                'At {}m, {:3f}% sounding_hPa smaller than bound {}'.format(
+                    altitude,sum(mask)/len(mask)*100,np.min(era5_data['hPa'])))
+            sounding_hPa[mask] = np.min(era5_data['hPa'])
+        for fld in ['u','v']:
+            f = RegularGridInterpolator(
+                (era5_data['lon'],era5_data['lat'],era5_data['hPa'],era5_data['dn']),
+                era5_data[fld],bounds_error=False,fill_value=np.nan)
+            sounding_interp['{}{}'.format(fld,altitude)] = f(
+                (sounding_lon,sounding_lat,sounding_hPa,sounding_datenum))
+    return sounding_interp
+
 def F_interp_hrrr_uv(sounding_lon,sounding_lat,sounding_datenum,altitudes=None,save_dir=None):
     '''interpolate fields from hrrr data, handled by herbie
     sounding_lon:
@@ -5219,7 +5308,7 @@ class popy(object):
     
     def F_subset_TEMPONO2(self,l2_list=None,l2_path_pattern=None,
                           data_fields=None,data_fields_l2g=None,
-                          min_MDQF=0,max_MDQF=0,maxsza=75,maxvza=90,maxcf=1):
+                          min_MDQF=0,max_MDQF=0,maxsza=None,maxvza=90,maxcf=None):
         """ 
         function to subset TEMPONO2 level 2 data
         l2_list:
@@ -5259,8 +5348,8 @@ class popy(object):
                 l2_list = l2_list+flist                 
         self.l2_list = l2_list
         
-        maxsza = self.maxsza
-        maxcf = self.maxcf
+        maxsza = maxsza or self.maxsza
+        maxcf = maxcf or self.maxcf
         west = self.west
         east = self.east
         south = self.south
@@ -9548,7 +9637,7 @@ class popy(object):
             self.logger.info('GEOS-Chem profiles sampled at level 2 g locations')
     
     def F_interp_met(self,which_met,met_dir=None,interp_fields=None,fn_header=None,
-                     time_collection='inst3',altitudes=None):
+                     time_collection='inst3',altitudes=None,**kwargs):
         """
         finally made the decision to integrate all meteorological interopolation
         to the same framework.
@@ -9574,12 +9663,22 @@ class popy(object):
         sounding_lat = self.l2g_data['latc']
         sounding_datenum = self.l2g_data['UTC_matlab_datenum']
         if which_met in {'era','era5','ERA','ERA5'}:
-            sounding_interp = F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,
-                                            met_dir,interp_fields,fn_header)
-            for key in sounding_interp.keys():
-                self.logger.info(key+' from ERA5 is sampled to L2g coordinate/time')
-                self.l2g_data['era5_'+key] = np.float32(sounding_interp[key])
-                self.sounding_interp = sounding_interp
+            if altitudes is None:
+                sounding_interp = F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,
+                                                met_dir,interp_fields,fn_header)
+                for key in sounding_interp.keys():
+                    self.logger.info(key+' from ERA5 is sampled to L2g coordinate/time')
+                    self.l2g_data['era5_'+key] = np.float32(sounding_interp[key])
+                    self.sounding_interp = sounding_interp
+            else:
+                era5_3d_path_pattern = met_dir
+                era5_2d_path_pattern = kwargs.pop('era5_2d_path_pattern',None)
+                sounding_interp = F_interp_era5_uv(
+                    sounding_lon,sounding_lat,sounding_datenum,
+                    era5_3d_path_pattern,era5_2d_path_pattern,interp_fields,altitudes)
+                for key in sounding_interp.keys():
+                    self.logger.info(key+' from ERA5 is sampled to L2g coordinate/time')
+                    self.l2g_data['era5_'+key] = np.float32(sounding_interp[key])
         elif which_met in {'geos','GEOS','GEOS-FP','geos-fp'}:
             if not fn_header:
                 fn_header_local = 'subset'

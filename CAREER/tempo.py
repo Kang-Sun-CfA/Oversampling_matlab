@@ -263,8 +263,8 @@ class TEMPO():
         
         l3_save_fields = l3_save_fields or ['column_amount']
         l4_save_fields = l4_save_fields or \
-        ['column_amount','local_hour','terrain_height','wind_topo',\
-         'wind_column','wind_column_xy','wind_column_rs']
+        ['column_amount','local_hour','terrain_height','amf_cloud_fraction',\
+         'wind_topo','wind_column','wind_column_xy','wind_column_rs']
         
         if l3_path_pattern is not None:
             l3_ncattr_dict = l3_ncattr_dict or {
@@ -326,7 +326,7 @@ class TEMPO():
                                   flux_grid_size=self.flux_grid_size,
                                   error_model=self.error_model,
                                   oversampling_list=[
-                                      'terrain_height','column_amount','local_hour'])
+                                      'terrain_height','column_amount','local_hour','amf_cloud_fraction'])
             
             tempo_l2_daily.F_subset_TEMPONO2(l2_list=day_flist,maxsza=maxsza,maxcf=maxcf)
             if tempo_l2_daily.nl2 == 0:
