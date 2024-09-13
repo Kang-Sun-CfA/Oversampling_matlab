@@ -846,6 +846,7 @@ def F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,\
     fn_header:
         in general should denote domain location of era5 data
     created on 2019/09/18
+    as of 9/2024, this function will not work properly with new era5 - needs update if there is demand
     """
     from scipy.interpolate import RegularGridInterpolator
 
@@ -952,16 +953,36 @@ def F_interp_era5_uv(sounding_lon,sounding_lat,sounding_datenum,
         fn3 = date.strftime(era5_3d_path_pattern)
         fn2 = date.strftime(era5_2d_path_pattern)
         with Dataset(fn3,'r') as nc3, Dataset(fn2,'r') as nc2:
-            if not np.array_equal(nc3['time'][:],nc2['time'][:]):
+            
+            if 'time' in nc3.dimensions.keys():
+                dn3 = nc3['time'][:]/24.+693962.
+            elif 'valid_time' in nc3.dimensions.keys():
+                dn3 = nc3['valid_time'][:]/86400.+719529.
+            
+            if 'time' in nc2.dimensions.keys():
+                dn2 = nc2['time'][:]/24.+693962.
+            elif 'valid_time' in nc2.dimensions.keys():
+                dn2 = nc2['valid_time'][:]/86400.+719529.
+            
+            if not np.array_equal(dn3,dn2):
                 logging.error('{} and {} do not have the same time!'.format(fn2,fn3))
                 return
-            dn = nc3['time'][:]/24.+693962.
-            u = nc3['u'][:].transpose((3,2,1,0))[:,::-1,:,:]
-            v = nc3['v'][:].transpose((3,2,1,0))[:,::-1,:,:]
+            dn = dn3
+            # previous er5 has pressure ascending, only flipping latitude
+            if 'level' in nc3.dimensions.keys():
+                u = nc3['u'][:].transpose((3,2,1,0))[:,::-1,:,:]
+                v = nc3['v'][:].transpose((3,2,1,0))[:,::-1,:,:]
+            # 2024 era5 3d file has pressure descending
+            elif 'pressure_level' in nc3.dimensions.keys():
+                u = nc3['u'][:].transpose((3,2,1,0))[:,::-1,::-1,:]
+                v = nc3['v'][:].transpose((3,2,1,0))[:,::-1,::-1,:]
             if idate == 0:
                 era5_data['lon'] = nc3['longitude'][:]
                 era5_data['lat'] = nc3['latitude'][:][::-1]
-                era5_data['hPa'] = nc3['level'][:]
+                if 'level' in nc3.dimensions.keys():
+                    era5_data['hPa'] = nc3['level'][:]
+                elif 'pressure_level' in nc3.dimensions.keys():
+                    era5_data['hPa'] = nc3['pressure_level'][:][::-1]
                 era5_data['dn'] = dn
                 era5_data['u'] = u
                 era5_data['v'] = v
@@ -3619,6 +3640,7 @@ class Level3_List(list):
         l3s_new = Level3_List(dt_array=self.dt_array,west=west,east=east,south=south,north=north)
         for l3 in self:
             l3s_new.add(l3)
+        l3s_new.df = self.df
         return l3s_new
     
     def add(self,l3):
@@ -5409,8 +5431,14 @@ class popy(object):
                     self.logger.info(os.path.split(fn)[-1]+' does not intersects with popy domain. Skipping...')
                     continue
                 if np.max(nc['geolocation/time'][:].mask) == True:
-                    self.logger.warning(os.path.split(fn)[-1]+' has invalid time stamp! Skipping...')
-                    continue
+                    self.logger.info(os.path.split(fn)[-1]+' has invalid time stamp! Fill by even time stamps between start/end')
+                    dn_utc0 = datetime2datenum(datetime.datetime.strptime(nc.time_coverage_start,'%Y-%m-%dT%H:%M:%SZ'))
+                    dn_utc1 = datetime2datenum(datetime.datetime.strptime(nc.time_coverage_end,'%Y-%m-%dT%H:%M:%SZ'))
+                    nmirror_step = nc.dimensions['mirror_step'].size
+                    UTC_matlab_datenum = np.linspace(dn_utc0,dn_utc1,nmirror_step+1)[:nmirror_step]
+                else:
+                    UTC_matlab_datenum = np.array([datetime2datenum(ref_dt+datetime.timedelta(seconds=s)) \
+                                               for s in nc['geolocation/time'][:].data])
                 outp_nc = {}
                 for i,dfld in enumerate(data_fields):
                     tmp = nc[dfld]
@@ -5423,8 +5451,7 @@ class popy(object):
                     except:
                         self.logger.debug('{} cannot be filled by nan or is not a masked array'.format(varname))
                         outp_nc[varname] = tmp[:].data
-                UTC_matlab_datenum = np.array([datetime2datenum(ref_dt+datetime.timedelta(seconds=s)) \
-                                               for s in nc['geolocation/time'][:].data])
+                
                 outp_nc['UTC_matlab_datenum'] = np.broadcast_to(UTC_matlab_datenum[:,np.newaxis],outp_nc['latc'].shape)
                 xtrack = nc.dimensions['xtrack'].size
                 outp_nc['across_track_position'] = np.broadcast_to(np.arange(1.,xtrack+1)[np.newaxis,:],\
