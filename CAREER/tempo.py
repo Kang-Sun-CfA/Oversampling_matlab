@@ -389,16 +389,19 @@ class TEMPO():
                         datedev_py(np.nanmax(l2g['UTC_matlab_datenum'])).strftime('%Y-%m-%dT%H:%M:%SZ')
                         l4_ncattr_dict['history'] = 'Created '+dt.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
                         l4.save_nc(l4_fn,l4_save_fields,ncattr_dict=l4_ncattr_dict)
-            if attach_l2 or attach_l3:
-                dt_array = pd.to_datetime(dt_array)
-                self.dt_array = dt_array
-            if attach_l3:
-                self.l3s = Level3_List(dt_array,**wesn_dict)
-                for l in l3s:
-                    self.l3s.add(l)
-                if do_l4:
-                    self.l4s = Level3_List(dt_array,**wesn_dict)
-                    for l in l4s:
-                        self.l4s.add(l)
-            if attach_l2:
-                self.l2s = l2s
+            
+            tempo_l2_daily = None
+            
+        if attach_l2 or attach_l3:
+            dt_array = pd.to_datetime(dt_array)
+            self.dt_array = dt_array
+        if attach_l3:
+            self.l3s = Level3_List(dt_array,**wesn_dict)
+            for l in l3s:
+                self.l3s.add(l)
+            if do_l4:
+                self.l4s = Level3_List(dt_array,**wesn_dict)
+                for l in l4s:
+                    self.l4s.add(l)
+        if attach_l2:
+            self.l2s = l2s

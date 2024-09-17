@@ -119,6 +119,42 @@ class PointSource(object):
         figout = dict(fig=fig,ax=ax,collection=collection,quiver=quiver,cb=cb)
         return figout
     
+    def regrid_tempo(self,l2_path_pattern,
+                     product='NO2',
+                     attach_l3=False,attach_l2=False,
+                     l3_path_pattern=None,
+                     l4_path_pattern=None,
+                     gradient_kw=None,
+                     start_dt=None,end_dt=None,
+                     l3_save_fields=None,l4_save_fields=None,
+                     maxsza=75,maxcf=0.3,
+                     ncores=0,block_length=300,
+                     grid_size=0.01,flux_grid_size=0.05):
+        
+        from CAREER.tempo import TEMPO
+        tempo_obj = TEMPO(product=product,
+                          west=self.west,east=self.east,
+                          south=self.south,north=self.north,
+                          start_dt=self.start_dt,end_dt=self.end_dt,
+                          grid_size=grid_size,flux_grid_size=flux_grid_size)
+        tempo_obj.regrid_from_l2(
+            l2_path_pattern=l2_path_pattern,
+            attach_l3=attach_l3,
+            attach_l2=attach_l2,
+            l3_path_pattern=l3_path_pattern,
+            l4_path_pattern=l4_path_pattern,
+            gradient_kw=gradient_kw,
+            l3_save_fields=l3_save_fields,
+            l4_save_fields=l4_save_fields,
+            maxsza=maxsza,maxcf=maxcf,
+            ncores=ncores,block_length=block_length)
+        if attach_l3:
+            self.l3s = tempo_obj.l3s
+            if hasattr(tempo_obj,'l4s'):
+                self.l4s = tempo_obj.l4s
+        if attach_l2:
+            self.l2s = tempo_obj.l2s
+        
     def regrid_tropomi(self,l2_path_pattern,
                        product='NO2',
                        l2_freq='1M',
