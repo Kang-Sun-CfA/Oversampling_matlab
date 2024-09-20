@@ -66,7 +66,7 @@ oversampling_list = control.pop('oversampling_list',None)
 if_use_presaved_l2g = control.pop('if_use_presaved_l2g',True)
 ncores = control.pop('ncores',None)
 block_length=control.pop('block_length',300)
-ellipse_lut_path = control.pop('ellipse_lut_path' or '/projects/academic/kangsun/data/IASIaNH3/daysss.mat')
+ellipse_lut_path = control.pop('ellipse_lut_path','/projects/academic/kangsun/data/IASIaNH3/daysss.mat')
 # if those important inputs are not given, assign None and later product-specific values
 for k in ['grid_size','flux_grid_size','met_path_pattern','l2_path_pattern',
           'l3_path_pattern','which_met','interp_fields','save_fields']:
@@ -79,7 +79,8 @@ subset_function = None
 interp_met_kw = {'which_met':control['which_met'] or 'ERA5',
                'met_dir':control['met_path_pattern'] or '/projects/academic/kangsun/data/ERA5/Y%Y/M%m/D%d/{}_2D_%Y%m%d.nc'.format(region.upper()),
                'interp_fields':control['interp_fields'] or ['u100','v100','u10','v10']}
-
+if 'altitudes' in control.keys():
+    interp_met_kw['altitudes'] = control['altitudes']
 # instrum/product/algorithm specific inputs
 if product == 'NO2':
     l2_path_pattern = control['l2_path_pattern'] or \
@@ -100,6 +101,9 @@ if product == 'NO2':
                'func_to_get_vcd':None,
                'interp_met_kw':interp_met_kw,
                'calculate_gradient_kw':calculate_gradient_kw}
+    if 'altitudes' in control.keys():
+        gradient_kw['x_wind_field'] = 'era5_u{}'.format(control['altitudes'][0])
+        gradient_kw['y_wind_field'] = 'era5_v{}'.format(control['altitudes'][0])
 elif product == 'CH4':
     
     l2_path_pattern = control['l2_path_pattern'] or \

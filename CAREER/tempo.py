@@ -79,30 +79,43 @@ class TEMPO():
                          [self.south,self.north,self.north,self.south])]   
     
     def load_scans(self,l3_path_pattern,
-                   min_utc_hour=1,max_utc_hour=23,
+                   min_utc_hour=None,max_utc_hour=None,
                    fields_name=None,
                    tendency=None,
                    local_hour_centers=None,
                    local_hour_spans=None):
         '''load l3/l4 scans
         l3_path_pattern:
-            use %Y and *
+            use %Y%m%d format and *
         min/max_utc_hour:
-            limit scan time within these hours
+            limit scan time within these hours. infer from local hours if possible
         fields_name:
             fields to load from the l3/4 data files
         tendency:
             no tendency if None, otherwise central, backward, forward
         local_hour_centers:
-            if provided, calculate local hour l3/4 data each day
+            if provided, calculate local hour l3/4 data each day. must be increasing
         local_hour_spans:
             widths of local hour windows
         '''
         if fields_name is None:
             fields_name = ['wind_column','wind_topo',
                            'column_amount','local_hour','terrain_height']
+        if local_hour_centers is not None:
+            do_local_hour = True
+            if local_hour_spans is None: 
+                local_hour_spans = np.ones_like(local_hour_centers)*\
+                np.abs(np.mean(np.diff(local_hour_centers)))
+            min_utc_hour = min_utc_hour or \
+            local_hour_centers[0]-local_hour_spans[0]/2-self.east/15
+            max_utc_hour = max_utc_hour or \
+            local_hour_centers[-1]+local_hour_spans[-1]/2-self.west/15
+        else:
+            do_local_hour = False
+            min_utc_hour = min_utc_hour or 0.
+            max_utc_hour = max_utc_hour or 30.
         
-        dates = pd.date_range(self.start_dt,self.end_dt,freq='1D')
+        dates = pd.date_range(self.start_dt,self.end_dt,freq='1d')
         wesn_dict = dict(west=self.west,east=self.east,south=self.south,north=self.north)
         days_df = np.empty(len(dates),dtype=object)
         for idate,date in enumerate(dates):
@@ -113,6 +126,7 @@ class TEMPO():
                                        time=np.zeros(nscan),
                                        start_time=np.zeros(nscan),
                                        end_time=np.zeros(nscan),
+                                       mid_time=np.zeros(nscan),
                                        path=np.empty(nscan,dtype=str)))
             for iscan in range(nscan):
                 with Dataset(day_flist[iscan],'r') as nc:
@@ -123,14 +137,16 @@ class TEMPO():
                     t2 = dt.datetime.strptime(nc.time_coverage_end,'%Y-%m-%dT%H:%M:%SZ')
                     day_df.loc[iscan,'start_time'] = t1
                     day_df.loc[iscan,'end_time'] = t2
-                    day_df.loc[iscan,'time'] = t1 + (t2-t1)/2
-            day_df = day_df.set_index('time').sort_index()
-            mask = (day_df.index.hour >= min_utc_hour) & (day_df.index.hour <= max_utc_hour)
+                    day_df.loc[iscan,'mid_time'] = t1 + (t2-t1)/2
+            day_df = day_df.set_index('start_time',drop=False).sort_index()
+            scan_start_hour = (pd.to_datetime(day_df['start_time'])-pd.to_datetime(date))/pd.Timedelta(hours=1)
+            scan_end_hour = (pd.to_datetime(day_df['end_time'])-pd.to_datetime(date))/pd.Timedelta(hours=1)
+            mask = (scan_end_hour >= min_utc_hour) & (scan_start_hour <= max_utc_hour)
             days_df[idate] = day_df[mask]
 
         days_df = pd.concat(days_df)
         l3s = Level3_List(dt_array=days_df.index,**wesn_dict)
-        l3s.df['start_time'] = days_df['start_time']
+        l3s.df['mid_time'] = days_df['mid_time']
         l3s.df['end_time'] = days_df['end_time']
         l3s.df['scan_num'] = days_df['scan_num']
         for iscan,(irow,row) in enumerate(days_df.iterrows()):
@@ -169,10 +185,7 @@ class TEMPO():
                             (l3s[row['count']+1]['column_amount']-l3s[row['count']-1]['column_amount'])/ \
                             (l3s[row['count']+1]['local_hour']-l3s[row['count']-1]['local_hour'])/3600
                 
-        if local_hour_centers is not None:
-            if local_hour_spans is None: 
-                local_hour_spans = np.ones_like(local_hour_centers)*\
-                np.abs(np.mean(np.diff(local_hour_centers)))
+        if do_local_hour:
             nhour = len(local_hour_centers)
             for idate,date in enumerate(dates):
                 day_dts = pd.to_datetime([
@@ -308,12 +321,14 @@ class TEMPO():
         for date in dates:
             next_date = date+pd.DateOffset(1)
             # popy has a very old way of managing time
+            # start from 8 am utc of the day
             start_dict = {k:v for k,v in zip(
                 ['start_year','start_month','start_day','start_hour','start_minute','start_second'],
-                date.timetuple()[0:6])}
+                date.timetuple()[0:3]+(8,0,0))}
+            # end at 2 am utc of the next day
             end_dict = {k:v for k,v in zip(
                 ['end_year','end_month','end_day','end_hour','end_minute','end_second'],
-                next_date.timetuple()[0:6])}
+                next_date.timetuple()[0:3]+(2,0,0))}
             # level 2 files of the same day
             day_flist = glob.glob(date.strftime(l2_path_pattern))
             
