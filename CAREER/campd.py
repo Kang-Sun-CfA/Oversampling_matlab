@@ -309,7 +309,9 @@ class PointSource(object):
         
         
     def get_satellite_emissions(self,l3s,l3_all=None,fit_topo_kw=None,fit_chem_kw=None,
-                          chem_min_column_amount=None,chem_max_wind_column=None):
+                               chem_min_column_amount=None,chem_max_wind_column=None,
+                               dist_steps_km=None,
+                               fields_to_sum=None):
         '''interface popy level 3 objects. 
         l3s:
             Level3_List object
@@ -323,6 +325,10 @@ class PointSource(object):
             min column amount allowed in fit_chem
         chem_max_wind_column:
             max wind_column allowed in fit_chem
+        dist_steps_km:
+            integrating radius to get mol/s
+        fields_to_sum:
+            input to Level3_List.sum_by_mask
         '''
         l3_all = l3_all or l3s.aggregate()
         fit_topo_kw = fit_topo_kw or dict(max_iter=1)
@@ -350,15 +356,30 @@ class PointSource(object):
         dist_to_f_km = np.sqrt(np.square((lonmesh-self.lon)*self.km_per_lon)+\
                                np.square((latmesh-self.lat)*self.km_per_lat)
                                )
-        dist_steps_km = np.linspace(self.start_km,self.end_km,self.nstep)
-        emission_rates = np.empty((len(ls),self.nstep),dtype=object)
-        emission_rates_all = np.empty(self.nstep,dtype=object)
-        for idist,dist_step in enumerate(dist_steps_km):
-            mask = np.zeros(lonmesh.shape,dtype=bool)
-            mask[dist_to_f_km <= dist_step] = True
-            emission_rates_all[idist] = l_all.sum_by_mask(mask=mask)
-            for il,ll in enumerate(ls):
-                emission_rates[il,idist] = ll.sum_by_mask(mask=mask)
+        # to be compatible with an older version
+        if dist_steps_km is None:
+            dist_steps_km = np.linspace(self.start_km,self.end_km,self.nstep)
+            emission_rates = np.empty((len(ls),self.nstep),dtype=object)
+            emission_rates_all = np.empty(self.nstep,dtype=object)
+            for idist,dist_step in enumerate(dist_steps_km):
+                mask = np.zeros(lonmesh.shape,dtype=bool)
+                mask[dist_to_f_km <= dist_step] = True
+                emission_rates_all[idist] = l_all.sum_by_mask(mask=mask)
+                for il,ll in enumerate(ls):
+                    emission_rates[il,idist] = ll.sum_by_mask(mask=mask)
+
+            self.emission_rates = emission_rates
+            self.emission_rates_all = emission_rates_all
+        else:
+            for idist,dist_step in enumerate(dist_steps_km):
+                mask = np.zeros(lonmesh.shape,dtype=bool)
+                mask[dist_to_f_km <= dist_step] = True
+                ls.sum_by_mask(mask=mask,fields_to_sum=fields_to_sum)
+                for k in ls.df.keys():
+                    if ('summed_' in k or 'averaged_' in k) and 'dist' not in k:
+                        ls.df.rename(inplace=True,
+                                     columns={k:'{}_dist{}'.format(k,dist_step)})
+        
         l_all['dist_to_f_km'] = dist_to_f_km
         l_all['chem_mask'] = chem_mask
         self.l3_all = l_all
@@ -367,8 +388,15 @@ class PointSource(object):
             self.logger.warning('emission_df (CEMS emission) is not given')
         else:
             # merge satellite emission rate and cems emission rate
-            fe0 = pd.DataFrame(self.emission_df['NOx (mol/s)'].resample(l3_df.index.freq).mean())
-            fe0.index = fe0.index.to_period()
+            if not l3_df.index.freq:
+                self.logger.warning('freq not given, assuming satellite data are hourly!')
+                sfreq = '1h'
+            else:
+                sfreq = l3_df.index.freq
+            fe0 = pd.DataFrame(self.emission_df['NOx (mol/s)'].resample(sfreq).mean())
+            if isinstance(l3_df.index,pd.core.indexes.period.PeriodIndex):
+                self.logger.waring('satellite data are in period index. converting cems to period too')
+                fe0.index = fe0.index.to_period()
             fe0 = fe0.rename(columns={'NOx (mol/s)':'Facility NOx'})
             l3_df = l3_df.merge(fe0,left_index=True,right_index=True)
             if 'tropomi' in self.emission_df.keys():
@@ -380,8 +408,6 @@ class PointSource(object):
                 l3_df = l3_df.merge(fe1,left_index=True,right_index=True)
         self.l3_df = l3_df
         self.dist_steps_km = dist_steps_km
-        self.emission_rates = emission_rates
-        self.emission_rates_all = emission_rates_all
     
     def slice_emission_rate(self,dist_slice=20,l3_flds=None):
         '''calculate emission rate over all time and for each satellite l3 time step

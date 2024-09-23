@@ -92,24 +92,36 @@ class TEMPO():
         fields_name:
             fields to load from the l3/4 data files
         tendency:
-            no tendency if None, otherwise central, backward, forward
+            no tendency if None, otherwise a sublist from ['central', 'backward', 'forward']
+            or ['c','b','f']
         local_hour_centers:
-            if provided, calculate local hour l3/4 data each day. must be increasing
+            if provided, calculate local hour l3/4 data each day. must be increasing. suggest
+            use integer hours
         local_hour_spans:
-            widths of local hour windows
+            widths of local hour windows. a scalar will be expanded to an array
         '''
         if fields_name is None:
             fields_name = ['wind_column','wind_topo',
                            'column_amount','local_hour','terrain_height']
+        if tendency is not None:
+            do_tendency = True
+        else:
+            do_tendency = False
+        
         if local_hour_centers is not None:
             do_local_hour = True
             if local_hour_spans is None: 
                 local_hour_spans = np.ones_like(local_hour_centers)*\
                 np.abs(np.mean(np.diff(local_hour_centers)))
+            elif np.isscalar(local_hour_spans):
+                local_hour_spans = np.ones_like(local_hour_centers)*local_hour_spans
             min_utc_hour = min_utc_hour or \
             local_hour_centers[0]-local_hour_spans[0]/2-self.east/15
             max_utc_hour = max_utc_hour or \
             local_hour_centers[-1]+local_hour_spans[-1]/2-self.west/15
+            if do_tendency:
+                min_utc_hour -= 1
+                max_utc_hour += 1
         else:
             do_local_hour = False
             min_utc_hour = min_utc_hour or 0.
@@ -152,38 +164,43 @@ class TEMPO():
         for iscan,(irow,row) in enumerate(days_df.iterrows()):
             l3s.add(Level3_Data().read_nc(row.path,fields_name))
         self.l3s = l3s
-        if tendency is not None:
+        if do_tendency:
             for idate,date in enumerate(dates):
                 day_df = l3s.df[pd.to_datetime(l3s.df.index.date) == date]
                 nscan = day_df.shape[0]
                 for iscan,(irow,row) in enumerate(day_df.iterrows()):
-                    l3s[row['count']]['column_amount_tendency'] = \
-                    np.full(l3s[row['count']]['column_amount'].shape,np.nan)
+                    for tdcy in tendency:
+                        l3s[row['count']][f'storage_{tdcy}'] = \
+                        np.full(l3s[row['count']]['column_amount'].shape,np.nan)
                     # tendency defaults to nan if only 1 scan exist for the day
                     if nscan == 1:
                         continue
-                    # vcd tendency, mol/m2/s
-                    if iscan == 0:
-                        l3s[row['count']]['column_amount_tendency'] = \
-                        (l3s[row['count']+1]['column_amount']-l3s[row['count']]['column_amount'])/ \
-                        (l3s[row['count']+1]['local_hour']-l3s[row['count']]['local_hour'])/3600
-                    elif iscan == nscan-1:
-                        l3s[row['count']]['column_amount_tendency'] = \
-                        (l3s[row['count']]['column_amount']-l3s[row['count']-1]['column_amount'])/ \
-                        (l3s[row['count']]['local_hour']-l3s[row['count']-1]['local_hour'])/3600
-                    else:
-                        if tendency.lower() in ['forward']:
-                            l3s[row['count']]['column_amount_tendency'] = \
+                    # dvcd/dt, mol/m2/s
+                    for tdcy in tendency:
+                        # only forward finite difference is possible for the first scan
+                        if iscan == 0 and tdcy in ['forward','f']:
+                            l3s[row['count']][f'storage_{tdcy}'] = \
                             (l3s[row['count']+1]['column_amount']-l3s[row['count']]['column_amount'])/ \
                             (l3s[row['count']+1]['local_hour']-l3s[row['count']]['local_hour'])/3600
-                        elif tendency.lower() in ['backward']:
-                            l3s[row['count']]['column_amount_tendency'] = \
+                        # only backward finite difference is possible for the last scan
+                        elif iscan == nscan-1 and tdcy in ['backward','b']:
+                            l3s[row['count']][f'storage_{tdcy}'] = \
                             (l3s[row['count']]['column_amount']-l3s[row['count']-1]['column_amount'])/ \
                             (l3s[row['count']]['local_hour']-l3s[row['count']-1]['local_hour'])/3600
-                        else:
-                            l3s[row['count']]['column_amount_tendency'] = \
-                            (l3s[row['count']+1]['column_amount']-l3s[row['count']-1]['column_amount'])/ \
-                            (l3s[row['count']+1]['local_hour']-l3s[row['count']-1]['local_hour'])/3600
+                        # all possible for middle scans
+                        elif iscan > 0 and iscan < nscan-1:
+                            if tdcy in ['forward','f']:
+                                l3s[row['count']][f'storage_{tdcy}'] = \
+                                (l3s[row['count']+1]['column_amount']-l3s[row['count']]['column_amount'])/ \
+                                (l3s[row['count']+1]['local_hour']-l3s[row['count']]['local_hour'])/3600
+                            elif tdcy in ['backward','b']:
+                                l3s[row['count']][f'storage_{tdcy}'] = \
+                                (l3s[row['count']]['column_amount']-l3s[row['count']-1]['column_amount'])/ \
+                                (l3s[row['count']]['local_hour']-l3s[row['count']-1]['local_hour'])/3600
+                            else:
+                                l3s[row['count']][f'storage_{tdcy}'] = \
+                                (l3s[row['count']+1]['column_amount']-l3s[row['count']-1]['column_amount'])/ \
+                                (l3s[row['count']+1]['local_hour']-l3s[row['count']-1]['local_hour'])/3600
                 
         if do_local_hour:
             nhour = len(local_hour_centers)
@@ -192,7 +209,17 @@ class TEMPO():
                     date+dt.timedelta(hours=h) for h in local_hour_centers
                 ])
                 # create an empty list of Level3_Data for each local hour value
-                l3_lhs_day = np.array([Level3_Data() for i in range(nhour)])
+                l3_lhs_day = np.empty(nhour,dtype=object)
+                for ilh in range(nhour):
+                    l3_lhs_day[ilh] = Level3_Data(grid_size=l3s[0].grid_size)
+                    for k in l3s[0].keys():
+                        if k in ['xgrid','ygrid','xmesh','ymesh']:
+                            l3_lhs_day[ilh][k] = l3s[0][k]
+                        elif k in ['num_samples','total_sample_weight']:
+                            l3_lhs_day[ilh][k] = np.zeros_like(l3s[0][k])
+                        else:
+                            l3_lhs_day[ilh][k] = np.full(l3s[0][k].shape,np.nan)
+                
                 day_df = l3s.df[pd.to_datetime(l3s.df.index.date) == date]
                 # loop over scans of the day
                 for iscan,(irow,row) in enumerate(day_df.iterrows()):
