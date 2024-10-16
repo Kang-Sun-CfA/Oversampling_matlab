@@ -8,6 +8,7 @@ import logging
 from popy import Level3_Data, F_center2edge, Level3_List, popy, datedev_py
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
+from matplotlib.collections import PolyCollection
 from matplotlib.axes import Axes
 from cartopy.mpl.geoaxes import GeoAxes
 GeoAxes._pcolormesh_patched = Axes.pcolormesh
@@ -447,3 +448,378 @@ class TEMPO():
                     self.l4s.add(l)
         if attach_l2:
             self.l2s = l2s
+
+class TEMPOL2(dict):
+    def __init__(self,year,month,day,scan_num,l2_dir_pattern):
+        '''
+        year, month, day:
+            int, identify a date
+        scan_num:
+            int, tempo scan number
+        l2_dir_pattern:
+            pattern of tempo level 2 data directory, e.g., 
+            '/projects/academic/kangsun/data/TEMPONO2/TEMPO_NO2_L2_V03/%Y/%m/%d/'
+        '''
+        self.logger = logging.getLogger(__name__)
+        dates = pd.date_range(dt.date(year,month,day),freq='1d',periods=2)
+        self.date = dates[0]
+        self.scan_num = scan_num
+        l2_path_pattern = os.path.join(l2_dir_pattern,f'*S{scan_num:>03}G*')
+        l2_list = []
+        for date in dates:
+            l2_list += glob.glob(date.strftime(l2_path_pattern))
+        l2_list = np.array(l2_list)
+        
+        if_right_date = np.zeros(len(l2_list),dtype=bool)
+        earliest = dates[0]+pd.offsets.Hour(8)
+        latest = dates[0]+pd.offsets.Hour(27)
+        try:
+            # try extracting granule time from file name
+            for il2,l2_path in enumerate(l2_list):
+                start_dt = dt.datetime.strptime(
+                    os.path.split(l2_path)[-1][17:33],'%Y%m%dT%H%M%SZ')
+                if (start_dt > earliest) & (start_dt < latest):
+                    if_right_date[il2] = True
+        except Exception as e:
+            self.logger.warning(e)
+            self.logger.warning('cannot determine granule time based on file name')
+            # loop over scan num on this and next day to keep only the right granules
+            for il2,l2_path in enumerate(l2_list):
+                with Dataset(l2_path,'r') as nc:
+                    start_dt = dt.datetime.strptime(
+                        nc.time_coverage_start,'%Y-%m-%dT%H:%M:%SZ')
+                    if (start_dt > earliest) & (start_dt < latest):
+                        if_right_date[il2] = True
+        
+        l2_list = l2_list[if_right_date]
+        
+        ngranule = len(l2_list)
+        along_tracks = np.zeros(ngranule,dtype=int)
+        granule_numbers = np.zeros(ngranule,dtype=int)
+        # loop over right granules of the scan to save mirror steps
+        for il2,l2_path in enumerate(l2_list):
+            with Dataset(l2_path,'r') as nc:
+                granule_numbers[il2] = nc.granule_num
+                along_tracks[il2] = nc.dimensions['mirror_step'].size
+                if il2 == 0:
+                    xtrack = nc.dimensions['xtrack'].size
+                else:
+                    if xtrack != nc.dimensions['xtrack'].size:
+                        self.logger.error('inconsistent xtrack dimension!')
+        self.l2_list = l2_list
+        self.along_tracks = along_tracks
+        self.xtrack = xtrack
+    
+    def load_l2(self,data_fields=None,data_fields_l2g=None,max_cf=0.2):
+        along_tracks = self.along_tracks
+        l2_list = self.l2_list
+        if data_fields is None:
+            data_fields = ['/support_data/amf_cloud_fraction',\
+                           '/geolocation/latitude',\
+                           '/geolocation/longitude',\
+                           '/support_data/surface_pressure',\
+                           '/support_data/terrain_height',\
+                           '/geolocation/latitude_bounds',\
+                           '/geolocation/longitude_bounds',\
+                           '/geolocation/solar_zenith_angle',\
+                           '/product/main_data_quality_flag',\
+                           '/product/vertical_column_troposphere']  
+            data_fields_l2g = ['cloud_fraction','latc','lonc',
+                               'surface_pressure','terrain_height',
+                               'latr','lonr','sza','qa','column_amount']
+        
+        for short_name in data_fields_l2g:
+            if short_name in ['lonr','latr']:
+                self[short_name] = np.zeros((self.along_tracks.sum(),self.xtrack,4),
+                                           dtype=np.float32)
+            else:
+                self[short_name] = np.zeros((self.along_tracks.sum(),self.xtrack))
+        
+        self['time'] = np.zeros(self.along_tracks.sum())
+        # loop over granules of the same scan
+        start_alongtrack_idx = 0
+        ngranule = len(l2_list)
+        for igranule in range(ngranule):
+            with Dataset(l2_list[igranule],'r') as nc:
+                dn_utc0 = datetime2datenum(
+                    dt.datetime.strptime(nc.time_coverage_start,'%Y-%m-%dT%H:%M:%SZ'))
+                dn_utc1 = datetime2datenum(
+                    dt.datetime.strptime(nc.time_coverage_end,'%Y-%m-%dT%H:%M:%SZ'))
+                nmirror_step = nc.dimensions['mirror_step'].size
+                self['time'][
+                    start_alongtrack_idx:start_alongtrack_idx+along_tracks[igranule]
+                ] = np.linspace(
+                    dn_utc0,dn_utc1,nmirror_step+1)[:nmirror_step]
+                
+                for long_name,short_name in zip(data_fields,data_fields_l2g):
+                    if long_name not in ['/product/main_data_quality_flag']:
+                        self[short_name][
+                        start_alongtrack_idx:start_alongtrack_idx+along_tracks[igranule],
+                        :] = nc[long_name][:].filled(np.nan)
+                    else:
+                        self[short_name][
+                        start_alongtrack_idx:start_alongtrack_idx+along_tracks[igranule],
+                        :,] = nc[long_name][:]
+                    # end of field loop
+                # end of nc file reading
+            start_alongtrack_idx += along_tracks[igranule]
+
+        mask = (self['qa']==0)&(self['cloud_fraction']<max_cf)
+        self['column_amount'][~mask] = np.nan
+        self['column_amount'] /= 6.02214e19     
+        self['UTC_matlab_datenum'] = np.broadcast_to(self['time'][:,np.newaxis],self['latc'].shape)
+    
+    def get_theta(self):
+        if (self['latc'].shape[0] < 3) or (self['latc'].shape[1] < 3):
+            self.logger.error('matrix too small, impossible!')
+            return
+        m_per_lat = 111e3
+        m_per_lon = m_per_lat * np.cos(np.radians(self['latc'])).astype(np.float32)
+        self['m_per_lat'] = m_per_lat
+        self['m_per_lon'] = m_per_lon
+        thetax = np.full(self['latc'].shape,np.nan,dtype=np.float32)
+        thetay = np.full(self['latc'].shape,np.nan,dtype=np.float32)
+        thetar = np.full(self['latc'].shape,np.nan,dtype=np.float32)
+        thetas = np.full(self['latc'].shape,np.nan,dtype=np.float32)
+        thetax[:,1:-1] = np.arctan2(m_per_lat*(self['latc'][:,:-2]-self['latc'][:,2:]),
+                                   m_per_lon[:,1:-1]*(self['lonc'][:,:-2]-self['lonc'][:,2:]))
+        thetay[1:-1,:] = np.arctan2(m_per_lat*(self['latc'][2:,:]-self['latc'][:-2,:]),
+                                   m_per_lon[1:-1,:]*(self['lonc'][2:,:]-self['lonc'][:-2,:]))
+        thetar[1:-1,1:-1] = np.arctan2(m_per_lat*(self['latc'][2:,:-2]-self['latc'][:-2,2:]),
+                                   m_per_lon[1:-1,1:-1]*(self['lonc'][2:,:-2]-self['lonc'][:-2,2:]))
+        thetas[1:-1,1:-1] = np.arctan2(m_per_lat*(self['latc'][2:,2:]-self['latc'][:-2,:-2]),
+                                   m_per_lon[1:-1,1:-1]*(self['lonc'][2:,2:]-self['lonc'][:-2,:-2]))
+        self['thetax'] = thetax
+        self['thetay'] = thetay
+        self['thetar'] = thetar
+        self['thetas'] = thetas
+        self['xdoty'] = np.cos(thetax)*np.cos(thetay) + np.sin(thetax)*np.sin(thetay)
+        self['rdots'] = np.cos(thetar)*np.cos(thetas) + np.sin(thetar)*np.sin(thetas)
+        self['det_xy'] = np.cos(thetax)*np.sin(thetay) - np.sin(thetax)*np.cos(thetay)
+        self['det_rs'] = np.cos(thetar)*np.sin(thetas) - np.sin(thetar)*np.cos(thetas)
+    
+    def interp_met(self,which_met='era5',met_dir=None,interp_fields=None,
+                  altitudes=None,**kwargs):
+        mask = (~np.isnan(self['UTC_matlab_datenum'])) &\
+        (~np.isnan(self['lonc'])) & (~np.isnan(self['latc']))
+        sounding_lon = self['lonc'][mask]
+        sounding_lat = self['latc'][mask]
+        sounding_datenum = self['UTC_matlab_datenum'][mask]
+        if which_met.lower() in ['era5']:
+            if altitudes is not None:
+                from popy import F_interp_era5_uv
+                era5_3d_path_pattern = met_dir or \
+                '/projects/academic/kangsun/data/ERA5/Y%Y/M%m/D%d/CONUS_3D_%Y%m%d.nc'
+                era5_2d_path_pattern = kwargs.pop('era5_2d_path_pattern',None)
+                if interp_fields is None:
+                    interp_fields = ['u10','v10']
+                sounding_interp = F_interp_era5_uv(
+                    sounding_lon,sounding_lat,sounding_datenum,
+                    era5_3d_path_pattern,era5_2d_path_pattern,interp_fields,altitudes)
+                for key in sounding_interp.keys():
+                    self.logger.info(key+' from ERA5 is sampled to L2 coordinate/time')
+                    self['era5_'+key] = np.full(self['latc'].shape,np.nan,dtype=np.float32)
+                    self['era5_'+key][mask] = sounding_interp[key]
+    
+    def get_DD(self,east_wind_field=None,north_wind_field=None,fields=None):
+        if fields is None:
+            fields = ['column_amount']
+        east_wind_field = east_wind_field or 'era5_u500'
+        north_wind_field = north_wind_field or 'era5_v500'
+        # eastward and northward wind
+        windu = self[east_wind_field]
+        windv = self[north_wind_field]
+        # xward and yward wind
+        windx = (np.sin(self['thetay'])*windu - np.cos(self['thetay'])*windv)/self['det_xy']
+        windy = (-np.sin(self['thetax'])*windu + np.cos(self['thetax'])*windv)/self['det_xy']
+        
+        # rward and sward wind
+        windr = (np.sin(self['thetas'])*windu - np.cos(self['thetas'])*windv)/self['det_rs']
+        winds = (-np.sin(self['thetar'])*windu + np.cos(self['thetar'])*windv)/self['det_rs']
+        
+        def latlon2m(lat1,lon1,lat2,lon2,m_per_lat,m_per_lon):
+            '''function to return distance in meter using latlon matrices'''
+            return np.sqrt(
+                np.square((lat1-lat2)*m_per_lat)
+                +np.square((lon1-lon2)*m_per_lon))
+        
+        for field in fields:
+            f = self[field]
+            # gradients
+            dfdx = np.full_like(f,np.nan)
+            dfdy = np.full_like(f,np.nan)
+            dfdr = np.full_like(f,np.nan)
+            dfds = np.full_like(f,np.nan)
+            dfdx[:,1:-1] = (f[:,:-2]-f[:,2:])/ \
+            latlon2m(lat1=self['latc'][:,:-2],lon1=self['lonc'][:,:-2],
+                    lat2=self['latc'][:,2:],lon2=self['lonc'][:,2:],
+                    m_per_lat=self['m_per_lat'],m_per_lon=self['m_per_lon'][:,1:-1]
+                    )
+            dfdy[1:-1,:] = (f[2:,:]-f[:-2,:])/ \
+            latlon2m(lat1=self['latc'][2:,:],lon1=self['lonc'][2:,:],
+                    lat2=self['latc'][:-2,:],lon2=self['lonc'][:-2,:],
+                    m_per_lat=self['m_per_lat'],m_per_lon=self['m_per_lon'][1:-1,:]
+                    )
+            dfdr[1:-1,1:-1] = (f[2:,:-2]-f[:-2,2:])/ \
+            latlon2m(lat1=self['latc'][2:,:-2],lon1=self['lonc'][2:,:-2],
+                    lat2=self['latc'][:-2,2:],lon2=self['lonc'][:-2,2:],
+                    m_per_lat=self['m_per_lat'],m_per_lon=self['m_per_lon'][1:-1,1:-1]
+                    )
+            dfds[1:-1,1:-1] = (f[2:,2:]-f[:-2,:-2])/ \
+            latlon2m(lat1=self['latc'][2:,2:],lon1=self['lonc'][2:,2:],
+                    lat2=self['latc'][:-2,:-2],lon2=self['lonc'][:-2,:-2],
+                    m_per_lat=self['m_per_lat'],m_per_lon=self['m_per_lon'][1:-1,1:-1]
+                    )
+            self[f'd{field}dx'] = dfdx
+            self[f'd{field}dy'] = dfdy
+            self[f'd{field}dr'] = dfdr
+            self[f'd{field}ds'] = dfds
+            # directional derivatives
+            self[field+'_DD_xy'] = windx*dfdx + windy*dfdy + \
+            self['xdoty']*(windx*dfdy + windy*dfdx)
+            self[field+'_DD_rs'] = windr*dfdr + winds*dfds + \
+            self['rdots']*(windr*dfds + winds*dfdr)
+            self[field+'_DD'] = np.nanmean(np.array([self[field+'_DD_xy'],
+                                                    self[field+'_DD_rs']]),
+                                          axis=0)
+    
+    def plot(self,central_lon,central_lat,WE_ext=1,SN_ext=1,
+             xlim=None,ylim=None,plot_field='column_amount',
+             ax=None,figsize=None,basis_kw=None,wind_kw=None,
+             grad_xy_kw=None,grad_rs_kw=None,**kwargs):
+        if ax is None:
+            figsize = kwargs.pop('figsize',(10,5))
+            fig,ax = plt.subplots(1,1,figsize=figsize,constrained_layout=True)
+        else:
+            fig = None
+        cmap = kwargs.pop('cmap','jet')
+        alpha = kwargs.pop('alpha',1)
+        func = kwargs.pop('func',lambda x:x)
+        ec = kwargs.pop('ec','none')
+        draw_colorbar = kwargs.pop('draw_colorbar',True)
+        label = kwargs.pop('label',plot_field)
+        shrink = kwargs.pop('shrink',0.75)
+        distance = np.sqrt(np.square((self['latc']-central_lat)*self['m_per_lat'])\
+                           +np.square((self['lonc']-central_lon)*self['m_per_lon']))
+        min_idx = np.unravel_index(np.nanargmin(distance), distance.shape)
+        clon = self['lonc'][min_idx]
+        clat = self['latc'][min_idx]
+        WE_idx0 = np.max([min_idx[0]-WE_ext,0])
+        WE_idx1 = np.min([min_idx[0]+WE_ext+1,self['latc'].shape[0]-1])
+
+        SN_idx0 = np.max([min_idx[1]-SN_ext,0])
+        SN_idx1 = np.min([min_idx[1]+SN_ext+1,self['latc'].shape[1]-1])
+        
+        # plot l2 pixel polygons
+        latrs = (self['latr'][WE_idx0:WE_idx1,SN_idx0:SN_idx1,]-clat)*\
+        self['m_per_lat']*1e-3
+        latrs = latrs.reshape(-1,latrs.shape[-1])
+        lonrs = (self['lonr'][WE_idx0:WE_idx1,SN_idx0:SN_idx1,]-clon)*\
+        self['m_per_lon'][WE_idx0:WE_idx1,SN_idx0:SN_idx1,np.newaxis]*1e-3
+        lonrs = lonrs.reshape(-1,lonrs.shape[-1])
+        verts = [np.array([lonr,latr]).T for lonr,latr in zip(lonrs,latrs)]
+        cdata = self[plot_field][WE_idx0:WE_idx1,SN_idx0:SN_idx1].ravel()
+        vmin = kwargs.pop('vmin',np.nanmin(cdata))
+        vmax = kwargs.pop('vmax',np.nanmax(cdata))
+        collection = PolyCollection(verts,
+                     array=cdata,
+                 cmap=cmap,edgecolors=ec)
+        collection.set_alpha(alpha)
+        collection.set_clim(vmin=vmin,vmax=vmax)
+        ax.add_collection(collection)
+        if xlim is None:
+            ax.set_xlim([np.nanmin(lonrs),np.nanmax(lonrs)])
+        else:
+            ax.set_xlim(xlim)
+        if ylim is None:
+            ax.set_ylim([np.nanmin(latrs),np.nanmax(latrs)])
+        else:
+            ax.set_ylim(ylim)
+        ax.set_aspect('equal', adjustable='box')
+        if draw_colorbar:
+            cb = plt.colorbar(collection,ax=ax,label=label,shrink=shrink)
+        else:
+            cb = None
+        
+        # draw basis vectors
+        if basis_kw is not None:
+            basis_unit_km = basis_kw.pop('basis_unit_km',3)
+            basis_cc = basis_kw.pop('basis_cc',['w','w','k','k'])
+            fontsize = basis_kw.pop('fontsize',15)
+            width = basis_kw.pop('width',0.005)
+            ha = basis_kw.pop('ha','right')
+            for ibasis,basis in enumerate(['x','y','r','s']):
+                basis_e = np.cos(self['theta'+basis][min_idx])*basis_unit_km
+                basis_n = np.sin(self['theta'+basis][min_idx])*basis_unit_km
+                basis_o1 = (self['lonc'][min_idx]-clon)*self['m_per_lon'][min_idx]*1e-3
+                basis_o2 = (self['latc'][min_idx]-clat)*self['m_per_lat']*1e-3
+                ax.quiver(basis_o1,basis_o2,basis_e,basis_n,
+                          angles='xy', scale_units='xy', 
+                          scale=1,width=0.005,color=basis_cc[ibasis])
+                ax.text(basis_o1+basis_e,basis_o2+basis_n,
+                        r'$\vec{'+basis+r'}$',ha=ha,color=basis_cc[ibasis],
+                        fontsize=fontsize)
+        
+        # draw wind vectors
+        if wind_kw is not None:
+            step = wind_kw.pop('step',2)
+            scale = wind_kw.pop('scale',100)
+            width = wind_kw.pop('width',0.003)
+            east_wind_field = wind_kw.pop('east_wind_field','era5_u500')
+            north_wind_field = wind_kw.pop('north_wind_field','era5_v500')
+            wind_e = self[east_wind_field][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]
+            wind_n = self[north_wind_field][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]
+            basis_o1 = (self['lonc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]-clon)*\
+            self['m_per_lon'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]*1e-3
+            basis_o2 = (self['latc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]-clat)*\
+            self['m_per_lat']*1e-3
+            ax.quiver(basis_o1.ravel(),basis_o2.ravel(),
+                      wind_e.ravel(),wind_n.ravel(),scale=scale,width=width,**wind_kw)
+        
+        # draw xy gradient vectors
+        if grad_xy_kw is not None:
+            step = grad_xy_kw.pop('step',2)
+            scale = grad_xy_kw.pop('scale',2e-7)
+            width = grad_xy_kw.pop('width',0.003)
+            color = grad_xy_kw.pop('color','b')
+            basis_o1 = (self['lonc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]-clon)*\
+            self['m_per_lon'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]*1e-3
+            basis_o2 = (self['latc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]-clat)*\
+            self['m_per_lat']*1e-3
+            
+            grad_e = self[f'd{plot_field}dx'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]*\
+            np.cos(self['thetax'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step])+\
+            self[f'd{plot_field}dy'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]*\
+            np.cos(self['thetay'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step])
+
+            grad_n = self[f'd{plot_field}dx'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]*\
+            np.sin(self['thetax'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step])+\
+            self[f'd{plot_field}dy'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]*\
+            np.sin(self['thetay'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step])
+            ax.quiver(basis_o1.ravel(),basis_o2.ravel(),
+                      grad_e.ravel(),grad_n.ravel(),scale=scale,width=width,color=color,**grad_xy_kw)
+        
+        # draw rs gradient vectors
+        if grad_rs_kw is not None:
+            step = grad_rs_kw.pop('step',2)
+            scale = grad_rs_kw.pop('scale',2e-7)
+            width = grad_rs_kw.pop('width',0.003)
+            color = grad_rs_kw.pop('color','r')
+            basis_o1 = (self['lonc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]-clon)*\
+            self['m_per_lon'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]*1e-3
+            basis_o2 = (self['latc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]-clat)*\
+            self['m_per_lat']*1e-3
+            
+            grad_e = self[f'd{plot_field}dr'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]*\
+            np.cos(self['thetar'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step])+\
+            self[f'd{plot_field}ds'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]*\
+            np.cos(self['thetas'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step])
+
+            grad_n = self[f'd{plot_field}dr'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]*\
+            np.sin(self['thetar'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step])+\
+            self[f'd{plot_field}ds'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]*\
+            np.sin(self['thetas'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step])
+            ax.quiver(basis_o1.ravel(),basis_o2.ravel(),
+                      grad_e.ravel(),grad_n.ravel(),scale=scale,width=width,color=color,**grad_rs_kw)
+        return dict(fig=fig,ax=ax,cb=cb,clon=clon,clat=clat)
+    
