@@ -1,11 +1,12 @@
 import sys, os, glob
 import numpy as np
+np.seterr(divide='ignore', invalid='ignore')
 import datetime as dt
 import matplotlib.pyplot as plt
 import pandas as pd
 import geopandas as gpd
 import logging
-from popy import Level3_Data, F_center2edge, Level3_List, popy, datedev_py
+from popy import Level3_Data, F_center2edge, Level3_List, popy, datedev_py, datetime2datenum
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 from matplotlib.collections import PolyCollection
@@ -15,6 +16,7 @@ GeoAxes._pcolormesh_patched = Axes.pcolormesh
 from matplotlib import path 
 import shapely
 from netCDF4 import Dataset
+import warnings
 
 class TEMPO():
     '''class for a TEMPO-observed region'''
@@ -283,15 +285,17 @@ class TEMPO():
                     l3['total_sample_weight'] = weight.copy()
                     l3['num_samples'] = num.copy()
         self.l3_lhs = l3_lhs
-            
+    
     def regrid_from_l2(self,l2_path_pattern,
+                       data_fields=None,data_fields_l2g=None,
                        attach_l3=False,attach_l2=False,
                        l3_path_pattern=None,
                        l4_path_pattern=None,gradient_kw=None,
                        l3_save_fields=None,l4_save_fields=None,
                        maxsza=75,maxcf=0.3,
                        ncores=0,block_length=300,
-                       l3_ncattr_dict=None,l4_ncattr_dict=None):
+                       l3_ncattr_dict=None,l4_ncattr_dict=None,
+                       use_TEMPOL2=True):
         
         if not attach_l2 and not attach_l3 and (l3_path_pattern is None) and (l4_path_pattern is None):
             self.logger.error('attach l2/l3 data or provide level3/4 paths!')
@@ -304,7 +308,7 @@ class TEMPO():
         
         l3_save_fields = l3_save_fields or ['column_amount']
         l4_save_fields = l4_save_fields or \
-        ['column_amount','local_hour','terrain_height','amf_cloud_fraction',\
+        ['column_amount','local_hour','terrain_height',\
          'wind_topo','wind_column','wind_column_xy','wind_column_rs']
         
         if l3_path_pattern is not None:
@@ -346,94 +350,188 @@ class TEMPO():
         if attach_l2 or attach_l3:
             dt_array = []
         
+        oversampling_list = ['terrain_height','column_amount','local_hour']
+        if do_l4 and use_TEMPOL2:
+            oversampling_list += ['wind_column','wind_column_xy','wind_column_rs','wind_topo']
         for date in dates:
-            next_date = date+pd.DateOffset(1)
-            # popy has a very old way of managing time
-            # start from 8 am utc of the day
-            start_dict = {k:v for k,v in zip(
-                ['start_year','start_month','start_day','start_hour','start_minute','start_second'],
-                date.timetuple()[0:3]+(8,0,0))}
-            # end at 2 am utc of the next day
-            end_dict = {k:v for k,v in zip(
-                ['end_year','end_month','end_day','end_hour','end_minute','end_second'],
-                next_date.timetuple()[0:3]+(2,0,0))}
-            # level 2 files of the same day
-            day_flist = glob.glob(date.strftime(l2_path_pattern))
-            
-            # create tempo popy instance for the day
-            tempo_l2_daily = popy(instrum='TEMPO',
-                                  product=self.product,
-                                  **wesn_dict,
-                                  **start_dict,**end_dict,
-                                  grid_size=self.grid_size,
-                                  flux_grid_size=self.flux_grid_size,
-                                  error_model=self.error_model,
-                                  oversampling_list=[
-                                      'terrain_height','column_amount','local_hour','amf_cloud_fraction'])
-            
-            tempo_l2_daily.F_subset_TEMPONO2(l2_list=day_flist,maxsza=maxsza,maxcf=maxcf)
-            if tempo_l2_daily.nl2 == 0:
-                self.logger.info(date.strftime('%Y%m%d')+' has no l2 data, skipping')
-                continue
-            # datenum in local time
-            local_dn = tempo_l2_daily.l2g_data['UTC_matlab_datenum']+\
-            tempo_l2_daily.l2g_data['lonc']/15/24
-            tempo_l2_daily.l2g_data['local_hour'] = (local_dn-np.floor(local_dn))*24
-            # molec/cm2 to mol/m2
-            tempo_l2_daily.l2g_data['column_amount'] = \
-            tempo_l2_daily.l2g_data['column_amount']/6.02214e19 
-            
-            if do_l4:
-                tempo_l2_daily.F_prepare_gradient(**gradient_kw)
-            
-            scan_nums = np.unique(tempo_l2_daily.l2g_data['scan_num'])
-            for scan_num in scan_nums:
-                mask = tempo_l2_daily.l2g_data['scan_num'] == scan_num
-                if np.sum(mask) == 0:
-                    self.logger.info('{} scan {} has no l2 data, skipping'.format(
-                        date.strftime('%Y%m%d'),scan_num))
+            # DDA on tempo grid
+            if use_TEMPOL2:
+                # level 2 files of the same day
+                day_flist = glob.glob(date.strftime(l2_path_pattern))
+                if len(day_flist) == 0:
+                    self.logger.info(date.strftime('%Y%m%d')+' has no l2 data, skipping')
                     continue
-                l2g = {k:v[mask,] for k,v in tempo_l2_daily.l2g_data.items()}
-                if attach_l2:
-                    l2s.append(l2g)
-                l3 = tempo_l2_daily.F_parallel_regrid(
-                    l2g_data=l2g,
-                    ncores=ncores,
-                    block_length=block_length)
-                l3.start_python_datetime = datedev_py(np.nanmin(l2g['UTC_matlab_datenum']))
-                l3.end_python_datetime = datedev_py(np.nanmax(l2g['UTC_matlab_datenum']))
-                if attach_l3:
-                    l3s.append(l3)
-                if attach_l2 or attach_l3:
-                    dt_array.append(l3.start_python_datetime)
-                
-                if l3_path_pattern is not None:
-                    l3_fn = date.strftime(l3_path_pattern.format(int(scan_num)))
-                    os.makedirs(os.path.split(l3_fn)[0],exist_ok=True)
-                    l3_ncattr_dict['scan_num'] = int(scan_num)
-                    l3_ncattr_dict['time_coverage_start'] = \
-                    datedev_py(np.nanmin(l2g['UTC_matlab_datenum'])).strftime('%Y-%m-%dT%H:%M:%SZ')
-                    l3_ncattr_dict['time_coverage_end'] = \
-                    datedev_py(np.nanmax(l2g['UTC_matlab_datenum'])).strftime('%Y-%m-%dT%H:%M:%SZ')
-                    l3_ncattr_dict['history'] = 'Created '+dt.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
-                    l3.save_nc(l3_fn,l3_save_fields,ncattr_dict=l3_ncattr_dict)
-                if do_l4:
-                    l4 = l3.block_reduce(self.flux_grid_size)
-                    l4.calculate_gradient(**tempo_l2_daily.calculate_gradient_kw)
+                if os.path.isfile(day_flist[0]):
+                    self.logger.warning('Please provide only directory pattern when using TEMPOL2 class! Trimming...')
+                    l2_dir_pattern = os.path.split(l2_path_pattern)[0]
+                else:
+                    l2_dir_pattern = l2_path_pattern
+                    day_flist = glob.glob(date.strftime(os.path.join(l2_dir_pattern,'*')))
+                # read scan num from file names - not the most robust solution
+                scan_nums = np.sort(np.unique([int(os.path.split(f)[-1][35:38]) for f in day_flist]))
+                for scan_num in scan_nums:
+                    tl2 = TEMPOL2(year=date.year,month=date.month,day=date.day,scan_num=scan_num,
+                                  l2_dir_pattern=l2_dir_pattern)
+                    tl2.load_l2(maxcf=maxcf,maxsza=maxsza,
+                                data_fields=data_fields,data_fields_l2g=data_fields_l2g)
+                    if do_l4:
+                        tl2.get_theta()
+                        tl2.interp_met(**gradient_kw['interp_met_kw'])
+                        tl2.get_DD(fields=['column_amount'],
+                                   east_wind_field=gradient_kw['x_wind_field'],
+                                   north_wind_field=gradient_kw['y_wind_field'])
+                        tl2.get_DD(fields=['terrain_height'],
+                                   east_wind_field=gradient_kw['x_wind_field_sfc'],
+                                   north_wind_field=gradient_kw['y_wind_field_sfc'])
+                    
+                    l2g = tl2.to_popy_l2g_data(**wesn_dict)
+                    if len(l2g['latc']) == 0:
+                        self.logger.info('{} scan {} has no l2 data, skipping'.format(
+                            date.strftime('%Y%m%d'),scan_num))
+                        continue
+                    # create a popy object for each scan
+                    tempo_popy = popy(instrum='TEMPO',
+                                      product=self.product,
+                                      **wesn_dict,
+                                      grid_size=self.grid_size,
+                                      error_model=self.error_model,
+                                      oversampling_list=oversampling_list)
+                    if attach_l2:
+                        self.logger.warning('attaching l2 is tedious when using TEMPOL2')
+                        l2s.append(tl2)
+                    l3 = tempo_popy.F_parallel_regrid(
+                        l2g_data=l2g,
+                        ncores=ncores,
+                        block_length=block_length)
+                    l3.start_python_datetime = datedev_py(np.nanmin(l2g['UTC_matlab_datenum']))
+                    l3.end_python_datetime = datedev_py(np.nanmax(l2g['UTC_matlab_datenum']))
                     if attach_l3:
-                        l4s.append(l4)
-                    if l4_path_pattern is not None:
-                        l4_fn = date.strftime(l4_path_pattern.format(int(scan_num)))
-                        os.makedirs(os.path.split(l4_fn)[0],exist_ok=True)
-                        l4_ncattr_dict['scan_num'] = float(scan_num)
-                        l4_ncattr_dict['time_coverage_start'] = \
+                        l3s.append(l3)
+                    if attach_l2 or attach_l3:
+                        dt_array.append(l3.start_python_datetime)
+
+                    if l3_path_pattern is not None:
+                        l3_fn = date.strftime(l3_path_pattern.format(int(scan_num)))
+                        os.makedirs(os.path.split(l3_fn)[0],exist_ok=True)
+                        l3_ncattr_dict['scan_num'] = int(scan_num)
+                        l3_ncattr_dict['time_coverage_start'] = \
                         datedev_py(np.nanmin(l2g['UTC_matlab_datenum'])).strftime('%Y-%m-%dT%H:%M:%SZ')
-                        l4_ncattr_dict['time_coverage_end'] = \
+                        l3_ncattr_dict['time_coverage_end'] = \
                         datedev_py(np.nanmax(l2g['UTC_matlab_datenum'])).strftime('%Y-%m-%dT%H:%M:%SZ')
-                        l4_ncattr_dict['history'] = 'Created '+dt.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
-                        l4.save_nc(l4_fn,l4_save_fields,ncattr_dict=l4_ncattr_dict)
-            
-            tempo_l2_daily = None
+                        l3_ncattr_dict['history'] = 'Created '+dt.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+                        l3.save_nc(l3_fn,l3_save_fields,ncattr_dict=l3_ncattr_dict)
+                    if do_l4:
+                        if np.isclose(self.grid_size,self.flux_grid_size):
+                            l4 = l3
+                        else:
+                            l4 = l3.block_reduce(self.flux_grid_size)
+                            if attach_l3:
+                                l4s.append(l4)
+                        if l4_path_pattern is not None:
+                            l4_fn = date.strftime(l4_path_pattern.format(int(scan_num)))
+                            os.makedirs(os.path.split(l4_fn)[0],exist_ok=True)
+                            l4_ncattr_dict['scan_num'] = float(scan_num)
+                            l4_ncattr_dict['time_coverage_start'] = \
+                            datedev_py(np.nanmin(l2g['UTC_matlab_datenum'])).strftime('%Y-%m-%dT%H:%M:%SZ')
+                            l4_ncattr_dict['time_coverage_end'] = \
+                            datedev_py(np.nanmax(l2g['UTC_matlab_datenum'])).strftime('%Y-%m-%dT%H:%M:%SZ')
+                            l4_ncattr_dict['history'] = 'Created '+dt.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+                            l4.save_nc(l4_fn,l4_save_fields,ncattr_dict=l4_ncattr_dict)
+                    tl2 = None
+                    tempo_popy = None
+                    l2g = None
+                    # end of scan loop
+                
+            # regriding/DDA on popy grid
+            else:
+                next_date = date+pd.DateOffset(1)
+                # popy has a very old way of managing time
+                # start from 8 am utc of the day
+                start_dict = {k:v for k,v in zip(
+                    ['start_year','start_month','start_day','start_hour','start_minute','start_second'],
+                    date.timetuple()[0:3]+(8,0,0))}
+                # end at 2 am utc of the next day
+                end_dict = {k:v for k,v in zip(
+                    ['end_year','end_month','end_day','end_hour','end_minute','end_second'],
+                    next_date.timetuple()[0:3]+(2,0,0))}
+                # level 2 files of the same day
+                day_flist = glob.glob(date.strftime(l2_path_pattern))
+
+                # create tempo popy instance for the day
+                tempo_l2_daily = popy(instrum='TEMPO',
+                                      product=self.product,
+                                      **wesn_dict,
+                                      **start_dict,**end_dict,
+                                      grid_size=self.grid_size,
+                                      flux_grid_size=self.flux_grid_size,
+                                      error_model=self.error_model,
+                                      oversampling_list=oversampling_list)
+
+                tempo_l2_daily.F_subset_TEMPONO2(l2_list=day_flist,
+                                                 maxsza=maxsza,maxcf=maxcf,
+                                                 data_fields=data_fields,data_fields_l2g=data_fields_l2g)
+                if tempo_l2_daily.nl2 == 0:
+                    self.logger.info(date.strftime('%Y%m%d')+' has no l2 data, skipping')
+                    continue
+                # datenum in local time
+                local_dn = tempo_l2_daily.l2g_data['UTC_matlab_datenum']+\
+                tempo_l2_daily.l2g_data['lonc']/15/24
+                tempo_l2_daily.l2g_data['local_hour'] = (local_dn-np.floor(local_dn))*24
+                # molec/cm2 to mol/m2
+                tempo_l2_daily.l2g_data['column_amount'] = \
+                tempo_l2_daily.l2g_data['column_amount']/6.02214e19 
+
+                if do_l4:
+                    tempo_l2_daily.F_prepare_gradient(**gradient_kw)
+
+                scan_nums = np.unique(tempo_l2_daily.l2g_data['scan_num'])
+                for scan_num in scan_nums:
+                    mask = tempo_l2_daily.l2g_data['scan_num'] == scan_num
+                    if np.sum(mask) == 0:
+                        self.logger.info('{} scan {} has no l2 data, skipping'.format(
+                            date.strftime('%Y%m%d'),scan_num))
+                        continue
+                    l2g = {k:v[mask,] for k,v in tempo_l2_daily.l2g_data.items()}
+                    if attach_l2:
+                        l2s.append(l2g)
+                    l3 = tempo_l2_daily.F_parallel_regrid(
+                        l2g_data=l2g,
+                        ncores=ncores,
+                        block_length=block_length)
+                    l3.start_python_datetime = datedev_py(np.nanmin(l2g['UTC_matlab_datenum']))
+                    l3.end_python_datetime = datedev_py(np.nanmax(l2g['UTC_matlab_datenum']))
+                    if attach_l3:
+                        l3s.append(l3)
+                    if attach_l2 or attach_l3:
+                        dt_array.append(l3.start_python_datetime)
+
+                    if l3_path_pattern is not None:
+                        l3_fn = date.strftime(l3_path_pattern.format(int(scan_num)))
+                        os.makedirs(os.path.split(l3_fn)[0],exist_ok=True)
+                        l3_ncattr_dict['scan_num'] = int(scan_num)
+                        l3_ncattr_dict['time_coverage_start'] = \
+                        datedev_py(np.nanmin(l2g['UTC_matlab_datenum'])).strftime('%Y-%m-%dT%H:%M:%SZ')
+                        l3_ncattr_dict['time_coverage_end'] = \
+                        datedev_py(np.nanmax(l2g['UTC_matlab_datenum'])).strftime('%Y-%m-%dT%H:%M:%SZ')
+                        l3_ncattr_dict['history'] = 'Created '+dt.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+                        l3.save_nc(l3_fn,l3_save_fields,ncattr_dict=l3_ncattr_dict)
+                    if do_l4:
+                        l4 = l3.block_reduce(self.flux_grid_size)
+                        l4.calculate_gradient(**tempo_l2_daily.calculate_gradient_kw)
+                        if attach_l3:
+                            l4s.append(l4)
+                        if l4_path_pattern is not None:
+                            l4_fn = date.strftime(l4_path_pattern.format(int(scan_num)))
+                            os.makedirs(os.path.split(l4_fn)[0],exist_ok=True)
+                            l4_ncattr_dict['scan_num'] = float(scan_num)
+                            l4_ncattr_dict['time_coverage_start'] = \
+                            datedev_py(np.nanmin(l2g['UTC_matlab_datenum'])).strftime('%Y-%m-%dT%H:%M:%SZ')
+                            l4_ncattr_dict['time_coverage_end'] = \
+                            datedev_py(np.nanmax(l2g['UTC_matlab_datenum'])).strftime('%Y-%m-%dT%H:%M:%SZ')
+                            l4_ncattr_dict['history'] = 'Created '+dt.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+                            l4.save_nc(l4_fn,l4_save_fields,ncattr_dict=l4_ncattr_dict)
+
+                tempo_l2_daily = None
             
         if attach_l2 or attach_l3:
             dt_array = pd.to_datetime(dt_array)
@@ -510,7 +608,7 @@ class TEMPOL2(dict):
         self.along_tracks = along_tracks
         self.xtrack = xtrack
     
-    def load_l2(self,data_fields=None,data_fields_l2g=None,max_cf=0.2):
+    def load_l2(self,data_fields=None,data_fields_l2g=None,maxcf=0.2,maxsza=None):
         along_tracks = self.along_tracks
         l2_list = self.l2_list
         if data_fields is None:
@@ -564,7 +662,11 @@ class TEMPOL2(dict):
                 # end of nc file reading
             start_alongtrack_idx += along_tracks[igranule]
 
-        mask = (self['qa']==0)&(self['cloud_fraction']<max_cf)
+        mask = (self['qa']==0)
+        if maxcf is not None:
+            mask = mask & (self['cloud_fraction']<=maxcf)
+        if maxsza is not None:
+            mask = mask & (self['sza']<=maxsza)
         self['column_amount'][~mask] = np.nan
         self['column_amount'] /= 6.02214e19     
         self['UTC_matlab_datenum'] = np.broadcast_to(self['time'][:,np.newaxis],self['latc'].shape)
@@ -679,9 +781,51 @@ class TEMPOL2(dict):
             self['xdoty']*(windx*dfdy + windy*dfdx)
             self[field+'_DD_rs'] = windr*dfdr + winds*dfds + \
             self['rdots']*(windr*dfds + winds*dfdr)
-            self[field+'_DD'] = np.nanmean(np.array([self[field+'_DD_xy'],
-                                                    self[field+'_DD_rs']]),
-                                          axis=0)
+            with warnings.catch_warnings():
+                warnings.filterwarnings(action='ignore', message='Mean of empty slice')
+                self[field+'_DD'] = np.nanmean(np.array([self[field+'_DD_xy'],
+                                                        self[field+'_DD_rs']]),
+                                              axis=0)
+    
+    def to_popy_l2g_data(self,west=-180,east=180,south=-90,north=90,additional_mapping=None):
+        mask = (self['lonc'] >= west) & (self['lonc'] <= east) &\
+        (self['latc'] >= south) & (self['lonc'] <= north) &\
+        ~np.isnan(self['column_amount'])
+        
+        l2g_data = {k:self[k][mask] for k in ['cloud_fraction','latc','lonc',
+                                               'surface_pressure','terrain_height',
+                                               'column_amount','UTC_matlab_datenum']}
+        # datenum in local time
+        local_dn = l2g_data['UTC_matlab_datenum']+l2g_data['lonc']/15/24
+        l2g_data['local_hour'] = (local_dn-np.floor(local_dn))*24
+        l2g_data['latr'] = np.column_stack((self['latr'][:,:,0][mask],
+                                           self['latr'][:,:,3][mask],
+                                           self['latr'][:,:,2][mask],
+                                           self['latr'][:,:,1][mask]))
+        l2g_data['lonr'] = np.column_stack((self['lonr'][:,:,0][mask],
+                                           self['lonr'][:,:,3][mask],
+                                           self['lonr'][:,:,2][mask],
+                                           self['lonr'][:,:,1][mask]))
+        if 'terrain_height_DD' in self.keys():
+            l2g_data['wind_topo'] = l2g_data['column_amount']*self['terrain_height_DD'][mask]
+        
+        wind_column_mapping = {
+            'column_amount_DD_xy':'wind_column_xy',
+            'column_amount_DD_rs':'wind_column_rs',
+            'column_amount_DD':'wind_column'}
+        for k,v in wind_column_mapping.items():
+            if k not in self.keys():
+                self.logger.info(f'{k} not in TEMPOL2!')
+                continue
+            l2g_data[v] = self[k][mask]
+        
+        additional_mapping = additional_mapping or {}
+        for k,v in additional_mapping.items():
+            if k not in self.keys():
+                self.logger.info(f'{k} not in TEMPOL2!')
+                continue
+            l2g_data[v] = self[k][mask]
+        return l2g_data
     
     def plot(self,central_lon,central_lat,WE_ext=1,SN_ext=1,
              xlim=None,ylim=None,plot_field='column_amount',
