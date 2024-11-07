@@ -2878,9 +2878,17 @@ class Level3_Data(dict):
                 below = np.nansum(np.array([self['pres_total_sample_weight'],l3_data1['pres_total_sample_weight']]),axis=0)
                 l3_data[key] = above/below
             else:
-                above = np.nansum(np.array([v0*self['total_sample_weight'],v1*l3_data1['total_sample_weight']]),axis=0)
-                below = np.nansum(np.array([self['total_sample_weight'],l3_data1['total_sample_weight']]),axis=0)
-                l3_data[key] = above/below
+                # handle DD terms, which can be nan where total sample weight is large
+                v0 = np.ma.MaskedArray(v0,mask=np.isnan(v0))
+                v1 = np.ma.MaskedArray(v1,mask=np.isnan(v1))
+                l3_data[key] = np.ma.average(np.ma.MaskedArray([v0,v1]),
+                                             weights=np.array(
+                                                 [self['total_sample_weight'],l3_data1['total_sample_weight']]
+                                             ),
+                                             axis=0).filled(np.nan)
+#                 above = np.nansum(np.array([v0*self['total_sample_weight'],v1*l3_data1['total_sample_weight']]),axis=0)
+#                 below = np.nansum(np.array([self['total_sample_weight'],l3_data1['total_sample_weight']]),axis=0)
+#                 l3_data[key] = above/below
         return l3_data
     
     def read_mat(self,l3_filename,

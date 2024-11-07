@@ -17,6 +17,8 @@ from matplotlib import path
 import shapely
 from netCDF4 import Dataset
 import warnings
+from scipy.ndimage import percentile_filter
+from astropy.convolution import convolve_fft
 
 class TEMPO():
     '''class for a TEMPO-observed region'''
@@ -352,7 +354,8 @@ class TEMPO():
         
         oversampling_list = ['terrain_height','column_amount','local_hour']
         if do_l4 and use_TEMPOL2:
-            oversampling_list += ['wind_column','wind_column_xy','wind_column_rs','wind_topo']
+            oversampling_list += ['wind_column','wind_column_xy','wind_column_rs','wind_topo',
+                                  'across_track_position','wind_stripe']
         for date in dates:
             # DDA on tempo grid
             if use_TEMPOL2:
@@ -372,6 +375,10 @@ class TEMPO():
                 for scan_num in scan_nums:
                     tl2 = TEMPOL2(year=date.year,month=date.month,day=date.day,scan_num=scan_num,
                                   l2_dir_pattern=l2_dir_pattern)
+                    if len(tl2.l2_list) == 0:
+                        self.logger.info('{} scan {} has no l2 data files, skipping'.format(
+                            date.strftime('%Y%m%d'),scan_num))
+                        continue
                     tl2.load_l2(maxcf=maxcf,maxsza=maxsza,
                                 data_fields=data_fields,data_fields_l2g=data_fields_l2g)
                     if do_l4:
@@ -380,13 +387,16 @@ class TEMPO():
                         tl2.get_DD(fields=['column_amount'],
                                    east_wind_field=gradient_kw['x_wind_field'],
                                    north_wind_field=gradient_kw['y_wind_field'])
+                        tl2.get_wind_stripe(
+                            east_wind_field=gradient_kw['x_wind_field'],
+                            north_wind_field=gradient_kw['y_wind_field'])
                         tl2.get_DD(fields=['terrain_height'],
                                    east_wind_field=gradient_kw['x_wind_field_sfc'],
                                    north_wind_field=gradient_kw['y_wind_field_sfc'])
                     
                     l2g = tl2.to_popy_l2g_data(**wesn_dict)
                     if len(l2g['latc']) == 0:
-                        self.logger.info('{} scan {} has no l2 data, skipping'.format(
+                        self.logger.info('{} scan {} has no l2 data after filtering, skipping'.format(
                             date.strftime('%Y%m%d'),scan_num))
                         continue
                     # create a popy object for each scan
@@ -590,7 +600,12 @@ class TEMPOL2(dict):
                         if_right_date[il2] = True
         
         l2_list = l2_list[if_right_date]
-        
+        self.l2_list = l2_list
+        if len(l2_list) == 0:
+            self.logger.warning('No available l2 files for {} scan {}'.format(
+                self.date.strftime('%Y%m%d'),scan_num)
+                               )
+            return
         ngranule = len(l2_list)
         along_tracks = np.zeros(ngranule,dtype=int)
         granule_numbers = np.zeros(ngranule,dtype=int)
@@ -604,7 +619,7 @@ class TEMPOL2(dict):
                 else:
                     if xtrack != nc.dimensions['xtrack'].size:
                         self.logger.error('inconsistent xtrack dimension!')
-        self.l2_list = l2_list
+        
         self.along_tracks = along_tracks
         self.xtrack = xtrack
     
@@ -670,6 +685,9 @@ class TEMPOL2(dict):
         self['column_amount'][~mask] = np.nan
         self['column_amount'] /= 6.02214e19     
         self['UTC_matlab_datenum'] = np.broadcast_to(self['time'][:,np.newaxis],self['latc'].shape)
+        self['across_track_position'] = np.broadcast_to(np.arange(1.,self.xtrack+1,dtype=int
+                                                                 )[np.newaxis,:],
+                                                        self['latc'].shape)
     
     def get_theta(self):
         if (self['latc'].shape[0] < 3) or (self['latc'].shape[1] < 3):
@@ -723,6 +741,30 @@ class TEMPOL2(dict):
                     self['era5_'+key] = np.full(self['latc'].shape,np.nan,dtype=np.float32)
                     self['era5_'+key][mask] = sounding_interp[key]
     
+    def get_background(self,field='column_amount',
+                       percentile=10,percentile_window=(50,75),
+                       smoothing_window=None):
+        '''too much wasted time. better done in l3 of single overpass'''
+        if smoothing_window is None:
+            smoothing_window = percentile_window
+        
+        kernel = np.ones(smoothing_window)
+        self[field+'_background'] = convolve_fft(
+            percentile_filter(self[field],percentile=percentile,
+                              size=percentile_window,mode='nearest'),kernel=kernel)
+        
+    def get_wind_stripe(self,east_wind_field=None,north_wind_field=None,min_abs_udotx=1.):
+        east_wind_field = east_wind_field or 'era5_u500'
+        north_wind_field = north_wind_field or 'era5_v500'
+        # eastward and northward wind
+        windu = self[east_wind_field]
+        windv = self[north_wind_field]
+        # wind vector dot x vector
+        self['udotx'] = windu*np.cos(self['thetax']) + windv*np.sin(self['thetax'])
+        mask = (np.abs(self['udotx']) > min_abs_udotx)
+        self['wind_stripe'] = np.full(self['column_amount'].shape,np.nan)
+        self['wind_stripe'][mask] = (self['column_amount_DD']/self['udotx'])[mask]
+        
     def get_DD(self,east_wind_field=None,north_wind_field=None,fields=None):
         if fields is None:
             fields = ['column_amount']
@@ -731,6 +773,7 @@ class TEMPOL2(dict):
         # eastward and northward wind
         windu = self[east_wind_field]
         windv = self[north_wind_field]
+        
         # xward and yward wind
         windx = (np.sin(self['thetay'])*windu - np.cos(self['thetay'])*windv)/self['det_xy']
         windy = (-np.sin(self['thetax'])*windu + np.cos(self['thetax'])*windv)/self['det_xy']
@@ -786,6 +829,7 @@ class TEMPOL2(dict):
                 self[field+'_DD'] = np.nanmean(np.array([self[field+'_DD_xy'],
                                                         self[field+'_DD_rs']]),
                                               axis=0)
+            self[field+'_DD'][np.isnan(self[field+'_DD_xy']) & np.isnan(self[field+'_DD_rs'])] = np.nan
     
     def to_popy_l2g_data(self,west=-180,east=180,south=-90,north=90,additional_mapping=None):
         mask = (self['lonc'] >= west) & (self['lonc'] <= east) &\
@@ -794,7 +838,8 @@ class TEMPOL2(dict):
         
         l2g_data = {k:self[k][mask] for k in ['cloud_fraction','latc','lonc',
                                                'surface_pressure','terrain_height',
-                                               'column_amount','UTC_matlab_datenum']}
+                                               'column_amount','UTC_matlab_datenum',
+                                               'across_track_position','udotx','wind_stripe']}
         # datenum in local time
         local_dn = l2g_data['UTC_matlab_datenum']+l2g_data['lonc']/15/24
         l2g_data['local_hour'] = (local_dn-np.floor(local_dn))*24
