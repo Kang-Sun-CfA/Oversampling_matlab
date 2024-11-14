@@ -23,7 +23,7 @@ from astropy.convolution import convolve_fft
 class TEMPO():
     '''class for a TEMPO-observed region'''
     def __init__(self,product,geometry=None,xys=None,start_dt=None,end_dt=None,
-                 west=-130,east=-65,south=23,north=51,grid_size=0.01,flux_grid_size=0.05,
+                 west=-130,east=-65,south=23,north=51,grid_size=0.01,flux_grid_size=None,
                  error_model='ones'):
         '''
         geometry:
@@ -40,6 +40,7 @@ class TEMPO():
         self.logger = logging.getLogger(__name__)
         self.product = product
         self.grid_size = grid_size
+        flux_grid_size = flux_grid_size or grid_size
         self.flux_grid_size = flux_grid_size
         self.error_model = error_model
         self.start_dt = start_dt or dt.datetime(2023,1,1)
@@ -355,7 +356,7 @@ class TEMPO():
         oversampling_list = ['terrain_height','column_amount','local_hour']
         if do_l4 and use_TEMPOL2:
             oversampling_list += ['wind_column','wind_column_xy','wind_column_rs','wind_topo',
-                                  'across_track_position','wind_stripe']
+                                  'across_track_position','wind_stripe','udotx']
         for date in dates:
             # DDA on tempo grid
             if use_TEMPOL2:
@@ -431,7 +432,7 @@ class TEMPO():
                         l3_ncattr_dict['history'] = 'Created '+dt.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
                         l3.save_nc(l3_fn,l3_save_fields,ncattr_dict=l3_ncattr_dict)
                     if do_l4:
-                        if np.isclose(self.grid_size,self.flux_grid_size):
+                        if np.isclose(self.grid_size,self.flux_grid_size) or (self.flux_grid_size is None):
                             l4 = l3
                         else:
                             l4 = l3.block_reduce(self.flux_grid_size)
@@ -447,9 +448,9 @@ class TEMPO():
                             datedev_py(np.nanmax(l2g['UTC_matlab_datenum'])).strftime('%Y-%m-%dT%H:%M:%SZ')
                             l4_ncattr_dict['history'] = 'Created '+dt.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
                             l4.save_nc(l4_fn,l4_save_fields,ncattr_dict=l4_ncattr_dict)
-                    tl2 = None
-                    tempo_popy = None
-                    l2g = None
+                    del tl2, tempo_popy, l2g, l3
+                    if do_l4:
+                        del l4
                     # end of scan loop
                 
             # regriding/DDA on popy grid
@@ -609,18 +610,30 @@ class TEMPOL2(dict):
         ngranule = len(l2_list)
         along_tracks = np.zeros(ngranule,dtype=int)
         granule_numbers = np.zeros(ngranule,dtype=int)
+        granule_mask = np.ones(ngranule,dtype=bool)
         # loop over right granules of the scan to save mirror steps
         for il2,l2_path in enumerate(l2_list):
-            with Dataset(l2_path,'r') as nc:
-                granule_numbers[il2] = nc.granule_num
-                along_tracks[il2] = nc.dimensions['mirror_step'].size
-                if il2 == 0:
-                    xtrack = nc.dimensions['xtrack'].size
-                else:
-                    if xtrack != nc.dimensions['xtrack'].size:
-                        self.logger.error('inconsistent xtrack dimension!')
-        
-        self.along_tracks = along_tracks
+            try:
+                with Dataset(l2_path,'r') as nc:
+                    granule_numbers[il2] = nc.granule_num
+                    along_tracks[il2] = nc.dimensions['mirror_step'].size
+                    if il2 == 0:
+                        xtrack = nc.dimensions['xtrack'].size
+                    else:
+                        if xtrack != nc.dimensions['xtrack'].size:
+                            self.logger.error('inconsistent xtrack dimension!')
+            except Exception as e:
+                self.logger.warning(f'{l2_path} gives error!')
+                granule_mask[il2] = False
+            
+        l2_list = l2_list[granule_mask]
+        self.l2_list = l2_list
+        if len(l2_list) == 0:
+            self.logger.warning('No available l2 files for {} scan {}'.format(
+                self.date.strftime('%Y%m%d'),scan_num)
+                               )
+            return
+        self.along_tracks = along_tracks[granule_mask]
         self.xtrack = xtrack
     
     def load_l2(self,data_fields=None,data_fields_l2g=None,maxcf=0.2,maxsza=None):
@@ -668,7 +681,9 @@ class TEMPOL2(dict):
                     if long_name not in ['/product/main_data_quality_flag']:
                         self[short_name][
                         start_alongtrack_idx:start_alongtrack_idx+along_tracks[igranule],
-                        :] = nc[long_name][:].filled(np.nan)
+                        :] = marray = nc[long_name][:]
+                        mdata = marray.data.astype(float)
+                        mdata[marray.mask] = np.nan
                     else:
                         self[short_name][
                         start_alongtrack_idx:start_alongtrack_idx+along_tracks[igranule],
@@ -763,9 +778,21 @@ class TEMPOL2(dict):
         self['udotx'] = windu*np.cos(self['thetax']) + windv*np.sin(self['thetax'])
         mask = (np.abs(self['udotx']) > min_abs_udotx)
         self['wind_stripe'] = np.full(self['column_amount'].shape,np.nan)
-        self['wind_stripe'][mask] = (self['column_amount_DD']/self['udotx'])[mask]
+        self['wind_stripe'][mask] = (self['column_amount_DD_xy']/self['udotx'])[mask]
         
-    def get_DD(self,east_wind_field=None,north_wind_field=None,fields=None):
+    def get_DD(self,east_wind_field=None,north_wind_field=None,fields=None,
+               keep_single_xyrs=False,do_DIV=False):
+        '''calculate directional derivatives, (u,v) dot (dvcd/dx,dvcd/dy) using xy and rs directions
+        east/north_wind_field:
+            u/v wind field name in met data
+        fields:
+            data fields to calculate DD
+        keep_single_xyrs:
+            if true, when one of xy and rs is nan, report the average as the non-nan element. 
+            otherwise, nan the average
+        do_DIV:
+            if true, calculate flux divergence d(u*vcd)/dx+d(v*vcd)/dy
+        '''
         if fields is None:
             fields = ['column_amount']
         east_wind_field = east_wind_field or 'era5_u500'
@@ -824,17 +851,68 @@ class TEMPOL2(dict):
             self['xdoty']*(windx*dfdy + windy*dfdx)
             self[field+'_DD_rs'] = windr*dfdr + winds*dfds + \
             self['rdots']*(windr*dfds + winds*dfdr)
-            with warnings.catch_warnings():
-                warnings.filterwarnings(action='ignore', message='Mean of empty slice')
-                self[field+'_DD'] = np.nanmean(np.array([self[field+'_DD_xy'],
-                                                        self[field+'_DD_rs']]),
-                                              axis=0)
-            self[field+'_DD'][np.isnan(self[field+'_DD_xy']) & np.isnan(self[field+'_DD_rs'])] = np.nan
+            if keep_single_xyrs:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(action='ignore', message='Mean of empty slice')
+                    self[field+'_DD'] = np.nanmean(np.array([self[field+'_DD_xy'],
+                                                            self[field+'_DD_rs']]),
+                                                  axis=0)
+                self[field+'_DD'][np.isnan(self[field+'_DD_xy']) & np.isnan(self[field+'_DD_rs'])] = np.nan
+            else:
+                self[field+'_DD'] = (self[field+'_DD_xy']+self[field+'_DD_rs'])*0.5
+        if not do_DIV:
+            return
+        for field in fields:
+            f = self[field]
+            # gradients
+            dfdx = np.full_like(f,np.nan)
+            dfdy = np.full_like(f,np.nan)
+            dfdr = np.full_like(f,np.nan)
+            dfds = np.full_like(f,np.nan)
+            dfdx[:,1:-1] = ((f*windx)[:,:-2]-(f*windx)[:,2:])/ \
+            latlon2m(lat1=self['latc'][:,:-2],lon1=self['lonc'][:,:-2],
+                    lat2=self['latc'][:,2:],lon2=self['lonc'][:,2:],
+                    m_per_lat=self['m_per_lat'],m_per_lon=self['m_per_lon'][:,1:-1]
+                    )
+            dfdy[1:-1,:] = ((f*windy)[2:,:]-(f*windy)[:-2,:])/ \
+            latlon2m(lat1=self['latc'][2:,:],lon1=self['lonc'][2:,:],
+                    lat2=self['latc'][:-2,:],lon2=self['lonc'][:-2,:],
+                    m_per_lat=self['m_per_lat'],m_per_lon=self['m_per_lon'][1:-1,:]
+                    )
+            dfdr[1:-1,1:-1] = ((f*windr)[2:,:-2]-(f*windr)[:-2,2:])/ \
+            latlon2m(lat1=self['latc'][2:,:-2],lon1=self['lonc'][2:,:-2],
+                    lat2=self['latc'][:-2,2:],lon2=self['lonc'][:-2,2:],
+                    m_per_lat=self['m_per_lat'],m_per_lon=self['m_per_lon'][1:-1,1:-1]
+                    )
+            dfds[1:-1,1:-1] = ((f*winds)[2:,2:]-(f*winds)[:-2,:-2])/ \
+            latlon2m(lat1=self['latc'][2:,2:],lon1=self['lonc'][2:,2:],
+                    lat2=self['latc'][:-2,:-2],lon2=self['lonc'][:-2,:-2],
+                    m_per_lat=self['m_per_lat'],m_per_lon=self['m_per_lon'][1:-1,1:-1]
+                    )
+#             self[f'dF{field}dx'] = dfdx
+#             self[f'dF{field}dy'] = dfdy
+#             self[f'dF{field}dr'] = dfdr
+#             self[f'dF{field}ds'] = dfds
+            # flux divergences
+            self[field+'_DIV_xy'] = dfdx + dfdy
+            self[field+'_DIV_rs'] = dfdr + dfds
+            if keep_single_xyrs:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(action='ignore', message='Mean of empty slice')
+                    self[field+'_DIV'] = np.nanmean(np.array([self[field+'_DIV_xy'],
+                                                            self[field+'_DIV_rs']]),
+                                                  axis=0)
+                self[field+'_DIV'][np.isnan(self[field+'_DIV_xy']) & np.isnan(self[field+'_DIV_rs'])] = np.nan
+            else:
+                self[field+'_DIV'] = (self[field+'_DIV_xy']+self[field+'_DIV_rs'])*0.5
+        
     
     def to_popy_l2g_data(self,west=-180,east=180,south=-90,north=90,additional_mapping=None):
         mask = (self['lonc'] >= west) & (self['lonc'] <= east) &\
-        (self['latc'] >= south) & (self['lonc'] <= north) &\
-        ~np.isnan(self['column_amount'])
+        (self['latc'] >= south) & (self['latc'] <= north) &\
+        ~np.isnan(self['column_amount']) 
+        if 'column_amount_DD' in self.keys():
+            mask = mask & ~np.isnan(self['column_amount_DD'])
         
         l2g_data = {k:self[k][mask] for k in ['cloud_fraction','latc','lonc',
                                                'surface_pressure','terrain_height',
@@ -857,7 +935,10 @@ class TEMPOL2(dict):
         wind_column_mapping = {
             'column_amount_DD_xy':'wind_column_xy',
             'column_amount_DD_rs':'wind_column_rs',
-            'column_amount_DD':'wind_column'}
+            'column_amount_DD':'wind_column',
+            'udotx':'udotx',
+            'wind_stripe':'wind_stripe'
+        }
         for k,v in wind_column_mapping.items():
             if k not in self.keys():
                 self.logger.info(f'{k} not in TEMPOL2!')
@@ -872,13 +953,17 @@ class TEMPOL2(dict):
             l2g_data[v] = self[k][mask]
         return l2g_data
     
-    def plot(self,central_lon,central_lat,WE_ext=1,SN_ext=1,
+    def plot(self,central_lon,central_lat,WE_ext=1,SN_ext=1,if_latlon=False,
              xlim=None,ylim=None,plot_field='column_amount',
              ax=None,figsize=None,basis_kw=None,wind_kw=None,
              grad_xy_kw=None,grad_rs_kw=None,**kwargs):
         if ax is None:
             figsize = kwargs.pop('figsize',(10,5))
-            fig,ax = plt.subplots(1,1,figsize=figsize,constrained_layout=True)
+            if if_latlon:
+                fig,ax = plt.subplots(1,1,figsize=figsize,constrained_layout=True,
+                                     subplot_kw={"projection": ccrs.PlateCarree()})
+            else:
+                fig,ax = plt.subplots(1,1,figsize=figsize,constrained_layout=True)
         else:
             fig = None
         cmap = kwargs.pop('cmap','jet')
@@ -900,11 +985,16 @@ class TEMPOL2(dict):
         SN_idx1 = np.min([min_idx[1]+SN_ext+1,self['latc'].shape[1]-1])
         
         # plot l2 pixel polygons
-        latrs = (self['latr'][WE_idx0:WE_idx1,SN_idx0:SN_idx1,]-clat)*\
-        self['m_per_lat']*1e-3
+        if if_latlon:
+            latrs = self['latr'][WE_idx0:WE_idx1,SN_idx0:SN_idx1,]
+            lonrs = self['lonr'][WE_idx0:WE_idx1,SN_idx0:SN_idx1,]
+        else:
+            latrs = (self['latr'][WE_idx0:WE_idx1,SN_idx0:SN_idx1,]-clat)*\
+            self['m_per_lat']*1e-3
+            lonrs = (self['lonr'][WE_idx0:WE_idx1,SN_idx0:SN_idx1,]-clon)*\
+            self['m_per_lon'][WE_idx0:WE_idx1,SN_idx0:SN_idx1,np.newaxis]*1e-3
+        
         latrs = latrs.reshape(-1,latrs.shape[-1])
-        lonrs = (self['lonr'][WE_idx0:WE_idx1,SN_idx0:SN_idx1,]-clon)*\
-        self['m_per_lon'][WE_idx0:WE_idx1,SN_idx0:SN_idx1,np.newaxis]*1e-3
         lonrs = lonrs.reshape(-1,lonrs.shape[-1])
         verts = [np.array([lonr,latr]).T for lonr,latr in zip(lonrs,latrs)]
         cdata = self[plot_field][WE_idx0:WE_idx1,SN_idx0:SN_idx1].ravel()
@@ -932,6 +1022,9 @@ class TEMPOL2(dict):
         
         # draw basis vectors
         if basis_kw is not None:
+            if if_latlon:
+                self.logger.error('not compatible!')
+                return
             basis_unit_km = basis_kw.pop('basis_unit_km',3)
             basis_cc = basis_kw.pop('basis_cc',['w','w','k','k'])
             fontsize = basis_kw.pop('fontsize',15)
@@ -958,10 +1051,14 @@ class TEMPOL2(dict):
             north_wind_field = wind_kw.pop('north_wind_field','era5_v500')
             wind_e = self[east_wind_field][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]
             wind_n = self[north_wind_field][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]
-            basis_o1 = (self['lonc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]-clon)*\
-            self['m_per_lon'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]*1e-3
-            basis_o2 = (self['latc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]-clat)*\
-            self['m_per_lat']*1e-3
+            if if_latlon:
+                basis_o1 = self['lonc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]
+                basis_o2 = self['latc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]
+            else:
+                basis_o1 = (self['lonc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]-clon)*\
+                self['m_per_lon'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]*1e-3
+                basis_o2 = (self['latc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]-clat)*\
+                self['m_per_lat']*1e-3
             ax.quiver(basis_o1.ravel(),basis_o2.ravel(),
                       wind_e.ravel(),wind_n.ravel(),scale=scale,width=width,**wind_kw)
         
@@ -971,10 +1068,14 @@ class TEMPOL2(dict):
             scale = grad_xy_kw.pop('scale',2e-7)
             width = grad_xy_kw.pop('width',0.003)
             color = grad_xy_kw.pop('color','b')
-            basis_o1 = (self['lonc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]-clon)*\
-            self['m_per_lon'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]*1e-3
-            basis_o2 = (self['latc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]-clat)*\
-            self['m_per_lat']*1e-3
+            if if_latlon:
+                basis_o1 = self['lonc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]
+                basis_o2 = self['latc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]
+            else:
+                basis_o1 = (self['lonc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]-clon)*\
+                self['m_per_lon'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]*1e-3
+                basis_o2 = (self['latc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]-clat)*\
+                self['m_per_lat']*1e-3
             
             grad_e = self[f'd{plot_field}dx'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]*\
             np.cos(self['thetax'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step])+\
@@ -994,10 +1095,14 @@ class TEMPOL2(dict):
             scale = grad_rs_kw.pop('scale',2e-7)
             width = grad_rs_kw.pop('width',0.003)
             color = grad_rs_kw.pop('color','r')
-            basis_o1 = (self['lonc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]-clon)*\
-            self['m_per_lon'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]*1e-3
-            basis_o2 = (self['latc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]-clat)*\
-            self['m_per_lat']*1e-3
+            if if_latlon:
+                basis_o1 = self['lonc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]
+                basis_o2 = self['latc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]
+            else:
+                basis_o1 = (self['lonc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]-clon)*\
+                self['m_per_lon'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]*1e-3
+                basis_o2 = (self['latc'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]-clat)*\
+                self['m_per_lat']*1e-3
             
             grad_e = self[f'd{plot_field}dr'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step]*\
             np.cos(self['thetar'][WE_idx0:WE_idx1:step,SN_idx0:SN_idx1:step])+\
