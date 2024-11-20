@@ -2380,6 +2380,15 @@ class Level3_Data(dict):
             vcd = self['vcd']
         
         wt = np.abs(self['wind_topo']/vcd)
+        if if_xyrs:
+            if 'wind_topo_xy' in self.keys():
+                wt_xy = 'wind_topo_xy'
+            else:
+                wt_xy = 'wind_topo'
+            if 'wind_topo_rs' in self.keys():
+                wt_rs = 'wind_topo_rs'
+            else:
+                wt_rs = 'wind_topo'
         topo_mask = (wt >= min_windtopo) & (wt <= max_windtopo)
         if mask is not None:
             topo_mask = topo_mask & mask
@@ -2396,17 +2405,17 @@ class Level3_Data(dict):
                 df = pd.DataFrame({'y':self['wind_column'][topo_mask][new_idx],'wt':self['wind_topo'][topo_mask][new_idx],
                                   'chem':vcd[topo_mask][new_idx]}).dropna()
                 if if_xyrs:
-                    df_xy = pd.DataFrame({'y':self['wind_column_xy'][topo_mask][new_idx],'wt':self['wind_topo'][topo_mask][new_idx],
+                    df_xy = pd.DataFrame({'y':self['wind_column_xy'][topo_mask][new_idx],'wt':self[wt_xy][topo_mask][new_idx],
                                   'chem':vcd[topo_mask][new_idx]}).dropna()
-                    df_rs = pd.DataFrame({'y':self['wind_column_rs'][topo_mask][new_idx],'wt':self['wind_topo'][topo_mask][new_idx],
+                    df_rs = pd.DataFrame({'y':self['wind_column_rs'][topo_mask][new_idx],'wt':self[wt_rs][topo_mask][new_idx],
                                   'chem':vcd[topo_mask][new_idx]}).dropna()
             else:
                 df = pd.DataFrame({'y':self['wind_column'][topo_mask],'wt':self['wind_topo'][topo_mask],
                                   'chem':vcd[topo_mask]}).dropna()
                 if if_xyrs:
-                    df_xy = pd.DataFrame({'y':self['wind_column_xy'][topo_mask],'wt':self['wind_topo'][topo_mask],
+                    df_xy = pd.DataFrame({'y':self['wind_column_xy'][topo_mask],'wt':self[wt_xy][topo_mask],
                                   'chem':vcd[topo_mask]}).dropna()
-                    df_rs = pd.DataFrame({'y':self['wind_column_rs'][topo_mask],'wt':self['wind_topo'][topo_mask],
+                    df_rs = pd.DataFrame({'y':self['wind_column_rs'][topo_mask],'wt':self[wt_xy][topo_mask],
                                   'chem':vcd[topo_mask]}).dropna()
             if fit_chem:
                 topo_fit = smf.ols('y ~ wt + chem', data=df).fit()
@@ -2427,8 +2436,8 @@ class Level3_Data(dict):
             topo_residual[topo_mask] = topo_fit.resid
             wc_topo = self['wind_column']-topo_fit.params['wt']*self['wind_topo']
             if if_xyrs:
-                wc_topo_xy = self['wind_column_xy']-topo_fit_xy.params['wt']*self['wind_topo']
-                wc_topo_rs = self['wind_column_rs']-topo_fit_rs.params['wt']*self['wind_topo']
+                wc_topo_xy = self['wind_column_xy']-topo_fit_xy.params['wt']*self[wt_xy]
+                wc_topo_rs = self['wind_column_rs']-topo_fit_rs.params['wt']*self[wt_xy]
             if remove_intercept:
                 wc_topo -= topo_fit.params['Intercept']
                 if if_xyrs:
@@ -2771,7 +2780,8 @@ class Level3_Data(dict):
                 result[key] = np.nansum(self[key][mask]*self['total_sample_weight'][mask])/result['total_sample_weight']
         return result
     
-    def sum_by_mask(self,mask=None,xys=None,fields_to_sum=None,fields_to_average=None):
+    def sum_by_mask(self,mask=None,xys=None,fields_to_sum=None,fields_to_average=None,
+                    num_samples_threshold=None):
         '''sum emission to emission rate by mask and/or polygon boundarys
         mask:
             binary mask to begin with
@@ -2781,6 +2791,8 @@ class Level3_Data(dict):
             should be emission related fields, in, e.g., mol/m2/s, where the area unit is assumed to be m2
         fields_to_average:
             fields where average makes more sense, like num_samples
+        num_samples_threshold:
+            if provided, gives covered_fraction of grid cells within mask with num_samples larger than this threshold
         '''
         if self.proj is not None:
             self.logger.error('proj is not implemented yet!');return
@@ -2804,6 +2816,10 @@ class Level3_Data(dict):
                 mask = mask | boundary_polygon.contains_points(all_points).reshape(lonmesh.shape)
         
         result = {}
+        
+        if num_samples_threshold is not None:
+            result['covered_fraction'] = np.sum(
+                self['num_samples'][mask]>=num_samples_threshold)/np.sum(mask)
         
         sum_keys = set(fields_to_sum).intersection(self.keys())
         for key in sum_keys:
@@ -3275,7 +3291,7 @@ class Level3_Data(dict):
             fields_rename.append('total_sample_weight')
             fields_comment.append('spatial weight for the current level 3 map')
             fields_unit.append('vary')
-        nc = Dataset(l3_filename,'w',format='NETCDF4')
+        nc = Dataset(l3_filename,mode='w',format='NETCDF4',clobber=True)
         if not ncattr_dict:
             ncattr_dict = {'description':'Level 3 data created using physical oversampling (https://doi.org/10.5194/amt-11-6679-2018)',
                            'institution':'University at Buffalo',
@@ -3480,7 +3496,7 @@ class Level3_Data(dict):
         fig_output['pc'] = pc
         return fig_output
     
-    def plot(self,plot_field=None,scale=None,
+    def plot(self,plot_field=None,scale=None,ax=None,
              existing_ax=None,draw_admin_level=1,
              layer_threshold=0.5,draw_colorbar=True,
              func=None,**kwargs):
@@ -3521,24 +3537,28 @@ class Level3_Data(dict):
         if 'vmin' not in kwargs.keys():
             kwargs['vmin'] = np.nanmin(plotdata)
             kwargs['vmax'] = np.nanmax(plotdata)
-        if existing_ax is None:
+        ax = ax or existing_ax
+        if ax is None:
             self.logger.info('axes not supplied, creating one')
             fig,ax = plt.subplots(1,1,figsize=(10,5),
                                   subplot_kw={"projection": ccrs.PlateCarree()})
         else:
             fig = None
-            ax = existing_ax
+        
         if self.proj is None and 'lonmesh' not in self.keys():
             ax.set_extent([self['xgrid'].min(), self['xgrid'].max(), self['ygrid'].min(), self['ygrid'].max()], ccrs.Geodetic())
         else:
             ax.set_extent([np.min(self['lonmesh']),np.max(self['lonmesh']),
                            np.min(self['latmesh']),np.max(self['latmesh'])], ccrs.Geodetic())
-        ax.coastlines(resolution='50m', color='black', linewidth=1)
-        if draw_admin_level == 0:
-            ax.add_feature(cfeature.BORDERS.with_scale('50m'), edgecolor='k',linewidth=1)
-        elif draw_admin_level == 1:
-            ax.add_feature(cfeature.BORDERS.with_scale('50m'))
-            ax.add_feature(cfeature.STATES.with_scale('50m'),edgecolor='k',linewidth=1)
+        
+        cartopy_scale = kwargs.pop('cartopy_scale','50m')
+        if cartopy_scale is not None:
+            ax.coastlines(resolution=cartopy_scale, color='black', linewidth=1)
+            if draw_admin_level == 0:
+                ax.add_feature(cfeature.BORDERS.with_scale(cartopy_scale), edgecolor='k',linewidth=.5)
+            elif draw_admin_level == 1:
+                ax.add_feature(cfeature.BORDERS.with_scale(cartopy_scale))
+                ax.add_feature(cfeature.STATES.with_scale(cartopy_scale),edgecolor='k',linewidth=.5)
         if 'num_samples' in self.keys():
             plotdata[self['num_samples']<layer_threshold] = np.nan
         if self.proj is None and 'lonmesh' not in self.keys():
@@ -3614,7 +3634,7 @@ class Level3_List(list):
         l3s_new = Level3_List(dt_array=self.dt_array,west=west,east=east,south=south,north=north)
         for l3 in self:
             l3s_new.add(l3)
-        l3s_new.df = self.df
+        l3s_new.df = self.df.copy()
         return l3s_new
     
     def add(self,l3):
@@ -3694,6 +3714,17 @@ class Level3_List(list):
             if_xyrs = kwargs['if_xyrs']
         else:
             if_xyrs = False
+        
+        if if_xyrs:
+            if 'wind_topo_xy' in self[0].keys():
+                wt_xy = 'wind_topo_xy'
+            else:
+                wt_xy = 'wind_topo'
+            if 'wind_topo_rs' in self[0].keys():
+                wt_rs = 'wind_topo_rs'
+            else:
+                wt_rs = 'wind_topo'
+        
         bkwargs = kwargs.copy()
         bkwargs['if_bootstrap'] = True
         bkwargs['if_xyrs'] = False
@@ -3731,13 +3762,13 @@ class Level3_List(list):
                         self[int(row['count'])].topo_fit_xy = l3.topo_fit_xy
                         self[int(row['count'])]['wind_column_topo_xy'] = \
                         self[int(row['count'])]['wind_column_xy']\
-                        -l3.topo_fit_xy.params['wt']*self[int(row['count'])]['wind_topo']
+                        -l3.topo_fit_xy.params['wt']*self[int(row['count'])][wt_xy]
                         if remove_intercept:
                             self[int(row['count'])]['wind_column_topo_xy'] -= l3.topo_fit_xy.params['Intercept']
                         self[int(row['count'])].topo_fit_rs = l3.topo_fit_rs
                         self[int(row['count'])]['wind_column_topo_rs'] = \
                         self[int(row['count'])]['wind_column_rs']\
-                        -l3.topo_fit_rs.params['wt']*self[int(row['count'])]['wind_topo']
+                        -l3.topo_fit_rs.params['wt']*self[int(row['count'])][wt_rs]
                         if remove_intercept:
                             self[int(row['count'])]['wind_column_topo_rs'] -= l3.topo_fit_rs.params['Intercept']
         
@@ -3913,7 +3944,7 @@ class Level3_List(list):
             l3 = l3.merge(l)
         return l3
     
-    def sum_by_mask(self,mask=None,xys=None,fields_to_sum=None,fields_to_average=None):
+    def sum_by_mask(self,mask=None,xys=None,fields_to_sum=None,fields_to_average=None,num_samples_threshold=None):
         '''wrapper of Level3_Data.sum_by_mask'''
         if fields_to_sum is None:
             fields_to_sum = ['wind_column','wind_column_topo','wind_column_topo_chem','wind_column_topo_alb']
@@ -3921,11 +3952,20 @@ class Level3_List(list):
             fields_to_average = ['num_samples']
         
         summed = []
-        summed.append(self[0].sum_by_mask(mask=mask,xys=xys,fields_to_sum=fields_to_sum,fields_to_average=fields_to_average))
+        summed.append(self[0].sum_by_mask(
+                      mask=mask,xys=xys,fields_to_sum=fields_to_sum,
+                      fields_to_average=fields_to_average,
+                      num_samples_threshold=num_samples_threshold)
+                     )
         
         if len(self) > 1:
             for l3 in self[1:]:
-                summed.append(l3.sum_by_mask(mask=mask,xys=xys,fields_to_sum=fields_to_sum,fields_to_average=fields_to_average))
+                summed.append(l3.sum_by_mask(mask=mask,xys=xys,
+                                             fields_to_sum=fields_to_sum,
+                                             fields_to_average=fields_to_average,
+                                             num_samples_threshold=num_samples_threshold))
+        if num_samples_threshold is not None:
+            self.df['covered_fraction'] = [m['covered_fraction'] for m in summed]
         
         sum_keys = set(fields_to_sum).intersection(self[0].keys())
         for f in sum_keys:

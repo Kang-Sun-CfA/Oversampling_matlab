@@ -308,92 +308,83 @@ class PointSource(object):
             self.l2s = l2s
         
         
-    def get_satellite_emissions(self,l3s,l3_all=None,fit_topo_kw=None,fit_chem_kw=None,
-                               chem_min_column_amount=None,chem_max_wind_column=None,
-                               dist_steps_km=None,
-                               fields_to_sum=None):
+    def get_satellite_emissions(self,l3s,l3s_freq=None,l3_all=None,cems_time_shift=None,
+                                fit_topo_kw=None,fit_chem_kw=None,
+                                dist_steps_km=None,fields_to_sum=None,
+                                num_samples_threshold=0.1,covered_fraction_threshold=None):
         '''interface popy level 3 objects. 
         l3s:
             Level3_List object
+        l3s_freq:
+            frequency of l3s. if none, try inferring from l3s.df.index.freq
+        cems_time_shift:
+            a timedelta to shift cems emissions for aligning with l3s or correlation lagged data
         l3_all:
             aggregated l3 from l3s
         fit_topo_kw:
-            keyword argument to fit_topography function
+            keyword argument to fit_topography function, no topo fit if None
         fit_chem_kw:
-            keyword argument to fit_chemistry function
-        chem_min_column_amount:
-            min column amount allowed in fit_chem
-        chem_max_wind_column:
-            max wind_column allowed in fit_chem
+            keyword argument to fit_chemistry function, no chem fit if None
         dist_steps_km:
             integrating radius to get mol/s
         fields_to_sum:
             input to Level3_List.sum_by_mask
+        num_samples_threshold:
+            argument passed to sum_by_mask. create a fraction of grid cells within the mask
+            with higher num_samples coverage than num_samples_threshold (called covered_fraction). 
+            help eliminate low bias in emission rate in mostly empty scenes near the facility
+        covered_fraction_threshold:
+            if not none, filter the resultant l3_df so at each distance, the covered_fraction has
+            to be larger than this threshold
         '''
         l3_all = l3_all or l3s.aggregate()
-        fit_topo_kw = fit_topo_kw or dict(max_iter=1)
-        fit_chem_kw = fit_chem_kw or dict(resample_rule='month_of_year',
-                                          max_iter=1,return_resampled=True)
-        if 'resample_rule' not in fit_chem_kw.keys():
-            fit_chem_kw['resample_rule'] = 'month_of_year'
-        if 'return_resampled' not in fit_chem_kw.keys():
-            fit_chem_kw['return_resampled'] = True
-        if 'max_iter' not in fit_chem_kw.keys():
-            fit_chem_kw['max_iter'] = 1
         ls = l3s.trim(west=self.west,east=self.east,south=self.south,north=self.north)
         l_all = l3_all.trim(west=self.west,east=self.east,south=self.south,north=self.north)
         
-        chem_mask = np.ones(l_all['column_amount'].shape,dtype=bool)
-        if chem_min_column_amount is not None:
-            chem_mask = chem_mask & (l_all['column_amount']>=chem_min_column_amount)
-        if chem_max_wind_column is not None:
-            chem_mask = chem_mask & (l_all['wind_column']<=chem_max_wind_column)
-        fit_chem_kw['mask'] = chem_mask
-        ls.fit_topography(**fit_topo_kw)
-        ls.fit_chemistry(**fit_chem_kw)
-        l_all = ls.aggregate()
+        l3s_freq = l3s_freq or l3s.df.index.freq
+        if not l3s_freq:
+            self.logger.warning('l3s freq not given, assuming satellite data are hourly!')
+            l3s_freq = '1h'
+            
+        if fit_topo_kw is not None:
+            ls.fit_topography(**fit_topo_kw)
+        if fit_chem_kw is not None:
+            ls.fit_chemistry(**fit_chem_kw)
+        if fit_topo_kw is not None or fit_chem_kw is not None:
+            l_all = ls.aggregate()
+        
         lonmesh,latmesh = np.meshgrid(l_all['xgrid'],l_all['ygrid'])
         dist_to_f_km = np.sqrt(np.square((lonmesh-self.lon)*self.km_per_lon)+\
                                np.square((latmesh-self.lat)*self.km_per_lat)
                                )
-        # to be compatible with an older version
         if dist_steps_km is None:
             dist_steps_km = np.linspace(self.start_km,self.end_km,self.nstep)
-            emission_rates = np.empty((len(ls),self.nstep),dtype=object)
-            emission_rates_all = np.empty(self.nstep,dtype=object)
-            for idist,dist_step in enumerate(dist_steps_km):
-                mask = np.zeros(lonmesh.shape,dtype=bool)
-                mask[dist_to_f_km <= dist_step] = True
-                emission_rates_all[idist] = l_all.sum_by_mask(mask=mask)
-                for il,ll in enumerate(ls):
-                    emission_rates[il,idist] = ll.sum_by_mask(mask=mask)
-
-            self.emission_rates = emission_rates
-            self.emission_rates_all = emission_rates_all
-        else:
-            for idist,dist_step in enumerate(dist_steps_km):
-                mask = np.zeros(lonmesh.shape,dtype=bool)
-                mask[dist_to_f_km <= dist_step] = True
-                ls.sum_by_mask(mask=mask,fields_to_sum=fields_to_sum)
-                for k in ls.df.keys():
-                    if ('summed_' in k or 'averaged_' in k) and 'dist' not in k:
-                        ls.df.rename(inplace=True,
-                                     columns={k:'{}_dist{}'.format(k,dist_step)})
+        
+        for idist,dist_step in enumerate(dist_steps_km):
+            mask = np.zeros(lonmesh.shape,dtype=bool)
+            mask[dist_to_f_km <= dist_step] = True
+            ls.sum_by_mask(mask=mask,fields_to_sum=fields_to_sum,
+                           num_samples_threshold=num_samples_threshold)
+            for k in ls.df.keys():
+                if ('summed_' in k or 'averaged_' in k or 'covered_fraction' in k) and 'dist' not in k:
+                    ls.df.rename(inplace=True,
+                                 columns={k:'{}_dist{}'.format(k,dist_step)})
         
         l_all['dist_to_f_km'] = dist_to_f_km
-        l_all['chem_mask'] = chem_mask
         self.l3_all = l_all
-        l3_df = ls.df
+        l3_df = ls.df.copy()
+        
         if self.emission_df is None:
             self.logger.warning('emission_df (CEMS emission) is not given')
+            return
         else:
             # merge satellite emission rate and cems emission rate
-            if not l3_df.index.freq:
-                self.logger.warning('freq not given, assuming satellite data are hourly!')
-                sfreq = '1h'
+            if cems_time_shift is None:
+                nox_col = self.emission_df['NOx (mol/s)']
             else:
-                sfreq = l3_df.index.freq
-            fe0 = pd.DataFrame(self.emission_df['NOx (mol/s)'].resample(sfreq).mean())
+                nox_col = self.emission_df['NOx (mol/s)'].shift(1,freq=cems_time_shift)
+            fe0 = pd.DataFrame(
+                nox_col.resample(l3s_freq,origin='start').mean())
             if isinstance(l3_df.index,pd.core.indexes.period.PeriodIndex):
                 self.logger.waring('satellite data are in period index. converting cems to period too')
                 fe0.index = fe0.index.to_period()
@@ -406,6 +397,13 @@ class PointSource(object):
                 fe1.index = fe1.index.to_period()
                 fe1 = fe1.rename(columns={'NOx (mol/s)':'Facility NOx with coverage'})
                 l3_df = l3_df.merge(fe1,left_index=True,right_index=True)
+        
+        if covered_fraction_threshold is not None:
+            mask = np.ones(l3_df.shape[0],dtype=bool)
+            for d in dist_steps_km:
+                mask = mask & (l3_df[f'covered_fraction_dist{d}'] > covered_fraction_threshold)
+            l3_df = l3_df.loc[mask]
+            
         self.l3_df = l3_df
         self.dist_steps_km = dist_steps_km
     
@@ -583,10 +581,13 @@ class CEMS():
             fig,ax = plt.subplots(1,1,figsize=(10,5),subplot_kw={"projection": ccrs.PlateCarree()})
         else:
             fig = None
-        cartopy_scale = kwargs.pop('cartopy_scale','110m')
+        cartopy_scale = kwargs.pop('cartopy_scale','50m')
         sc_leg_loc = kwargs.pop('sc_leg_loc','lower right')
         sc_leg_fmt = kwargs.pop('sc_leg_fmt','{x:.2f}')
         sc_leg_title = kwargs.pop('sc_leg_title',"Emitted NOx [lbs]")
+        sc_leg_num = kwargs.pop('sc_leg_num',7)
+        sc_leg_alpha = kwargs.pop('sc_leg_alpha',0.6)
+        sc_leg_ncol = kwargs.pop('sc_leg_ncol',3)
         if fadf is None:
             fadf = self.fadf
         # assume fadf is sorted by noxMassLbs
@@ -608,11 +609,12 @@ class CEMS():
         if sc_leg_loc is None:
             leg_sc = None
         else:
-            handles, labels = sc.legend_elements(prop="sizes", alpha=0.6, num=7,fmt=sc_leg_fmt,
+            handles, labels = sc.legend_elements(prop="sizes", alpha=0.6, num=sc_leg_num,fmt=sc_leg_fmt,
                                                  func=lambda x:(x-sdata_min_size)\
                                                  /(sdata_max_size-sdata_min_size)\
                                                 *(sdata_max-sdata_min)+sdata_min)
-            leg_sc = ax.legend(handles, labels, title=sc_leg_title,ncol=3,loc=sc_leg_loc)
+            leg_sc = ax.legend(handles, labels, title=sc_leg_title,ncol=sc_leg_ncol,loc=sc_leg_loc,
+                               fancybox=True,framealpha=sc_leg_alpha)
             ax.add_artist(leg_sc)
         if reset_extent:
             ax.set_extent([self.west,self.east,self.south,self.north])

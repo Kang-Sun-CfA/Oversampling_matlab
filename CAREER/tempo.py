@@ -312,7 +312,7 @@ class TEMPO():
         l3_save_fields = l3_save_fields or ['column_amount']
         l4_save_fields = l4_save_fields or \
         ['column_amount','local_hour','terrain_height',\
-         'wind_topo','wind_column','wind_column_xy','wind_column_rs']
+         'wind_topo','wind_topo_xy','wind_topo_rs','wind_column','wind_column_xy','wind_column_rs']
         
         if l3_path_pattern is not None:
             l3_ncattr_dict = l3_ncattr_dict or {
@@ -355,8 +355,14 @@ class TEMPO():
         
         oversampling_list = ['terrain_height','column_amount','local_hour']
         if do_l4 and use_TEMPOL2:
-            oversampling_list += ['wind_column','wind_column_xy','wind_column_rs','wind_topo',
-                                  'across_track_position','wind_stripe','udotx']
+            oversampling_list += ['wind_column','wind_column_xy','wind_column_rs',
+                                  'wind_topo','wind_topo_xy','wind_topo_rs']
+            if 'do_DIV' in gradient_kw.keys():
+                do_DIV = gradient_kw['do_DIV']
+            else:
+                do_DIV = False
+            if do_DIV:
+                oversampling_list += ['column_amount_DIV','column_amount_DIV_xy','column_amount_DIV_rs']
         for date in dates:
             # DDA on tempo grid
             if use_TEMPOL2:
@@ -387,10 +393,9 @@ class TEMPO():
                         tl2.interp_met(**gradient_kw['interp_met_kw'])
                         tl2.get_DD(fields=['column_amount'],
                                    east_wind_field=gradient_kw['x_wind_field'],
-                                   north_wind_field=gradient_kw['y_wind_field'])
-                        tl2.get_wind_stripe(
-                            east_wind_field=gradient_kw['x_wind_field'],
-                            north_wind_field=gradient_kw['y_wind_field'])
+                                   north_wind_field=gradient_kw['y_wind_field'],
+                                   do_DIV=do_DIV
+                                  )
                         tl2.get_DD(fields=['terrain_height'],
                                    east_wind_field=gradient_kw['x_wind_field_sfc'],
                                    north_wind_field=gradient_kw['y_wind_field_sfc'])
@@ -917,7 +922,7 @@ class TEMPOL2(dict):
         l2g_data = {k:self[k][mask] for k in ['cloud_fraction','latc','lonc',
                                                'surface_pressure','terrain_height',
                                                'column_amount','UTC_matlab_datenum',
-                                               'across_track_position','udotx','wind_stripe']}
+                                               'across_track_position']}
         # datenum in local time
         local_dn = l2g_data['UTC_matlab_datenum']+l2g_data['lonc']/15/24
         l2g_data['local_hour'] = (local_dn-np.floor(local_dn))*24
@@ -931,13 +936,19 @@ class TEMPOL2(dict):
                                            self['lonr'][:,:,1][mask]))
         if 'terrain_height_DD' in self.keys():
             l2g_data['wind_topo'] = l2g_data['column_amount']*self['terrain_height_DD'][mask]
-        
+        if 'terrain_height_DD_xy' in self.keys():
+            l2g_data['wind_topo_xy'] = l2g_data['column_amount']*self['terrain_height_DD_xy'][mask]
+        if 'terrain_height_DD_rs' in self.keys():
+            l2g_data['wind_topo_rs'] = l2g_data['column_amount']*self['terrain_height_DD_rs'][mask]
         wind_column_mapping = {
             'column_amount_DD_xy':'wind_column_xy',
             'column_amount_DD_rs':'wind_column_rs',
             'column_amount_DD':'wind_column',
             'udotx':'udotx',
-            'wind_stripe':'wind_stripe'
+            'wind_stripe':'wind_stripe',
+            'column_amount_DIV_xy':'column_amount_DIV_xy',
+            'column_amount_DIV_rs':'column_amount_DIV_rs',
+            'column_amount_DIV':'column_amount_DIV'
         }
         for k,v in wind_column_mapping.items():
             if k not in self.keys():
