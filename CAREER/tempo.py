@@ -148,8 +148,12 @@ class TEMPO():
                                        path=np.empty(nscan,dtype=str)))
             for iscan in range(nscan):
                 with Dataset(day_flist[iscan],'r') as nc:
-                    scan_num = int(nc.scan_num)
-                    day_df.loc[iscan,'scan_num'] = nc.scan_num
+                    try:
+                        day_df.loc[iscan,'scan_num'] = nc.scan_num
+                    except Exception as e:
+                        self.logger.warning(e)
+                        self.logger.warning('scan num not found; tendency not possible')
+                        do_tendency = False
                     day_df.loc[iscan,'path'] = day_flist[iscan]
                     t1 = dt.datetime.strptime(nc.time_coverage_start,'%Y-%m-%dT%H:%M:%SZ')
                     t2 = dt.datetime.strptime(nc.time_coverage_end,'%Y-%m-%dT%H:%M:%SZ')
@@ -289,7 +293,7 @@ class TEMPO():
                     l3['num_samples'] = num.copy()
         self.l3_lhs = l3_lhs
     
-    def regrid_from_l2(self,l2_path_pattern,
+    def regrid_from_l2(self,l2_path_pattern=None,l2_dir_pattern=None,
                        data_fields=None,data_fields_l2g=None,
                        attach_l3=False,attach_l2=False,
                        l3_path_pattern=None,
@@ -298,7 +302,13 @@ class TEMPO():
                        maxsza=75,maxcf=0.3,
                        ncores=0,block_length=300,
                        l3_ncattr_dict=None,l4_ncattr_dict=None,
-                       use_TEMPOL2=True):
+                       use_TEMPOL2=True,fadf=None):
+        
+        if l2_path_pattern is None and l2_dir_pattern is not None:
+            l2_path_pattern = l2_dir_pattern
+        if l2_path_pattern is None and l2_dir_pattern is None:
+            self.logger.error('l2 path is needed!')
+            return
         
         if not attach_l2 and not attach_l3 and (l3_path_pattern is None) and (l4_path_pattern is None):
             self.logger.error('attach l2/l3 data or provide level3/4 paths!')
@@ -381,7 +391,7 @@ class TEMPO():
                 scan_nums = np.sort(np.unique([int(os.path.split(f)[-1][35:38]) for f in day_flist]))
                 for scan_num in scan_nums:
                     tl2 = TEMPOL2(year=date.year,month=date.month,day=date.day,scan_num=scan_num,
-                                  l2_dir_pattern=l2_dir_pattern)
+                                  l2_dir_pattern=l2_dir_pattern,**wesn_dict)
                     if len(tl2.l2_list) == 0:
                         self.logger.info('{} scan {} has no l2 data files, skipping'.format(
                             date.strftime('%Y%m%d'),scan_num))
@@ -399,6 +409,58 @@ class TEMPO():
                         tl2.get_DD(fields=['terrain_height'],
                                    east_wind_field=gradient_kw['x_wind_field_sfc'],
                                    north_wind_field=gradient_kw['y_wind_field_sfc'])
+                    
+                    if fadf is not None and do_l4:
+                        for irow,row in fadf.iterrows():
+                            # start of facility loop
+                            if 'window_km' in row.keys():
+                                window_km = row.window_km
+                            else:
+                                window_km = 30
+                            km_per_lat = 111
+                            km_per_lon = 111*np.cos(row.latitude/180*np.pi)
+                            l2g = tl2.to_popy_l2g_data(
+                                west=row.longitude-window_km/km_per_lon,
+                                east=row.longitude+window_km/km_per_lon,
+                                south=row.latitude-window_km/km_per_lat,
+                                north=row.latitude+window_km/km_per_lat)
+                            if len(l2g['latc']) == 0:
+                                # escape from facility loop if no l2 pixels
+                                continue
+                            # create a popy object for each scan/each facility
+                            fpopy = popy(
+                                instrum='TEMPO',
+                                product=self.product,
+                                west=row.longitude-window_km/km_per_lon,
+                                east=row.longitude+window_km/km_per_lon,
+                                south=row.latitude-window_km/km_per_lat,
+                                north=row.latitude+window_km/km_per_lat,
+                                grid_size=self.grid_size,
+                                error_model=self.error_model,
+                                oversampling_list=oversampling_list)
+                            l4 = fpopy.F_parallel_regrid(
+                                l2g_data=l2g,
+                                ncores=ncores,
+                                block_length=block_length).block_reduce(self.flux_grid_size)
+                            l4_fn = date.strftime(l4_path_pattern.format(int(scan_num)))
+                            l4_fn = os.path.join(
+                                os.path.split(l4_fn)[0],'facilityId{}_{}'.format(row.name,os.path.split(l4_fn)[1])
+                            )
+                            os.makedirs(os.path.split(l4_fn)[0],exist_ok=True)
+                            l4_ncattr_dict['scan_num'] = float(scan_num)
+                            l4_ncattr_dict['time_coverage_start'] = \
+                            datedev_py(np.nanmin(l2g['UTC_matlab_datenum'])).strftime('%Y-%m-%dT%H:%M:%SZ')
+                            l4_ncattr_dict['time_coverage_end'] = \
+                            datedev_py(np.nanmax(l2g['UTC_matlab_datenum'])).strftime('%Y-%m-%dT%H:%M:%SZ')
+                            l4_ncattr_dict['history'] = 'Created '+dt.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+                            l4.save_nc(l4_fn,l4_save_fields,ncattr_dict=l4_ncattr_dict)
+                            # end of facility loop
+                        # finish the scan if all facilities emissions are done
+                        del tl2, l2g 
+                        if 'fpopy' in locals():
+                            del fpopy, l4
+                        continue
+                        # end of facility emission saving
                     
                     l2g = tl2.to_popy_l2g_data(**wesn_dict)
                     if len(l2g['latc']) == 0:
@@ -564,7 +626,8 @@ class TEMPO():
             self.l2s = l2s
 
 class TEMPOL2(dict):
-    def __init__(self,year,month,day,scan_num,l2_dir_pattern):
+    def __init__(self,year,month,day,scan_num,l2_dir_pattern,
+                 west=None,east=None,south=None,north=None):
         '''
         year, month, day:
             int, identify a date
@@ -616,10 +679,23 @@ class TEMPOL2(dict):
         along_tracks = np.zeros(ngranule,dtype=int)
         granule_numbers = np.zeros(ngranule,dtype=int)
         granule_mask = np.ones(ngranule,dtype=bool)
+        if west is not None:
+            from shapely.geometry import Polygon
+            polygon = Polygon(np.array([[west,west,east,east],\
+                                        [south,north,north,south]]).T)
         # loop over right granules of the scan to save mirror steps
         for il2,l2_path in enumerate(l2_list):
             try:
                 with Dataset(l2_path,'r') as nc:
+                    if west is not None:
+                        xys = nc.geospatial_bounds.split('((')[-1].split('))')[0].split(',')
+                        granule_poly = Polygon(
+                            np.array(
+                                [xy.split(' ')[::-1] for xy in xys]).astype(float)
+                        )
+                        if not polygon.intersects(granule_poly):
+                            self.logger.info(f'{l2_path} does not intersect with wesn bounds')
+                            granule_mask[il2] = False
                     granule_numbers[il2] = nc.granule_num
                     along_tracks[il2] = nc.dimensions['mirror_step'].size
                     if il2 == 0:
@@ -670,6 +746,7 @@ class TEMPOL2(dict):
         # loop over granules of the same scan
         start_alongtrack_idx = 0
         ngranule = len(l2_list)
+        
         for igranule in range(ngranule):
             with Dataset(l2_list[igranule],'r') as nc:
                 dn_utc0 = datetime2datenum(
@@ -708,15 +785,19 @@ class TEMPOL2(dict):
         self['across_track_position'] = np.broadcast_to(np.arange(1.,self.xtrack+1,dtype=int
                                                                  )[np.newaxis,:],
                                                         self['latc'].shape)
-    
-    def get_theta(self):
-        if (self['latc'].shape[0] < 3) or (self['latc'].shape[1] < 3):
-            self.logger.error('matrix too small, impossible!')
-            return
         m_per_lat = 111e3
         m_per_lon = m_per_lat * np.cos(np.radians(self['latc'])).astype(np.float32)
         self['m_per_lat'] = m_per_lat
         self['m_per_lon'] = m_per_lon
+            
+    def get_theta(self):
+        if (self['latc'].shape[0] < 3) or (self['latc'].shape[1] < 3):
+            self.logger.warning('matrix too small for theta/DD terms!')
+            for k in ['thetax','thetay','thetar','thetas','xdoty','rdots','det_xy','det_rs']:
+                self[k] = np.full(self['latc'].shape,np.nan,dtype=np.float32)
+            return
+        m_per_lat = self['m_per_lat']
+        m_per_lon = self['m_per_lon']
         thetax = np.full(self['latc'].shape,np.nan,dtype=np.float32)
         thetay = np.full(self['latc'].shape,np.nan,dtype=np.float32)
         thetar = np.full(self['latc'].shape,np.nan,dtype=np.float32)
@@ -984,6 +1065,7 @@ class TEMPOL2(dict):
         draw_colorbar = kwargs.pop('draw_colorbar',True)
         label = kwargs.pop('label',plot_field)
         shrink = kwargs.pop('shrink',0.75)
+        cartopy_scale = kwargs.pop('cartopy_scale','50m')
         distance = np.sqrt(np.square((self['latc']-central_lat)*self['m_per_lat'])\
                            +np.square((self['lonc']-central_lon)*self['m_per_lon']))
         min_idx = np.unravel_index(np.nanargmin(distance), distance.shape)
@@ -1017,6 +1099,7 @@ class TEMPOL2(dict):
         collection.set_alpha(alpha)
         collection.set_clim(vmin=vmin,vmax=vmax)
         ax.add_collection(collection)
+        
         if xlim is None:
             ax.set_xlim([np.nanmin(lonrs),np.nanmax(lonrs)])
         else:
@@ -1025,7 +1108,14 @@ class TEMPOL2(dict):
             ax.set_ylim([np.nanmin(latrs),np.nanmax(latrs)])
         else:
             ax.set_ylim(ylim)
-        ax.set_aspect('equal', adjustable='box')
+        
+        if if_latlon:
+            if cartopy_scale is not None:
+                ax.coastlines(resolution=cartopy_scale, color='black', linewidth=1)
+                ax.add_feature(cfeature.STATES.with_scale(cartopy_scale), facecolor='None', edgecolor='k', 
+                               linestyle='-',zorder=0,lw=0.5)
+        else:
+            ax.set_aspect('equal', adjustable='box')
         if draw_colorbar:
             cb = plt.colorbar(collection,ax=ax,label=label,shrink=shrink)
         else:

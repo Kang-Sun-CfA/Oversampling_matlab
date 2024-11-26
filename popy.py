@@ -973,13 +973,13 @@ def F_interp_era5_uv(sounding_lon,sounding_lat,sounding_datenum,
         sounding_hPa = sounding_interp['sp']/100*np.exp(-altitude/scale_height)
         mask = sounding_hPa>np.max(era5_data['hPa'])
         if any(mask):
-            logging.warning(
+            logging.info(
                 'At {}m, {:3f}% sounding_hPa larger than bound {}'.format(
                     altitude,sum(mask)/len(mask)*100,np.max(era5_data['hPa'])))
             sounding_hPa[mask] = np.max(era5_data['hPa'])
         mask = sounding_hPa<np.min(era5_data['hPa'])
         if any(mask):
-            logging.warning(
+            logging.info(
                 'At {}m, {:3f}% sounding_hPa smaller than bound {}'.format(
                     altitude,sum(mask)/len(mask)*100,np.min(era5_data['hPa'])))
             sounding_hPa[mask] = np.min(era5_data['hPa'])
