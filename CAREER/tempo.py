@@ -928,15 +928,30 @@ class TEMPOL2(dict):
                     lat2=self['latc'][:-2,:-2],lon2=self['lonc'][:-2,:-2],
                     m_per_lat=self['m_per_lat'],m_per_lon=self['m_per_lon'][1:-1,1:-1]
                     )
-            self[f'd{field}dx'] = dfdx
+            
+            self[f'd{field}dx'] = dfdx 
             self[f'd{field}dy'] = dfdy
             self[f'd{field}dr'] = dfdr
             self[f'd{field}ds'] = dfds
+            
+            ### proven to be equivalent to the simple formula below
+#             # gradient (vec{g}) = gx*vec{x}+gy*vec{y} = gr*vec{r}+gy*vec{r}
+#             gx = (dfdx-dfdy*self['xdoty'])/(1-np.square(self['xdoty']))
+#             gy = (dfdy-dfdx*self['xdoty'])/(1-np.square(self['xdoty']))
+            
+#             gr = (dfdr-dfds*self['rdots'])/(1-np.square(self['rdots']))
+#             gs = (dfds-dfdr*self['rdots'])/(1-np.square(self['rdots']))
+            
+#             # directional derivatives
+#             self[field+'_DD_xy'] = windx*gx + windy*gy + \
+#             self['xdoty']*(windx*gy + windy*gx)
+#             self[field+'_DD_rs'] = windr*gr + winds*gs + \
+#             self['rdots']*(windr*gs + winds*gr)
+            ### proven to be equivalent to the simple formula below
+            
             # directional derivatives
-            self[field+'_DD_xy'] = windx*dfdx + windy*dfdy + \
-            self['xdoty']*(windx*dfdy + windy*dfdx)
-            self[field+'_DD_rs'] = windr*dfdr + winds*dfds + \
-            self['rdots']*(windr*dfds + winds*dfdr)
+            self[field+'_DD_xy'] = windx*dfdx + windy*dfdy
+            self[field+'_DD_rs'] = windr*dfdr + winds*dfds
             if keep_single_xyrs:
                 with warnings.catch_warnings():
                     warnings.filterwarnings(action='ignore', message='Mean of empty slice')

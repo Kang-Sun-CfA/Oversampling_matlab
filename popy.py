@@ -1983,8 +1983,8 @@ class Level3_Data(dict):
         ### grad(vcd) dot wind
         dcdx,dcdy,dcdr,dcds = F_grads(vcd,dy,dx_vec,dd_vec,finite_difference_order)
         wind_column_xy = dcdx*self['wind_e'] + dcdy*self['wind_n']
-        wind_column_rs = dcdr*self['wind_ne'] + dcds*self['wind_nw'] \
-            + r_dot_s*(dcdr*self['wind_nw'] + dcds*self['wind_ne'])
+        wind_column_rs = dcdr*self['wind_ne'] + dcds*self['wind_nw']
+        
         with warnings.catch_warnings():
             warnings.filterwarnings(action='ignore', message='Mean of empty slice')
             wind_column = np.nanmean(np.array([wind_column_xy,wind_column_rs]),axis=0)
@@ -2006,8 +2006,7 @@ class Level3_Data(dict):
         if z0 is not None:
             dcdx,dcdy,dcdr,dcds = F_grads(z0,dy,dx_vec,dd_vec,finite_difference_order)
             wind_topo_xy = vcd*(dcdx*self['wind_e'] + dcdy*self['wind_n'])
-            wind_topo_rs = vcd*(dcdr*self['wind_ne'] + dcds*self['wind_nw'] \
-                + r_dot_s*(dcdr*self['wind_nw'] + dcds*self['wind_ne']))
+            wind_topo_rs = vcd*(dcdr*self['wind_ne'] + dcds*self['wind_nw'])
             with warnings.catch_warnings():
                 warnings.filterwarnings(action='ignore', message='Mean of empty slice')
                 wind_topo = np.nanmean(np.array([wind_topo_xy,wind_topo_rs]),axis=0)
@@ -2043,10 +2042,8 @@ class Level3_Data(dict):
                     np.power(a0,order)*(dpdx*self['wind_e'] + dpdy*self['wind_n'])
 
                     wind_albedo_rs = order*pa*np.power(a0,order-1)*\
-                    (dcdr*self['wind_ne'] + dcds*self['wind_nw']+\
-                    r_dot_s*(dcdr*self['wind_nw'] + dcds*self['wind_ne']))+\
-                    np.power(a0,order)*(dpdr*self['wind_ne'] + dpds*self['wind_nw']+\
-                    r_dot_s*(dpdr*self['wind_nw'] + dpds*self['wind_ne']))
+                    (dcdr*self['wind_ne'] + dcds*self['wind_nw'])+\
+                    np.power(a0,order)*(dpdr*self['wind_ne'] + dpds*self['wind_nw'])
 
                     wind_albedo = np.nanmean(np.array([wind_albedo_xy,wind_albedo_rs]),axis=0)
                     wind_albedo[np.isnan(wind_albedo_xy) & np.isnan(wind_albedo_rs)] = np.nan
@@ -2067,10 +2064,8 @@ class Level3_Data(dict):
                     np.power(a0,order)*(dpdx*self['wind_e'] + dpdy*self['wind_n'])
 
                     wind_albedo_rs = order*pa*np.power(a0,order-1)*\
-                    (dcdr*self['wind_ne'] + dcds*self['wind_nw']+\
-                    r_dot_s*(dcdr*self['wind_nw'] + dcds*self['wind_ne']))+\
-                    np.power(a0,order)*(dpdr*self['wind_ne'] + dpds*self['wind_nw']+\
-                    r_dot_s*(dpdr*self['wind_nw'] + dpds*self['wind_ne']))
+                    (dcdr*self['wind_ne'] + dcds*self['wind_nw'])+\
+                    np.power(a0,order)*(dpdr*self['wind_ne'] + dpds*self['wind_nw'])
 
                     wind_albedo = np.nanmean(np.array([wind_albedo_xy,wind_albedo_rs]),axis=0)
                     wind_albedo[np.isnan(wind_albedo_xy) & np.isnan(wind_albedo_rs)] = np.nan
