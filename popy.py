@@ -25,6 +25,8 @@ Created on Sat Jan 26 15:50:30 2019
 2022/10/16: Level3_List class
 2023/09/19: fix num_samples bias for quadrilateral pixels
 2023/11/01: add TEMPONO2
+2024/12/16: correct directional derivative in rs directions
+2025/01/08: move TEMPO's storage/local_hour calculations to Level3_List
 """
 
 import numpy as np
@@ -3651,6 +3653,123 @@ class Level3_List(list):
             l3s_resampled.add(l3)
         return l3s_resampled,resampler
     
+    def get_local_hour_l3s(self,local_hour_centers,local_hour_spans):
+        '''return a separate Level3_List instance defined on local hours.
+        only recommended for geo instruments like tempo
+        local_hour_centers:
+            a list of local hour window centers
+        local_hour_spans:
+            widths of local hour windows
+        '''
+        nhour = len(local_hour_centers)
+        dates = pd.to_datetime(self.df.index.date).unique()
+        for idate,date in enumerate(dates):
+            day_dts = pd.to_datetime([
+                date+datetime.timedelta(hours=h) for h in local_hour_centers
+            ])
+            # create an empty list of Level3_Data for each local hour value
+            l3_lhs_day = np.empty(nhour,dtype=object)
+            for ilh in range(nhour):
+                l3_lhs_day[ilh] = Level3_Data(grid_size=self[0].grid_size)
+                for k in self[0].keys():
+                    if k in ['xgrid','ygrid','xmesh','ymesh']:
+                        l3_lhs_day[ilh][k] = self[0][k]
+                    elif k in ['num_samples','total_sample_weight']:
+                        l3_lhs_day[ilh][k] = np.zeros_like(self[0][k])
+                    else:
+                        l3_lhs_day[ilh][k] = np.full(self[0][k].shape,np.nan)
+
+            day_df = self.df[pd.to_datetime(self.df.index.date) == date]
+            # loop over scans of the day
+            for iscan,(irow,row) in enumerate(day_df.iterrows()):
+                l3 = self[row['count']]
+                weight = l3['total_sample_weight'].copy()
+                num = l3['num_samples'].copy()
+                for ilh, (lh,lhs) in enumerate(zip(local_hour_centers,local_hour_spans)):
+                    mask = (l3['local_hour']>= lh-lhs/2) & (l3['local_hour'] < lh+lhs/2)
+                    if np.sum(mask) == 0:
+                        continue
+                    l3['total_sample_weight'][~mask] = 0
+                    l3['num_samples'][~mask] = 0
+                    l3_lhs_day[ilh] = l3_lhs_day[ilh].merge(l3)
+                    l3['total_sample_weight'] = weight.copy()
+                    l3['num_samples'] = num.copy()
+            if idate == 0:
+                dt_array = day_dts
+                l3_lhs = l3_lhs_day
+            else:
+                dt_array = pd.DatetimeIndex(
+                    pd.concat([pd.Series(dt_array),pd.Series(day_dts)]))
+                l3_lhs = np.concatenate((l3_lhs,l3_lhs_day))
+        l3_ret = Level3_List(dt_array=dt_array,
+                             west=self.west,east=self.east,
+                             south=self.south,north=self.north)
+        for l3 in l3_lhs:
+            l3_ret.add(l3)
+        return l3_ret
+        
+    def get_storage(self,field='column_amount',tendency=['c','b','f'],
+                    num_samples_threshold=0.5
+                   ):
+        '''calculate storage (d field/dt) using tendency in the list of forward/f,
+        central/c, and/or backward/b. only recommended for geo instruments like tempo
+        field:
+            name in one of Level3_Data keys to calculate storage
+        tendency:
+            direction of finite difference
+        num_samples_threshold:
+            num_samples smaller than this will be not counted as covered by vcds
+        output:
+            fields in each l3 like "storage_column_amount_c"
+            a data frame with coverage of different storage terms, 
+            column_amount, and which storage option has the best coverage
+        '''
+        dates = pd.to_datetime(self.df.index.date)
+        
+        tendency_coverage = np.zeros((len(self),len(tendency)+1))
+        image_size = self[0]['num_samples'].size
+        tendency_coverage[:,0] = [np.sum(l['num_samples']>num_samples_threshold)/image_size for l in self]
+        for date in dates.unique():
+            day_df = self.df.loc[dates== date]
+            nscan = day_df.shape[0]
+            for iscan,(irow,row) in enumerate(day_df.iterrows()):
+                for tdcy in tendency:
+                    self[row['count']][f'storage_{tdcy}_{field}'] = np.full_like(self[row['count']][field],np.nan)
+
+                current_scan_num = row.scan_num
+                forward_possible = np.isin(current_scan_num+1,day_df['scan_num'])
+                backward_possible = np.isin(current_scan_num-1,day_df['scan_num'])
+                center_possible = forward_possible & backward_possible
+                # dvcd/dt, mol/m2/s
+                for tdcy in tendency:
+                    # forward finite difference
+                    if forward_possible and tdcy in ['forward','f']:
+                        forward_count = day_df.loc[day_df['scan_num']==current_scan_num+1]['count'][0]
+                        self[row['count']][f'storage_{tdcy}_{field}'] = \
+                        (self[forward_count][field]-self[row['count']][field])/ \
+                        (self[forward_count]['local_hour']-self[row['count']]['local_hour'])/3600
+                    # backward finite difference
+                    elif backward_possible and tdcy in ['backward','b']:
+                        backward_count = day_df.loc[day_df['scan_num']==current_scan_num-1]['count'][0]
+                        self[row['count']][f'storage_{tdcy}_{field}'] = \
+                        (self[row['count']][field]-self[backward_count][field])/ \
+                        (self[row['count']]['local_hour']-self[backward_count]['local_hour'])/3600
+                    # central finite difference
+                    elif center_possible and tdcy in ['center','central','c']:
+                        forward_count = day_df.loc[day_df['scan_num']==current_scan_num+1]['count'][0]
+                        backward_count = day_df.loc[day_df['scan_num']==current_scan_num-1]['count'][0]
+                        self[row['count']][f'storage_{tdcy}_{field}'] = \
+                        (self[forward_count][field]-self[backward_count][field])/ \
+                        (self[forward_count]['local_hour']-self[backward_count]['local_hour'])/3600
+        for itdcy,tdcy in enumerate(tendency):
+            tendency_coverage[:,1+itdcy] = [np.sum(~np.isnan(l[f'storage_{tdcy}_{field}']))/image_size for l in self]
+        tendency_coverage = pd.DataFrame(data=tendency_coverage,
+                                         columns=[field]+tendency,
+                                         index=self.df.index)
+        tendency_coverage['max_tdcy'] = tendency_coverage[tendency].idxmax(axis=1)
+        tendency_coverage['max_tdcy_cover'] = [row[row.max_tdcy] for irow, row in tendency_coverage.iterrows()]
+        self.df = pd.concat([self.df,tendency_coverage],axis=1)
+
     def get_emission_precision(self,mask=None):
         self.df['wind_column_precision'] = [l3.get_emission_precision(mask=mask) for l3 in self]
         self.df['wind_column_precision_singleLayer'] = self.df['wind_column_precision']\
@@ -5482,14 +5601,16 @@ class popy(object):
             validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
             self.logger.info('You have {} valid L2 pixels'.format(np.nansum(validmask)))
             l2g_data0 = {}
-            Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][:,:,0])[validmask]
-            Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][:,:,3])[validmask]
-            Lat_lowerright = np.squeeze(outp_nc['latitude_bounds'][:,:,1])[validmask]
-            Lat_upperright = np.squeeze(outp_nc['latitude_bounds'][:,:,2])[validmask]
-            Lon_lowerleft = np.squeeze(outp_nc['longitude_bounds'][:,:,0])[validmask]
-            Lon_upperleft = np.squeeze(outp_nc['longitude_bounds'][:,:,3])[validmask]
-            Lon_lowerright = np.squeeze(outp_nc['longitude_bounds'][:,:,1])[validmask]
-            Lon_upperright = np.squeeze(outp_nc['longitude_bounds'][:,:,2])[validmask]
+            Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][:,:,2])[validmask]
+            Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][:,:,1])[validmask]
+            Lat_upperright = np.squeeze(outp_nc['latitude_bounds'][:,:,0])[validmask]
+            Lat_lowerright = np.squeeze(outp_nc['latitude_bounds'][:,:,3])[validmask]
+            
+            Lon_lowerleft = np.squeeze(outp_nc['longitude_bounds'][:,:,2])[validmask]
+            Lon_upperleft = np.squeeze(outp_nc['longitude_bounds'][:,:,1])[validmask]
+            Lon_upperright = np.squeeze(outp_nc['longitude_bounds'][:,:,0])[validmask]
+            Lon_lowerright = np.squeeze(outp_nc['longitude_bounds'][:,:,3])[validmask]
+            
             l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
             l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
             for key in outp_nc.keys():

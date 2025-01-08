@@ -314,7 +314,8 @@ class PointSource(object):
                                 num_samples_threshold=0.1,covered_fraction_threshold=None):
         '''interface popy level 3 objects. 
         l3s:
-            Level3_List object
+            Level3_List object. l3s.df.index should be in **local** time to match
+            cems time
         l3s_freq:
             frequency of l3s. if none, try inferring from l3s.df.index.freq
         cems_time_shift:

@@ -24,7 +24,7 @@ class TEMPO():
     '''class for a TEMPO-observed region'''
     def __init__(self,product,geometry=None,xys=None,start_dt=None,end_dt=None,
                  west=-130,east=-65,south=23,north=51,grid_size=0.01,flux_grid_size=None,
-                 error_model='ones'):
+                 error_model='ones',k1=4.,k2=2.,k3=1.,inflatex=1.,inflatey=1.5):
         '''
         geometry:
             a list of tuples for the polygon, e.g., [(xarray,yarray)], or geometry in a gpd row
@@ -36,6 +36,10 @@ class TEMPO():
             grid size for level 3 data
         flux_grid_size:
             grid size for directional derivatives (level 4 data)
+        error_model, k1-3, inflatex/y:
+            inputs to popy class in regridding specific to TEMPO. k1 and k2 are along/across track
+            super gaussian exponents (opposite from OMI/TROPOMI). inflatex/y stretch the spatial
+            response in along/across track.
         '''
         self.logger = logging.getLogger(__name__)
         self.product = product
@@ -43,6 +47,11 @@ class TEMPO():
         flux_grid_size = flux_grid_size or grid_size
         self.flux_grid_size = flux_grid_size
         self.error_model = error_model
+        self.k1 = k1
+        self.k2 = k2
+        self.k3 = k3
+        self.inflatex = inflatex
+        self.inflatey = inflatey
         self.start_dt = start_dt or dt.datetime(2023,1,1)
         self.end_dt = end_dt or dt.datetime.now()
         if geometry is None and xys is not None:
@@ -175,86 +184,11 @@ class TEMPO():
             l3s.add(Level3_Data().read_nc(row.path,fields_name))
         self.l3s = l3s
         if do_tendency:
-            for idate,date in enumerate(dates):
-                day_df = l3s.df[pd.to_datetime(l3s.df.index.date) == date]
-                nscan = day_df.shape[0]
-                for iscan,(irow,row) in enumerate(day_df.iterrows()):
-                    for tdcy in tendency:
-                        l3s[row['count']][f'storage_{tdcy}'] = \
-                        np.full(l3s[row['count']]['column_amount'].shape,np.nan)
-                    # tendency defaults to nan if only 1 scan exist for the day
-                    if nscan == 1:
-                        continue
-                    # dvcd/dt, mol/m2/s
-                    for tdcy in tendency:
-                        # only forward finite difference is possible for the first scan
-                        if iscan == 0 and tdcy in ['forward','f']:
-                            l3s[row['count']][f'storage_{tdcy}'] = \
-                            (l3s[row['count']+1]['column_amount']-l3s[row['count']]['column_amount'])/ \
-                            (l3s[row['count']+1]['local_hour']-l3s[row['count']]['local_hour'])/3600
-                        # only backward finite difference is possible for the last scan
-                        elif iscan == nscan-1 and tdcy in ['backward','b']:
-                            l3s[row['count']][f'storage_{tdcy}'] = \
-                            (l3s[row['count']]['column_amount']-l3s[row['count']-1]['column_amount'])/ \
-                            (l3s[row['count']]['local_hour']-l3s[row['count']-1]['local_hour'])/3600
-                        # all possible for middle scans
-                        elif iscan > 0 and iscan < nscan-1:
-                            if tdcy in ['forward','f']:
-                                l3s[row['count']][f'storage_{tdcy}'] = \
-                                (l3s[row['count']+1]['column_amount']-l3s[row['count']]['column_amount'])/ \
-                                (l3s[row['count']+1]['local_hour']-l3s[row['count']]['local_hour'])/3600
-                            elif tdcy in ['backward','b']:
-                                l3s[row['count']][f'storage_{tdcy}'] = \
-                                (l3s[row['count']]['column_amount']-l3s[row['count']-1]['column_amount'])/ \
-                                (l3s[row['count']]['local_hour']-l3s[row['count']-1]['local_hour'])/3600
-                            else:
-                                l3s[row['count']][f'storage_{tdcy}'] = \
-                                (l3s[row['count']+1]['column_amount']-l3s[row['count']-1]['column_amount'])/ \
-                                (l3s[row['count']+1]['local_hour']-l3s[row['count']-1]['local_hour'])/3600
+            self.l3s.get_storage(field='column_amount',tendency=tendency)
                 
         if do_local_hour:
-            nhour = len(local_hour_centers)
-            for idate,date in enumerate(dates):
-                day_dts = pd.to_datetime([
-                    date+dt.timedelta(hours=h) for h in local_hour_centers
-                ])
-                # create an empty list of Level3_Data for each local hour value
-                l3_lhs_day = np.empty(nhour,dtype=object)
-                for ilh in range(nhour):
-                    l3_lhs_day[ilh] = Level3_Data(grid_size=l3s[0].grid_size)
-                    for k in l3s[0].keys():
-                        if k in ['xgrid','ygrid','xmesh','ymesh']:
-                            l3_lhs_day[ilh][k] = l3s[0][k]
-                        elif k in ['num_samples','total_sample_weight']:
-                            l3_lhs_day[ilh][k] = np.zeros_like(l3s[0][k])
-                        else:
-                            l3_lhs_day[ilh][k] = np.full(l3s[0][k].shape,np.nan)
-                
-                day_df = l3s.df[pd.to_datetime(l3s.df.index.date) == date]
-                # loop over scans of the day
-                for iscan,(irow,row) in enumerate(day_df.iterrows()):
-                    l3 = l3s[row['count']]
-                    weight = l3['total_sample_weight'].copy()
-                    num = l3['num_samples'].copy()
-                    for ilh, (lh,lhs) in enumerate(zip(local_hour_centers,local_hour_spans)):
-                        mask = (l3['local_hour']>= lh-lhs/2) & (l3['local_hour'] < lh+lhs/2)
-                        if np.sum(mask) == 0:
-                            continue
-                        l3['total_sample_weight'][~mask] = 0
-                        l3['num_samples'][~mask] = 0
-                        l3_lhs_day[ilh] = l3_lhs_day[ilh].merge(l3)
-                        l3['total_sample_weight'] = weight.copy()
-                        l3['num_samples'] = num.copy()
-                if idate == 0:
-                    dt_array = day_dts
-                    l3_lhs = l3_lhs_day
-                else:
-                    dt_array = pd.DatetimeIndex(
-                        pd.concat([pd.Series(dt_array),pd.Series(day_dts)]))
-                    l3_lhs = np.concatenate((l3_lhs,l3_lhs_day))
-            self.l3_lhs = Level3_List(dt_array=dt_array,**wesn_dict)
-            for l3 in l3_lhs:
-                self.l3_lhs.add(l3)
+            self.l3_lhs = self.l3s.get_local_hour_l3s(
+                local_hour_centers,local_hour_spans)
                     
     def load_l3_by_local_time(self,l3_path_pattern,
                               fields_name=None,
@@ -473,6 +407,8 @@ class TEMPO():
                                       **wesn_dict,
                                       grid_size=self.grid_size,
                                       error_model=self.error_model,
+                                      k1=self.k1,k2=self.k2,k3=self.k3,
+                                      inflatex=self.inflatex,inflatey=self.inflatey,
                                       oversampling_list=oversampling_list)
                     if attach_l2:
                         self.logger.warning('attaching l2 is tedious when using TEMPOL2')
@@ -543,6 +479,8 @@ class TEMPO():
                                       grid_size=self.grid_size,
                                       flux_grid_size=self.flux_grid_size,
                                       error_model=self.error_model,
+                                      k1=self.k1,k2=self.k2,k3=self.k3,
+                                      inflatex=self.inflatex,inflatey=self.inflatey,
                                       oversampling_list=oversampling_list)
 
                 tempo_l2_daily.F_subset_TEMPONO2(l2_list=day_flist,
@@ -1022,14 +960,14 @@ class TEMPOL2(dict):
         # datenum in local time
         local_dn = l2g_data['UTC_matlab_datenum']+l2g_data['lonc']/15/24
         l2g_data['local_hour'] = (local_dn-np.floor(local_dn))*24
-        l2g_data['latr'] = np.column_stack((self['latr'][:,:,0][mask],
-                                           self['latr'][:,:,3][mask],
-                                           self['latr'][:,:,2][mask],
-                                           self['latr'][:,:,1][mask]))
-        l2g_data['lonr'] = np.column_stack((self['lonr'][:,:,0][mask],
-                                           self['lonr'][:,:,3][mask],
-                                           self['lonr'][:,:,2][mask],
-                                           self['lonr'][:,:,1][mask]))
+        l2g_data['latr'] = np.column_stack((self['latr'][:,:,2][mask],
+                                           self['latr'][:,:,1][mask],
+                                           self['latr'][:,:,0][mask],
+                                           self['latr'][:,:,3][mask]))
+        l2g_data['lonr'] = np.column_stack((self['lonr'][:,:,2][mask],
+                                           self['lonr'][:,:,1][mask],
+                                           self['lonr'][:,:,0][mask],
+                                           self['lonr'][:,:,3][mask]))
         if 'terrain_height_DD' in self.keys():
             l2g_data['wind_topo'] = l2g_data['column_amount']*self['terrain_height_DD'][mask]
         if 'terrain_height_DD_xy' in self.keys():
