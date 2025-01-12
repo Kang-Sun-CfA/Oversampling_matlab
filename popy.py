@@ -3716,7 +3716,7 @@ class Level3_List(list):
         field:
             name in one of Level3_Data keys to calculate storage
         tendency:
-            direction of finite difference
+            direction of finite difference. the order matters when there is a tie in coverage ranking
         num_samples_threshold:
             num_samples smaller than this will be not counted as covered by vcds
         output:
@@ -3748,12 +3748,20 @@ class Level3_List(list):
                         self[row['count']][f'storage_{tdcy}_{field}'] = \
                         (self[forward_count][field]-self[row['count']][field])/ \
                         (self[forward_count]['local_hour']-self[row['count']]['local_hour'])/3600
+                        self[row['count']][f'storage_{tdcy}_{field}'][
+                            (self[forward_count]['num_samples']<num_samples_threshold) |\
+                            (self[row['count']]['num_samples']<num_samples_threshold)
+                        ] = np.nan
                     # backward finite difference
                     elif backward_possible and tdcy in ['backward','b']:
                         backward_count = day_df.loc[day_df['scan_num']==current_scan_num-1]['count'][0]
                         self[row['count']][f'storage_{tdcy}_{field}'] = \
                         (self[row['count']][field]-self[backward_count][field])/ \
                         (self[row['count']]['local_hour']-self[backward_count]['local_hour'])/3600
+                        self[row['count']][f'storage_{tdcy}_{field}'][
+                            (self[row['count']]['num_samples']<num_samples_threshold) |\
+                            (self[backward_count]['num_samples']<num_samples_threshold)
+                        ] = np.nan
                     # central finite difference
                     elif center_possible and tdcy in ['center','central','c']:
                         forward_count = day_df.loc[day_df['scan_num']==current_scan_num+1]['count'][0]
@@ -3761,6 +3769,10 @@ class Level3_List(list):
                         self[row['count']][f'storage_{tdcy}_{field}'] = \
                         (self[forward_count][field]-self[backward_count][field])/ \
                         (self[forward_count]['local_hour']-self[backward_count]['local_hour'])/3600
+                        self[row['count']][f'storage_{tdcy}_{field}'][
+                            (self[forward_count]['num_samples']<num_samples_threshold) |\
+                            (self[backward_count]['num_samples']<num_samples_threshold)
+                        ] = np.nan
         for itdcy,tdcy in enumerate(tendency):
             tendency_coverage[:,1+itdcy] = [np.sum(~np.isnan(l[f'storage_{tdcy}_{field}']))/image_size for l in self]
         tendency_coverage = pd.DataFrame(data=tendency_coverage,
@@ -9822,11 +9834,10 @@ class popy(object):
         if which_met in {'era','era5','ERA','ERA5'}:
             if altitudes is None:
                 sounding_interp = F_interp_era5(sounding_lon,sounding_lat,sounding_datenum,
-                                                met_dir,interp_fields,fn_header)
+                                                met_dir,interp_fields)
                 for key in sounding_interp.keys():
                     self.logger.info(key+' from ERA5 is sampled to L2g coordinate/time')
                     self.l2g_data['era5_'+key] = np.float32(sounding_interp[key])
-                    self.sounding_interp = sounding_interp
             else:
                 era5_3d_path_pattern = met_dir
                 era5_2d_path_pattern = kwargs.pop('era5_2d_path_pattern',None)

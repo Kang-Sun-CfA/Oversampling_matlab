@@ -310,7 +310,7 @@ class PointSource(object):
         
     def get_satellite_emissions(self,l3s,l3s_freq=None,l3_all=None,cems_time_shift=None,
                                 fit_topo_kw=None,fit_chem_kw=None,
-                                dist_steps_km=None,fields_to_sum=None,
+                                dist_steps_km=None,y_shrink=1.,fields_to_sum=None,
                                 num_samples_threshold=0.1,covered_fraction_threshold=None):
         '''interface popy level 3 objects. 
         l3s:
@@ -328,6 +328,8 @@ class PointSource(object):
             keyword argument to fit_chemistry function, no chem fit if None
         dist_steps_km:
             integrating radius to get mol/s
+        y_shrink:
+            enable elliptical boundary to get mol/s
         fields_to_sum:
             input to Level3_List.sum_by_mask
         num_samples_threshold:
@@ -354,16 +356,14 @@ class PointSource(object):
         if fit_topo_kw is not None or fit_chem_kw is not None:
             l_all = ls.aggregate()
         
-        lonmesh,latmesh = np.meshgrid(l_all['xgrid'],l_all['ygrid'])
-        dist_to_f_km = np.sqrt(np.square((lonmesh-self.lon)*self.km_per_lon)+\
-                               np.square((latmesh-self.lat)*self.km_per_lat)
-                               )
+        xmesh,ymesh = np.meshgrid(l_all['xgrid'],l_all['ygrid'])
+        xmesh = (xmesh-self.lon)*self.km_per_lon
+        ymesh = (ymesh-self.lat)*self.km_per_lat
         if dist_steps_km is None:
             dist_steps_km = np.linspace(self.start_km,self.end_km,self.nstep)
         
         for idist,dist_step in enumerate(dist_steps_km):
-            mask = np.zeros(lonmesh.shape,dtype=bool)
-            mask[dist_to_f_km <= dist_step] = True
+            mask = np.square(xmesh/dist_step)+np.square(ymesh/(dist_step*y_shrink))<=1
             ls.sum_by_mask(mask=mask,fields_to_sum=fields_to_sum,
                            num_samples_threshold=num_samples_threshold)
             for k in ls.df.keys():
@@ -371,7 +371,6 @@ class PointSource(object):
                     ls.df.rename(inplace=True,
                                  columns={k:'{}_dist{}'.format(k,dist_step)})
         
-        l_all['dist_to_f_km'] = dist_to_f_km
         self.l3_all = l_all
         l3_df = ls.df.copy()
         

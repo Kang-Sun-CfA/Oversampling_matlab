@@ -24,7 +24,7 @@ class TEMPO():
     '''class for a TEMPO-observed region'''
     def __init__(self,product,geometry=None,xys=None,start_dt=None,end_dt=None,
                  west=-130,east=-65,south=23,north=51,grid_size=0.01,flux_grid_size=None,
-                 error_model='ones',k1=4.,k2=2.,k3=1.,inflatex=1.,inflatey=1.5):
+                 error_model='ones',k1=4.,k2=2.,k3=1.,inflatex=1.,inflatey=1.):
         '''
         geometry:
             a list of tuples for the polygon, e.g., [(xarray,yarray)], or geometry in a gpd row
@@ -98,7 +98,8 @@ class TEMPO():
                    fields_name=None,
                    tendency=None,
                    local_hour_centers=None,
-                   local_hour_spans=None):
+                   local_hour_spans=None,
+                   blacklist=None):
         '''load l3/l4 scans
         l3_path_pattern:
             use %Y%m%d format and *
@@ -114,6 +115,8 @@ class TEMPO():
             use integer hours
         local_hour_spans:
             widths of local hour windows. a scalar will be expanded to an array
+        blacklist:
+            if provided, will not load the scans. should be a list of file paths
         '''
         if fields_name is None:
             fields_name = ['wind_column','wind_topo',
@@ -148,6 +151,8 @@ class TEMPO():
         for idate,date in enumerate(dates):
             # level 3 files of the same day
             day_flist = np.array(glob.glob(date.strftime(l3_path_pattern)))
+            if blacklist is not None:
+                day_flist = [item for item in day_flist if item not in blacklist]
             nscan = len(day_flist)
             day_df = pd.DataFrame(dict(scan_num=np.zeros(nscan,dtype=int),
                                        time=np.zeros(nscan),
@@ -348,16 +353,20 @@ class TEMPO():
                         for irow,row in fadf.iterrows():
                             # start of facility loop
                             if 'window_km' in row.keys():
-                                window_km = row.window_km
+                                window_km_x = row.window_km
+                                window_km_y = row.window_km
+                            elif 'window_km_x' in row.keys():
+                                window_km_x = row.window_km_x
+                                window_km_y = row.window_km_y
                             else:
-                                window_km = 30
+                                window_km_x = 30;window_km_y = 30
                             km_per_lat = 111
                             km_per_lon = 111*np.cos(row.latitude/180*np.pi)
                             l2g = tl2.to_popy_l2g_data(
-                                west=row.longitude-window_km/km_per_lon,
-                                east=row.longitude+window_km/km_per_lon,
-                                south=row.latitude-window_km/km_per_lat,
-                                north=row.latitude+window_km/km_per_lat)
+                                west=row.longitude-window_km_x/km_per_lon,
+                                east=row.longitude+window_km_x/km_per_lon,
+                                south=row.latitude-window_km_y/km_per_lat,
+                                north=row.latitude+window_km_y/km_per_lat)
                             if len(l2g['latc']) == 0:
                                 # escape from facility loop if no l2 pixels
                                 continue
@@ -365,10 +374,10 @@ class TEMPO():
                             fpopy = popy(
                                 instrum='TEMPO',
                                 product=self.product,
-                                west=row.longitude-window_km/km_per_lon,
-                                east=row.longitude+window_km/km_per_lon,
-                                south=row.latitude-window_km/km_per_lat,
-                                north=row.latitude+window_km/km_per_lat,
+                                west=row.longitude-window_km_x/km_per_lon,
+                                east=row.longitude+window_km_x/km_per_lon,
+                                south=row.latitude-window_km_y/km_per_lat,
+                                north=row.latitude+window_km_y/km_per_lat,
                                 grid_size=self.grid_size,
                                 error_model=self.error_model,
                                 oversampling_list=oversampling_list)
@@ -765,7 +774,18 @@ class TEMPOL2(dict):
         sounding_lat = self['latc'][mask]
         sounding_datenum = self['UTC_matlab_datenum'][mask]
         if which_met.lower() in ['era5']:
-            if altitudes is not None:
+            if altitudes is None:
+                from popy import F_interp_era5
+                if interp_fields is None:
+                    interp_fields = ['u10','v10','u100','v100']
+                sounding_interp = F_interp_era5(
+                    sounding_lon,sounding_lat,sounding_datenum,
+                    met_dir,interp_fields)                
+                for key in sounding_interp.keys():
+                    self.logger.info(key+' from ERA5 is sampled to L2 coordinate/time')
+                    self['era5_'+key] = np.full(self['latc'].shape,np.nan,dtype=np.float32)
+                    self['era5_'+key][mask] = sounding_interp[key]
+            else:
                 from popy import F_interp_era5_uv
                 era5_3d_path_pattern = met_dir or \
                 '/projects/academic/kangsun/data/ERA5/Y%Y/M%m/D%d/CONUS_3D_%Y%m%d.nc'
