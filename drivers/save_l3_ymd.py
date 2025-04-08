@@ -49,8 +49,27 @@ elif region.lower() == 'conus':
     east = -65
     south = 24
     north = 50
+    region_margin = 0.2
     if subregion.lower() == 'cornbelt':
         subwest=-105;subeast=-80;subsouth=36;subnorth=50
+    elif subregion.lower() == 'cts':#central time south
+        subwest=-103-region_margin;subeast=-87.5+region_margin;
+        subsouth=25.8-region_margin;subnorth=39+region_margin
+    elif subregion.lower() == 'ctn':#central time north
+        subwest=-103-region_margin;subeast=-87.5+region_margin;
+        subsouth=39-region_margin;subnorth=49.5+region_margin
+    elif subregion.lower() == 'ets':#east time south
+        subwest=-87.5-region_margin;subeast=-74+region_margin;
+        subsouth=24-region_margin;subnorth=39+region_margin
+    elif subregion.lower() == 'etn':#east time north
+        subwest=-87.5-region_margin;subeast=-66+region_margin;
+        subsouth=39-region_margin;subnorth=48+region_margin
+    elif subregion.lower() == 'mt':#mountain time
+        subwest=-116-region_margin;subeast=-103+region_margin;
+        subsouth=28-region_margin;subnorth=49+region_margin
+    elif subregion.lower() == 'pt':#pacific time
+        subwest=-125-region_margin;subeast=-116+region_margin;
+        subsouth=32-region_margin;subnorth=49+region_margin
 
 if subregion == region:
     subwest=west;subeast=east;subsouth=south;subnorth=north
