@@ -190,6 +190,11 @@ class TEMPO():
         self.l3s = l3s
         if do_tendency:
             self.l3s.get_storage(field='column_amount',tendency=tendency)
+            # ok to get DD' here, but better to add storage after loading the l3s for more flexibility
+            # e.g., the storage can be added to wind_column_xy/rs, or wind_column_topo/chem
+            self.l3s.add_storage(vcd_field='column_amount',
+                                 emission_field='wind_column',tendency=tendency,
+                                 mode='nanmean',nan_tendency_as_zero=True)
                 
         if do_local_hour:
             self.l3_lhs = self.l3s.get_local_hour_l3s(
@@ -668,7 +673,7 @@ class TEMPOL2(dict):
         along_tracks = self.along_tracks
         l2_list = self.l2_list
         if data_fields is None:
-            data_fields = ['/support_data/amf_cloud_fraction',\
+            data_fields = ['/support_data/eff_cloud_fraction',\
                            '/geolocation/latitude',\
                            '/geolocation/longitude',\
                            '/support_data/surface_pressure',\
