@@ -5504,7 +5504,8 @@ class popy(object):
     
     def F_subset_TEMPONO2(self,l2_list=None,l2_path_pattern=None,
                           data_fields=None,data_fields_l2g=None,
-                          min_MDQF=0,max_MDQF=0,maxsza=None,maxvza=90,maxcf=None):
+                          min_MDQF=0,max_MDQF=0,maxsza=None,maxvza=90,
+                          max_ecf=0.2,max_crf=None):
         """ 
         function to subset TEMPONO2 level 2 data
         l2_list:
@@ -5518,8 +5519,10 @@ class popy(object):
             shortened data_fields used in the output dictionary l2g_data
         min/max_MDQF:
             bounds of /key_science_data/main_data_quality_flag
-        maxsza/cf:
-            max solar zenith angle and amf_cloud_fraction
+        maxsza:
+            max solar zenith angle 
+        max_ecf/crf:
+            max effective and amf_cloud_fraction
         created on 2023/11/01
         """      
         from netCDF4 import Dataset
@@ -5545,7 +5548,8 @@ class popy(object):
         self.l2_list = l2_list
         
         maxsza = maxsza or self.maxsza
-        maxcf = maxcf or self.maxcf
+        max_ecf = max_ecf or self.maxcf
+        max_crf = max_crf or np.inf
         west = self.west
         east = self.east
         south = self.south
@@ -5589,80 +5593,85 @@ class popy(object):
                 self.logger.warning('{} does not exist!!! Skipping...'.format(fn))
                 continue
             self.logger.info('Loading '+os.path.split(fn)[-1])
-            with Dataset(fn,'r') as nc:
-                with warnings.catch_warnings():
-                    warnings.filterwarnings("ignore",category=DeprecationWarning)
-                    xys = nc.geospatial_bounds.split('((')[-1].split('))')[0].split(',')
-                    ref_dt = datetime.datetime.strptime(nc.time_reference,'%Y-%m-%dT%H:%M:%SZ')
-                    t0 = ref_dt+datetime.timedelta(seconds=nc.time_coverage_start_since_epoch)
-                    t1 = ref_dt+datetime.timedelta(seconds=nc.time_coverage_end_since_epoch)
-                if t0 > self.end_python_datetime or t1 < self.start_python_datetime:
-                    self.logger.info(os.path.split(fn)[-1]+' does not overlap with the given time. Skipping...')
-                    continue
-                granule_bounds = np.array([xy.split(' ')[::-1] for xy in xys]).astype(float)
-                granule_poly = Polygon(granule_bounds)
-                if not polygon.intersects(granule_poly):
-                    self.logger.info(os.path.split(fn)[-1]+' does not intersects with popy domain. Skipping...')
-                    continue
-                if np.max(nc['geolocation/time'][:].mask) == True:
-                    self.logger.info(os.path.split(fn)[-1]+' has invalid time stamp! Fill by even time stamps between start/end')
-                    dn_utc0 = datetime2datenum(datetime.datetime.strptime(nc.time_coverage_start,'%Y-%m-%dT%H:%M:%SZ'))
-                    dn_utc1 = datetime2datenum(datetime.datetime.strptime(nc.time_coverage_end,'%Y-%m-%dT%H:%M:%SZ'))
-                    nmirror_step = nc.dimensions['mirror_step'].size
-                    UTC_matlab_datenum = np.linspace(dn_utc0,dn_utc1,nmirror_step+1)[:nmirror_step]
-                else:
-                    UTC_matlab_datenum = np.array([datetime2datenum(ref_dt+datetime.timedelta(seconds=s)) \
-                                               for s in nc['geolocation/time'][:].data])
-                outp_nc = {}
-                for i,dfld in enumerate(data_fields):
-                    tmp = nc[dfld]
-                    if not data_fields_l2g:
-                        varname = tmp.name
+            try:
+                with Dataset(fn,'r') as nc:
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings("ignore",category=DeprecationWarning)
+                        xys = nc.geospatial_bounds.split('((')[-1].split('))')[0].split(',')
+                        ref_dt = datetime.datetime.strptime(nc.time_reference,'%Y-%m-%dT%H:%M:%SZ')
+                        t0 = ref_dt+datetime.timedelta(seconds=nc.time_coverage_start_since_epoch)
+                        t1 = ref_dt+datetime.timedelta(seconds=nc.time_coverage_end_since_epoch)
+                    if t0 > self.end_python_datetime or t1 < self.start_python_datetime:
+                        self.logger.info(os.path.split(fn)[-1]+' does not overlap with the given time. Skipping...')
+                        continue
+                    granule_bounds = np.array([xy.split(' ')[::-1] for xy in xys]).astype(float)
+                    granule_poly = Polygon(granule_bounds)
+                    if not polygon.intersects(granule_poly):
+                        self.logger.info(os.path.split(fn)[-1]+' does not intersects with popy domain. Skipping...')
+                        continue
+                    if np.max(nc['geolocation/time'][:].mask) == True:
+                        self.logger.info(os.path.split(fn)[-1]+' has invalid time stamp! Fill by even time stamps between start/end')
+                        dn_utc0 = datetime2datenum(datetime.datetime.strptime(nc.time_coverage_start,'%Y-%m-%dT%H:%M:%SZ'))
+                        dn_utc1 = datetime2datenum(datetime.datetime.strptime(nc.time_coverage_end,'%Y-%m-%dT%H:%M:%SZ'))
+                        nmirror_step = nc.dimensions['mirror_step'].size
+                        UTC_matlab_datenum = np.linspace(dn_utc0,dn_utc1,nmirror_step+1)[:nmirror_step]
                     else:
-                        varname = data_fields_l2g[i]
-                    try:
-                        outp_nc[varname] = tmp[:].filled(np.nan)
-                    except:
-                        self.logger.debug('{} cannot be filled by nan or is not a masked array'.format(varname))
-                        outp_nc[varname] = tmp[:].data
-                
-                outp_nc['UTC_matlab_datenum'] = np.broadcast_to(UTC_matlab_datenum[:,np.newaxis],outp_nc['latc'].shape)
-                xtrack = nc.dimensions['xtrack'].size
-                outp_nc['across_track_position'] = np.broadcast_to(np.arange(1.,xtrack+1)[np.newaxis,:],\
-                                                                   outp_nc['latc'].shape).astype(int)
-                outp_nc['scan_num'] = np.full(outp_nc['latc'].shape,nc.scan_num,dtype=int)
-                outp_nc['granule_num'] = np.full(outp_nc['latc'].shape,nc.granule_num,dtype=int)
-                
-            f1 = (outp_nc['SolarZenithAngle'] <= maxsza) & (outp_nc['vza'] <= maxvza)
-            f2 = outp_nc['amf_cloud_fraction'] <= maxcf
-            f3 = (outp_nc['main_data_quality_flag'] <= max_MDQF) & (outp_nc['main_data_quality_flag'] >= min_MDQF)             
-            f4 = outp_nc['latc'] >= south
-            f5 = outp_nc['latc'] <= north
-            tmplon = outp_nc['lonc']-west
-            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
-            f6 = tmplon >= 0
-            f7 = tmplon <= east-west
-            f8 = outp_nc['UTC_matlab_datenum'] >= self.start_matlab_datenum
-            f9 = outp_nc['UTC_matlab_datenum'] <= self.end_matlab_datenum
-            validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
-            self.logger.info('You have {} valid L2 pixels'.format(np.nansum(validmask)))
-            l2g_data0 = {}
-            Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][:,:,2])[validmask]
-            Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][:,:,1])[validmask]
-            Lat_upperright = np.squeeze(outp_nc['latitude_bounds'][:,:,0])[validmask]
-            Lat_lowerright = np.squeeze(outp_nc['latitude_bounds'][:,:,3])[validmask]
-            
-            Lon_lowerleft = np.squeeze(outp_nc['longitude_bounds'][:,:,2])[validmask]
-            Lon_upperleft = np.squeeze(outp_nc['longitude_bounds'][:,:,1])[validmask]
-            Lon_upperright = np.squeeze(outp_nc['longitude_bounds'][:,:,0])[validmask]
-            Lon_lowerright = np.squeeze(outp_nc['longitude_bounds'][:,:,3])[validmask]
-            
-            l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
-            l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
-            for key in outp_nc.keys():
-                if key not in {'latitude_bounds','longitude_bounds','time'}:
-                    l2g_data0[key] = outp_nc[key][validmask]
-            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+                        UTC_matlab_datenum = np.array([datetime2datenum(ref_dt+datetime.timedelta(seconds=s)) \
+                                                   for s in nc['geolocation/time'][:].data])
+                    outp_nc = {}
+                    for i,dfld in enumerate(data_fields):
+                        tmp = nc[dfld]
+                        if not data_fields_l2g:
+                            varname = tmp.name
+                        else:
+                            varname = data_fields_l2g[i]
+                        try:
+                            outp_nc[varname] = tmp[:].filled(np.nan)
+                        except:
+                            self.logger.debug('{} cannot be filled by nan or is not a masked array'.format(varname))
+                            outp_nc[varname] = tmp[:].data
+
+                    outp_nc['UTC_matlab_datenum'] = np.broadcast_to(UTC_matlab_datenum[:,np.newaxis],outp_nc['latc'].shape)
+                    xtrack = nc.dimensions['xtrack'].size
+                    outp_nc['across_track_position'] = np.broadcast_to(np.arange(1.,xtrack+1)[np.newaxis,:],\
+                                                                       outp_nc['latc'].shape).astype(int)
+                    outp_nc['scan_num'] = np.full(outp_nc['latc'].shape,nc.scan_num,dtype=int)
+                    outp_nc['granule_num'] = np.full(outp_nc['latc'].shape,nc.granule_num,dtype=int)
+
+                f1 = (outp_nc['SolarZenithAngle'] <= maxsza) & (outp_nc['vza'] <= maxvza)
+                f2 = outp_nc['amf_cloud_fraction'] <= max_crf
+                f2_ = outp_nc['eff_cloud_fraction'] <= max_ecf
+                f3 = (outp_nc['main_data_quality_flag'] <= max_MDQF) & (outp_nc['main_data_quality_flag'] >= min_MDQF)             
+                f4 = outp_nc['latc'] >= south
+                f5 = outp_nc['latc'] <= north
+                tmplon = outp_nc['lonc']-west
+                tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+                f6 = tmplon >= 0
+                f7 = tmplon <= east-west
+                f8 = outp_nc['UTC_matlab_datenum'] >= self.start_matlab_datenum
+                f9 = outp_nc['UTC_matlab_datenum'] <= self.end_matlab_datenum
+                validmask = f1 & f2 & f2_ & f3 & f4 & f5 & f6 & f7 & f8 & f9
+                self.logger.info('You have {} valid L2 pixels'.format(np.nansum(validmask)))
+                l2g_data0 = {}
+                Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][:,:,2])[validmask]
+                Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][:,:,1])[validmask]
+                Lat_upperright = np.squeeze(outp_nc['latitude_bounds'][:,:,0])[validmask]
+                Lat_lowerright = np.squeeze(outp_nc['latitude_bounds'][:,:,3])[validmask]
+
+                Lon_lowerleft = np.squeeze(outp_nc['longitude_bounds'][:,:,2])[validmask]
+                Lon_upperleft = np.squeeze(outp_nc['longitude_bounds'][:,:,1])[validmask]
+                Lon_upperright = np.squeeze(outp_nc['longitude_bounds'][:,:,0])[validmask]
+                Lon_lowerright = np.squeeze(outp_nc['longitude_bounds'][:,:,3])[validmask]
+
+                l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
+                l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+                for key in outp_nc.keys():
+                    if key not in {'latitude_bounds','longitude_bounds','time'}:
+                        l2g_data0[key] = outp_nc[key][validmask]
+                l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+            except Exception as e:
+                self.logger.warning(f'{fn} gives error!')
+                self.logger.warning(e)
         self.l2g_data = l2g_data
         if not l2g_data:
             self.nl2 = 0
