@@ -243,7 +243,7 @@ class TEMPO():
                        l3_path_pattern=None,
                        l4_path_pattern=None,gradient_kw=None,
                        l3_save_fields=None,l4_save_fields=None,
-                       maxsza=75,maxcf=0.3,
+                       maxsza=75,maxcf=None,max_ecf=0.2,max_crf=np.inf,
                        ncores=0,block_length=300,
                        l3_ncattr_dict=None,l4_ncattr_dict=None,
                        use_TEMPOL2=True,fadf=None):
@@ -257,6 +257,10 @@ class TEMPO():
         if not attach_l2 and not attach_l3 and (l3_path_pattern is None) and (l4_path_pattern is None):
             self.logger.error('attach l2/l3 data or provide level3/4 paths!')
             return
+        
+        if maxcf is not None:
+            self.logger.warning(f'assuming max_ecf=maxcf={maxcf}, use max_ecf instead!')
+            max_ecf = maxcf
         
         if gradient_kw is None:
             do_l4 = False
@@ -340,7 +344,7 @@ class TEMPO():
                         self.logger.info('{} scan {} has no l2 data files, skipping'.format(
                             date.strftime('%Y%m%d'),scan_num))
                         continue
-                    tl2.load_l2(maxcf=maxcf,maxsza=maxsza,
+                    tl2.load_l2(max_ecf=max_ecf,max_crf=max_crf,maxsza=maxsza,
                                 data_fields=data_fields,data_fields_l2g=data_fields_l2g)
                     if do_l4:
                         tl2.get_theta()
@@ -498,7 +502,7 @@ class TEMPO():
                                       oversampling_list=oversampling_list)
 
                 tempo_l2_daily.F_subset_TEMPONO2(l2_list=day_flist,
-                                                 maxsza=maxsza,maxcf=maxcf,
+                                                 maxsza=maxsza,max_ecf=max_ecf,max_crf=max_crf,
                                                  data_fields=data_fields,data_fields_l2g=data_fields_l2g)
                 if tempo_l2_daily.nl2 == 0:
                     self.logger.info(date.strftime('%Y%m%d')+' has no l2 data, skipping')
@@ -669,11 +673,12 @@ class TEMPOL2(dict):
         self.along_tracks = along_tracks[granule_mask]
         self.xtrack = xtrack
     
-    def load_l2(self,data_fields=None,data_fields_l2g=None,maxcf=0.2,maxsza=None):
+    def load_l2(self,data_fields=None,data_fields_l2g=None,max_ecf=0.2,max_crf=np.inf,maxsza=None):
         along_tracks = self.along_tracks
         l2_list = self.l2_list
         if data_fields is None:
             data_fields = ['/support_data/eff_cloud_fraction',\
+                           '/support_data/amf_cloud_fraction',\
                            '/geolocation/latitude',\
                            '/geolocation/longitude',\
                            '/support_data/surface_pressure',\
@@ -683,7 +688,7 @@ class TEMPOL2(dict):
                            '/geolocation/solar_zenith_angle',\
                            '/product/main_data_quality_flag',\
                            '/product/vertical_column_troposphere']  
-            data_fields_l2g = ['cloud_fraction','latc','lonc',
+            data_fields_l2g = ['eff_cloud_fraction','amf_cloud_fraction','latc','lonc',
                                'surface_pressure','terrain_height',
                                'latr','lonr','sza','qa','column_amount']
         
@@ -727,8 +732,10 @@ class TEMPOL2(dict):
             start_alongtrack_idx += along_tracks[igranule]
 
         mask = (self['qa']==0)
-        if maxcf is not None:
-            mask = mask & (self['cloud_fraction']<=maxcf)
+        if max_ecf is not None:
+            mask = mask & (self['eff_cloud_fraction']<=max_ecf)
+        if max_crf is not None:
+            mask = mask & (self['amf_cloud_fraction']<=max_crf)
         if maxsza is not None:
             mask = mask & (self['sza']<=maxsza)
         self['column_amount'][~mask] = np.nan
