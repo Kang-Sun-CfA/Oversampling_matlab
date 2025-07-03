@@ -161,6 +161,10 @@ class CDL:
         return
     
     def select(self,code=None,land_type=None):
+        if land_type == 'dominant':
+            indices = np.argmax(self.fractions, axis=-1)
+            dominant = self.df['Code'].values[indices]
+            return dominant
         if code is None:
             if not any(self.df['Type'].isin([land_type])):
                 self.logger.error(f'{land_type} not available!')
@@ -211,12 +215,7 @@ class CDL:
                 fields_rename=None,
                 fields_comment=None,
                 fields_unit=None,
-                ncattr_dict=None):
-        from pyproj import Proj
-        self.proj = Proj(proj='longlat', datum='WGS84')
-        import datetime 
-        from netCDF4 import Dataset
-        
+                ncattr_dict=None):    
         fields_name = fields_name or []
         if fields_rename is None:
             fields_rename = fields_name.copy()
@@ -234,6 +233,19 @@ class CDL:
             fields_rename.append('ygrid')
             fields_comment.append('vertical grid')
             fields_unit.append('degree')
+        lonmesh,latmesh = np.meshgrid(self.xgrid,self.ygrid)
+        self.lonmesh = lonmesh
+        self.latmesh = latmesh
+        if 'lonmesh' not in fields_name:
+            fields_name.append('lonmesh')
+            fields_rename.append('lonmesh')
+            fields_comment.append('longitude mesh')
+            fields_unit.append('degree_east')
+        if 'latmesh' not in fields_name:
+            fields_name.append('latmesh')
+            fields_rename.append('latmesh')
+            fields_comment.append('latitude mesh')
+            fields_unit.append('degree_north')
         if 'fractions' not in fields_name:
             fields_name.append('fractions')
             fields_rename.append('fractions')
@@ -260,26 +272,11 @@ class CDL:
                            'institution':'University at Buffalo',
                            'contact':'Kang Sun, kangsun@buffalo.edu'}
         if 'history' not in ncattr_dict.keys():
-            ncattr_dict['history'] = 'Created '+datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')#local time
+            ncattr_dict['history'] = 'Created '+dt.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')#local time
         nc.setncatts(ncattr_dict)
         nc.createDimension('ygrid',self.fractions.shape[0])
         nc.createDimension('xgrid',self.fractions.shape[1])
         nc.createDimension('land_cover', self.fractions.shape[2])
-        if self.proj is not None:
-            self.logger.info('generating lat/lon mesh based on projection')
-            lonmesh,latmesh = self.proj(*np.meshgrid(self.xgrid,self.ygrid),inverse=True)
-            self.lonmesh = lonmesh
-            self.latmesh = latmesh
-            if 'lonmesh' not in fields_name:
-                fields_name.append('lonmesh')
-                fields_rename.append('lonmesh')
-                fields_comment.append('longitude mesh')
-                fields_unit.append('degree_east')
-            if 'latmesh' not in fields_name:
-                fields_name.append('latmesh')
-                fields_rename.append('latmesh')
-                fields_comment.append('latitude mesh')
-                fields_unit.append('degree_north')
         for (i,fn) in enumerate(fields_name):
             if fn in ['xgrid']:
                 vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('xgrid'))
@@ -294,20 +291,14 @@ class CDL:
             elif fn in ['Code', 'mean_frac']:
                 vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('land_cover'))
             # use standard_name to inform lat/lon vs x/y
-            if self.proj is not None:
-                if fn == 'xgrid':
-                    vid.standard_name = 'projection_x_coordinate'
-                if fn == 'ygrid':
-                    vid.standard_name = 'projection_y_coordinate'
-                if fn == 'lonmesh':
-                    vid.standard_name = 'longitude'
-                if fn == 'latmesh':
-                    vid.standard_name = 'latitude'
-            else:
-                if fn == 'xgrid':
-                    vid.standard_name = 'longitude'
-                if fn == 'ygrid':
-                    vid.standard_name = 'latitude'
+            if fn == 'xgrid':
+                vid.standard_name = 'projection_x_coordinate'
+            elif fn == 'ygrid':
+                vid.standard_name = 'projection_y_coordinate'
+            elif fn == 'lonmesh':
+                vid.standard_name = 'longitude'
+            elif fn == 'latmesh':
+                vid.standard_name = 'latitude'
             vid.comment = fields_comment[i]
             vid.units = fields_unit[i]
             if fn in ['xgrid', 'ygrid', 'lonmesh', 'latmesh', 'fractions']:
@@ -319,13 +310,15 @@ class CDL:
         nc.close()
     def read_nc(self,l3_filename,
                 fields_name=None):
-        from netCDF4 import Dataset
-
         fields_name = fields_name or []
         if 'xgrid' not in fields_name:
             fields_name.append('xgrid')
         if 'ygrid' not in fields_name:
             fields_name.append('ygrid')
+        if 'lonmesh' not in fields_name:
+            fields_name.append('lonmesh')
+        if 'latmesh' not in fields_name:
+            fields_name.append('latmesh')
         if 'fractions' not in fields_name:
             fields_name.append('fractions')
         if 'code' not in fields_name:
@@ -335,36 +328,21 @@ class CDL:
         if 'mean_frac' not in fields_name:
             fields_name.append('mean_frac')           
         nc = Dataset(l3_filename,'r')
-        try:
-            from pyproj import Proj
-            self.proj = Proj(nc.getncattr('proj_srs'))
-            self.logger.info('the level 3 data appear to be in projection {}'.format(nc.getncattr('proj_srs')))
-        except:
-            self.logger.info('no projection found')
-            self.proj = None
         for (i,varname) in enumerate(fields_name):
             # the variable names are inconsistent with Level3_Data in CF-compatible nc files
             nc_varname = varname
-            if self.proj is None:
-                if varname == 'xgrid':
-                    if 'longitude' in nc.variables.keys():
-                        nc_varname = 'longitude'
-                if varname == 'ygrid':
-                    if 'latitude' in nc.variables.keys():
-                        nc_varname = 'latitude'
-            else:
-                if varname == 'xgrid':
-                    if 'projection_x_coordinate' in nc.variables.keys():
-                        nc_varname = 'projection_x_coordinate'
-                if varname == 'ygrid':
-                    if 'projection_y_coordinate' in nc.variables.keys():
-                        nc_varname = 'projection_y_coordinate'
-                if varname == 'lonmesh':
-                    if 'longitude' in nc.variables.keys():
-                        nc_varname = 'longitude'
-                if varname == 'latmesh':
-                    if 'latitude' in nc.variables.keys():
-                        nc_varname = 'latitude'
+            if varname == 'xgrid':
+                if 'projection_x_coordinate' in nc.variables.keys():
+                    nc_varname = 'projection_x_coordinate'
+            if varname == 'ygrid':
+                if 'projection_y_coordinate' in nc.variables.keys():
+                    nc_varname = 'projection_y_coordinate'
+            if varname == 'lonmesh':
+                if 'longitude' in nc.variables.keys():
+                    nc_varname = 'longitude'
+            if varname == 'latmesh':
+                if 'latitude' in nc.variables.keys():
+                    nc_varname = 'latitude'
             try:
                 setattr(self, varname, nc[nc_varname][:].filled(np.nan))
             except:
