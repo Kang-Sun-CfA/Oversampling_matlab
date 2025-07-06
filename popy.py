@@ -468,105 +468,6 @@ def F_collocate_l2g(l2g_data1,l2g_data2,hour_difference=0.5,
     l2g_data1_hasnot2 = {k:v[~overlap_mask,] for (k,v) in l2g_data1.items()}
     return l2g_data1_has2, l2g_data1_hasnot2
     
-def F_interp_gcrs(sounding_lon,sounding_lat,sounding_datenum,sounding_ps,
-                  gcrs_dir='/mnt/Data2/GEOS-Chem_Silvern/',
-                  product='NO2',if_monthly=False):
-    """
-    sample a field from GEOS-Chem data by Rachel Silvern (gcrs) in .nc format. 
-    sounding_lon:
-        longitude for interpolation
-    sounding_lat:
-        latitude for interpolation
-    sounding_datenum:
-        time for interpolation in matlab datenum double format
-    sounding_ps:
-        surface pressure for each sounding
-    gcrs_dir:
-        directory where geos chem data are saved
-    if_monthly:
-        if use monthly profile, instead of daily profile
-    created on 2020/03/09
-    """
-    from netCDF4 import Dataset
-    from scipy.interpolate import RegularGridInterpolator
-    from calendar import isleap
-    # hybrid Ap parameter in Pa
-    Ap = np.array([0.000000e+00, 4.804826e-02, 6.593752e+00, 1.313480e+01, 1.961311e+01, 2.609201e+01,
-                   3.257081e+01, 3.898201e+01, 4.533901e+01, 5.169611e+01, 5.805321e+01, 6.436264e+01,
-                   7.062198e+01, 7.883422e+01, 8.909992e+01, 9.936521e+01, 1.091817e+02, 1.189586e+02,
-                   1.286959e+02, 1.429100e+02, 1.562600e+02, 1.696090e+02, 1.816190e+02, 1.930970e+02,
-                   2.032590e+02, 2.121500e+02, 2.187760e+02, 2.238980e+02, 2.243630e+02, 2.168650e+02,
-                   2.011920e+02, 1.769300e+02, 1.503930e+02, 1.278370e+02, 1.086630e+02, 9.236572e+01,
-                   7.851231e+01, 5.638791e+01, 4.017541e+01, 2.836781e+01, 1.979160e+01, 9.292942e+00,
-                   4.076571e+00, 1.650790e+00, 6.167791e-01, 2.113490e-01, 6.600001e-02, 1.000000e-02],dtype=np.float32)*1e2
-    # hybrid Bp parameter
-    Bp = np.array([1.000000e+00, 9.849520e-01, 9.634060e-01, 9.418650e-01, 9.203870e-01, 8.989080e-01,
-                   8.774290e-01, 8.560180e-01, 8.346609e-01, 8.133039e-01, 7.919469e-01, 7.706375e-01,
-                   7.493782e-01, 7.211660e-01, 6.858999e-01, 6.506349e-01, 6.158184e-01, 5.810415e-01,
-                   5.463042e-01, 4.945902e-01, 4.437402e-01, 3.928911e-01, 3.433811e-01, 2.944031e-01,
-                   2.467411e-01, 2.003501e-01, 1.562241e-01, 1.136021e-01, 6.372006e-02, 2.801004e-02,
-                   6.960025e-03, 8.175413e-09, 0.000000e+00, 0.000000e+00, 0.000000e+00, 0.000000e+00,
-                   0.000000e+00, 0.000000e+00, 0.000000e+00, 0.000000e+00, 0.000000e+00, 0.000000e+00,
-                   0.000000e+00, 0.000000e+00, 0.000000e+00, 0.000000e+00, 0.000000e+00, 0.000000e+00],dtype=np.float32)
-    start_datenum = np.amin(sounding_datenum)
-    end_datenum = np.amax(sounding_datenum)
-    start_datetime = datedev_py(start_datenum)
-    end_datetime = datedev_py(end_datenum)
-    nl2 = len(sounding_datenum)
-    nlayer = 47 # layer number in geos chem
-    # claim space for interopolated profiles, at all level 2 pixels
-    sounding_profile = np.zeros((nl2,nlayer),dtype=np.float32)
-    sounding_pEdge = sounding_ps[:,np.newaxis]*Bp+Ap
-    lat_interp = np.tile(sounding_lat,(nlayer,1)).T.astype(np.float32)
-    lon_interp = np.tile(sounding_lon,(nlayer,1)).T.astype(np.float32)
-    layer_interp = np.tile(np.arange(nlayer),(nl2,1)).astype(np.float32)
-    for year in range(start_datetime.year,end_datetime.year+1): 
-        if product == 'NO2' and if_monthly == False:
-            year_sounding_doy = np.floor(sounding_datenum)-(datetime.datetime(year=year,month=1,day=1).toordinal()+365.)
-            year_sounding_doy = year_sounding_doy.astype(int)
-            if isleap(year):
-                nday = 366
-            else:
-                nday = 365
-            loop_sounding_doy = np.unique(year_sounding_doy)
-            f1 = (loop_sounding_doy>=1)
-            f2 = (loop_sounding_doy<=nday)
-            loop_sounding_doy = loop_sounding_doy[f1&f2]
-            gc_fn = os.path.join(gcrs_dir,'NO2_PROF.05x0625_NA.%0d.nc'%year)
-            print('loading '+gc_fn)
-            gc_id = Dataset(gc_fn)
-            gc_gas = gc_id['NO2_ppb'][:].astype(np.float32)
-            gc_lon = gc_id['longitude'][:]
-            gc_lat = gc_id['latitude'][:]
-            for doy in loop_sounding_doy:
-                # remember python is 0-based
-                gc_gas_doy = gc_gas[doy-1,...].squeeze()
-                rowIndex = np.nonzero(year_sounding_doy==doy)
-                f = RegularGridInterpolator((np.arange(nlayer),gc_lat,gc_lon),\
-                                            gc_gas_doy,bounds_error=False,fill_value=np.nan)
-                sounding_profile[rowIndex,:] = f((layer_interp[rowIndex,:],\
-                                lat_interp[rowIndex,:],lon_interp[rowIndex,:]))
-        elif product in {'NH3','HCHO'} or if_monthly == True:
-            sounding_dt = [datedev_py(sounding_datenum[il2]) for il2 in range(nl2)]
-            sounding_year = np.array([dt.year for dt in sounding_dt])
-            sounding_month = np.array([dt.month for dt in sounding_dt])
-            loop_month = np.unique(sounding_month[sounding_year==year])
-            gc_fn = os.path.join(gcrs_dir,'NH3_HCHO_PROF.05x0625_NA.%0d.nc'%year)
-            print('loading '+gc_fn)
-            gc_id = Dataset(gc_fn)
-            gc_gas = gc_id[product+'_ppb'][:].astype(np.float32)
-            gc_lon = gc_id['longitude'][:]
-            gc_lat = gc_id['latitude'][:]
-            for month in loop_month:
-                # remember python is 0-based
-                gc_gas_doy = gc_gas[month-1,...].squeeze()
-                rowIndex = np.nonzero((sounding_year==year)&(sounding_month==month))
-                f = RegularGridInterpolator((np.arange(nlayer),gc_lat,gc_lon),\
-                                            gc_gas_doy,bounds_error=False,fill_value=np.nan)
-                sounding_profile[rowIndex,:] = f((layer_interp[rowIndex,:],\
-                                lat_interp[rowIndex,:],lon_interp[rowIndex,:]))
-    return sounding_profile, sounding_pEdge
-
 def F_interp_merra2_global(sounding_lon,sounding_lat,sounding_datenum,\
                   merra2_dir='/mnt/Data2/MERRA2_2x2.5/',\
                   interp_fields=None,\
@@ -1891,7 +1792,6 @@ class Level3_Data(dict):
                  instrum='unknown',product='unknown',
                  oversampling_list=None,proj=None):
         self.logger = logging.getLogger(__name__)
-        self.logger.info('creating an instance of Level3_Data')
         self.grid_size = grid_size
         if start_python_datetime is not None:
             self.start_python_datetime = start_python_datetime
@@ -2333,7 +2233,7 @@ class Level3_Data(dict):
             return l3_new
         xmask = (self['xgrid'] >= west) & (self['xgrid'] <= east)
         ymask = (self['ygrid'] >= south) & (self['ygrid'] <= north)
-        self.logger.info('l3 trimed from {}, {} to {}, {}'.format(len(self['xgrid']),len(self['ygrid']),np.sum(xmask),np.sum(ymask)))
+        self.logger.debug('l3 trimed from {}, {} to {}, {}'.format(len(self['xgrid']),len(self['ygrid']),np.sum(xmask),np.sum(ymask)))
         
         for key in self.keys():
             if key == 'xgrid':
@@ -2831,13 +2731,13 @@ class Level3_Data(dict):
     
     def merge(self,l3_data1):
         if len(self.keys()) == 0:
-            self.logger.info('orignial level 3 is empty. adopting attributes of the added level 3.')
+            self.logger.debug('orignial level 3 is empty. adopting attributes of the added level 3.')
             self.__dict__.update(l3_data1.__dict__)
             for (k,v) in l3_data1.items():
                 self.add(k,v)
             return self
         if len(l3_data1.keys()) == 0:
-            self.logger.info('added level 3 is empty. returning the orignial level 3.')
+            self.logger.debug('added level 3 is empty. returning the orignial level 3.')
             return self
         common_keys = set(self).intersection(set(l3_data1))
         initial_only_keys = ['xgrid','ygrid','nrows','nrow','ncols','ncol','xmesh','ymesh','lonmesh','latmesh']
@@ -2846,13 +2746,13 @@ class Level3_Data(dict):
                 self.logger.info(k+' is only found in and adopted from the left object')
                 common_keys.append(k)
         merged_grid_size = np.mean([self.grid_size,l3_data1.grid_size])
-        self.logger.info('orginal grid size is {}, added grid size is {}, merged grid size is {}'\
+        self.logger.debug('orginal grid size is {}, added grid size is {}, merged grid size is {}'\
                          .format(self.grid_size,l3_data1.grid_size,merged_grid_size))
         if self.start_python_datetime == datetime.datetime(1900, 1, 1):
             merged_start_datetime = l3_data1.start_python_datetime
         else:
             merged_start_datetime = np.min([self.start_python_datetime,l3_data1.start_python_datetime])
-        self.logger.info('orginal start time is {}, added start time is {}, merged start time is {}'\
+        self.logger.debug('orginal start time is {}, added start time is {}, merged start time is {}'\
                          .format(self.start_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
                                  l3_data1.start_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
                                  merged_start_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')))
@@ -2860,7 +2760,7 @@ class Level3_Data(dict):
             merged_end_datetime = l3_data1.end_python_datetime
         else:
             merged_end_datetime = np.max([self.end_python_datetime,l3_data1.end_python_datetime])
-        self.logger.info('orginal end time is {}, added end time is {}, merged end time is {}'\
+        self.logger.debug('orginal end time is {}, added end time is {}, merged end time is {}'\
                          .format(self.end_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
                                  l3_data1.end_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
                                  merged_end_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')))
@@ -2969,9 +2869,9 @@ class Level3_Data(dict):
             self.proj = Proj(nc.getncattr('proj_srs'))
             self.logger.info('the level 3 data appear to be in projection {}'.format(nc.getncattr('proj_srs')))
         except:
-            self.logger.info('no projection found')
+            self.logger.debug('no projection found')
             self.proj = None
-        self.logger.info('Loading level 3 data for instrument {}, product {}, and grid size {:02f}'\
+        self.logger.debug('Loading level 3 data for instrument {}, product {}, and grid size {}'\
                          .format(self.instrum,self.product,self.grid_size))
         for (i,varname) in enumerate(fields_name):
             # the variable names are inconsistent with Level3_Data in CF-compatible nc files
@@ -3362,8 +3262,8 @@ class Level3_Data(dict):
         if reduce_factor == 1:
             self.logger.warning('no need to reduce')
             return self
-        self.logger.info('level 3 grid will be coarsened by a factor of {}'.format(reduce_factor))
-        self.logger.info('new grid size is specified as {}, rounded to {}'.format(new_grid_size,self.grid_size*reduce_factor))
+        self.logger.debug('level 3 grid will be coarsened by a factor of {}'.format(reduce_factor))
+        self.logger.debug('new grid size is specified as {}, rounded to {}'.format(new_grid_size,self.grid_size*reduce_factor))
         new_l3 = Level3_Data(grid_size=self.grid_size*reduce_factor,
                              start_python_datetime=self.start_python_datetime,
                              end_python_datetime=self.end_python_datetime,
@@ -3394,7 +3294,7 @@ class Level3_Data(dict):
             elif self[k].shape == (self.nrows,self.ncols) and \
                 k not in ['xmesh','ymesh','lonmesh','latmesh',
                           'total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
-                self.logger.info('block reducing field {}'.format(k))
+                self.logger.debug('block reducing field {}'.format(k))
                 total_sample_weight = self['total_sample_weight'].copy()
                 total_sample_weight[np.isnan(self[k])] = np.nan
                 aggregated_weight = block_reduce(total_sample_weight[:nrows_trim,:ncols_trim],(reduce_factor,reduce_factor),func=np.nansum)
@@ -3653,6 +3553,28 @@ class Level3_List(list):
             l3s_resampled.add(l3)
         return l3s_resampled,resampler
     
+    def remove_background(self,field='column_amount',
+                          vcd_percentile=25,vcd_percentile_window=(50,50),vcd_smoothing_window=None
+                         ):
+        '''remove background from vcd by extracting a running low percentile and then smoothing the results
+        adopted from ACMAP.AQS
+        creates a column_amount_p field (p stands for polluted, from ACMAP work)
+        '''
+        from scipy.ndimage import percentile_filter
+        from astropy.convolution import convolve_fft
+        
+        if vcd_smoothing_window is None:
+            vcd_smoothing_window = vcd_percentile_window
+        for il3,l3 in enumerate(self):
+            if il3 == 0:
+                kernel=np.ones((vcd_smoothing_window))
+                ymesh,xmesh = np.meshgrid(l3['ygrid'],l3['xgrid'])
+            bg = convolve_fft(
+                percentile_filter(l3[field],
+                                  percentile=vcd_percentile,
+                                  size=vcd_percentile_window,mode='nearest'),kernel=kernel)
+            l3[f'{field}_p'] = l3[field]-bg
+    
     def get_local_hour_l3s(self,local_hour_centers,local_hour_spans):
         '''return a separate Level3_List instance defined on local hours.
         only recommended for geo instruments like tempo
@@ -3861,7 +3783,7 @@ class Level3_List(list):
         ax.set_ylabel(r'Random error $\sigma$ [mol m$^{-2}$ s$^{-1}$]');
         return dict(precisions=precisions,coverages=coverages,
                     precisions_r=precisions_r,coverages_r=coverages_r,ax=ax,error0=error0)
-        
+    
     def fit_topography(self,resample_rule=None,half_running_window=0,return_resampled=False,
                        nbootstrap=None,**kwargs):
         if 'remove_intercept' in kwargs.keys():
