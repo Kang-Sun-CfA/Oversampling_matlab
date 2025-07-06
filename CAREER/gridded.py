@@ -161,6 +161,10 @@ class CDL:
         return
     
     def select(self,code=None,land_type=None):
+        if land_type == 'dominant':
+            indices = np.argmax(self.fractions, axis=-1)
+            dominant = self.df['Code'].values[indices]
+            return dominant
         if code is None:
             if not any(self.df['Type'].isin([land_type])):
                 self.logger.error(f'{land_type} not available!')
@@ -206,6 +210,146 @@ class CDL:
         cb = fig.colorbar(pc,ax=ax)
         figout = {'fig':fig,'pc':pc,'ax':ax,'cb':cb}
         return figout
+    def save_nc(self,l3_filename,
+                fields_name=None,
+                fields_rename=None,
+                fields_comment=None,
+                fields_unit=None,
+                ncattr_dict=None):    
+        fields_name = fields_name or []
+        if fields_rename is None:
+            fields_rename = fields_name.copy()
+        if fields_comment is None:
+            fields_comment = ['' for i in range(len(fields_name))]
+        if fields_unit is None:
+            fields_unit = ['' for i in range(len(fields_name))]
+        if 'xgrid' not in fields_name:
+            fields_name.append('xgrid')
+            fields_rename.append('xgrid')
+            fields_comment.append('horizontal grid')
+            fields_unit.append('degree')
+        if 'ygrid' not in fields_name:
+            fields_name.append('ygrid')
+            fields_rename.append('ygrid')
+            fields_comment.append('vertical grid')
+            fields_unit.append('degree')
+        lonmesh,latmesh = np.meshgrid(self.xgrid,self.ygrid)
+        self.lonmesh = lonmesh
+        self.latmesh = latmesh
+        if 'lonmesh' not in fields_name:
+            fields_name.append('lonmesh')
+            fields_rename.append('lonmesh')
+            fields_comment.append('longitude mesh')
+            fields_unit.append('degree_east')
+        if 'latmesh' not in fields_name:
+            fields_name.append('latmesh')
+            fields_rename.append('latmesh')
+            fields_comment.append('latitude mesh')
+            fields_unit.append('degree_north')
+        if 'fractions' not in fields_name:
+            fields_name.append('fractions')
+            fields_rename.append('fractions')
+            fields_comment.append('land cover fractions in each satellite l3 grid cell')
+            fields_unit.append('')
+        if 'Code' not in fields_name:
+            fields_name.append('Code')
+            fields_rename.append('code')
+            fields_comment.append('directory for land cover codes')
+            fields_unit.append('')
+        if 'Type' not in fields_name:
+            fields_name.append('Type')
+            fields_rename.append('type')
+            fields_comment.append('directory for land cover types')
+            fields_unit.append('')
+        if 'mean_frac' not in fields_name:
+            fields_name.append('mean_frac')
+            fields_rename.append('mean_frac')
+            fields_comment.append('averaged land cover fractions in the spatial domain')
+            fields_unit.append('')
+        nc = Dataset(l3_filename,mode='w',format='NETCDF4',clobber=True)
+        if not ncattr_dict:
+            ncattr_dict = {'description':'Land Cover Fractions based on CDL Data',
+                           'institution':'University at Buffalo',
+                           'contact':'Kang Sun, kangsun@buffalo.edu'}
+        if 'history' not in ncattr_dict.keys():
+            ncattr_dict['history'] = 'Created '+dt.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')#local time
+        nc.setncatts(ncattr_dict)
+        nc.createDimension('ygrid',self.fractions.shape[0])
+        nc.createDimension('xgrid',self.fractions.shape[1])
+        nc.createDimension('land_cover', self.fractions.shape[2])
+        for (i,fn) in enumerate(fields_name):
+            if fn in ['xgrid']:
+                vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('xgrid'))
+            elif fn in ['ygrid']:
+                vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('ygrid'))
+            elif fn in ['lonmesh','latmesh']:
+                vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('ygrid','xgrid'))              
+            elif fn in ['fractions']:
+                vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('ygrid','xgrid','land_cover'))
+            elif fn in ['Type']:
+                vid = nc.createVariable(fields_rename[i], str, dimensions=('land_cover',))
+            elif fn in ['Code', 'mean_frac']:
+                vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('land_cover'))
+            # use standard_name to inform lat/lon vs x/y
+            if fn == 'xgrid':
+                vid.standard_name = 'projection_x_coordinate'
+            elif fn == 'ygrid':
+                vid.standard_name = 'projection_y_coordinate'
+            elif fn == 'lonmesh':
+                vid.standard_name = 'longitude'
+            elif fn == 'latmesh':
+                vid.standard_name = 'latitude'
+            vid.comment = fields_comment[i]
+            vid.units = fields_unit[i]
+            if fn in ['xgrid', 'ygrid', 'lonmesh', 'latmesh', 'fractions']:
+                vid[:] = np.ma.masked_invalid(np.float32(getattr(self, fn)))
+            elif fn in ['Type']:
+                vid[:] = self.df[fn].values.astype(str)
+            elif fn in ['Code', 'mean_frac']:
+                vid[:] = np.ma.masked_invalid(np.float32(getattr(self.df, fn)))                  
+        nc.close()
+    def read_nc(self,l3_filename,
+                fields_name=None):
+        fields_name = fields_name or []
+        if 'xgrid' not in fields_name:
+            fields_name.append('xgrid')
+        if 'ygrid' not in fields_name:
+            fields_name.append('ygrid')
+        if 'lonmesh' not in fields_name:
+            fields_name.append('lonmesh')
+        if 'latmesh' not in fields_name:
+            fields_name.append('latmesh')
+        if 'fractions' not in fields_name:
+            fields_name.append('fractions')
+        if 'code' not in fields_name:
+            fields_name.append('code')
+        if 'type' not in fields_name:
+            fields_name.append('type')
+        if 'mean_frac' not in fields_name:
+            fields_name.append('mean_frac')           
+        nc = Dataset(l3_filename,'r')
+        for (i,varname) in enumerate(fields_name):
+            # the variable names are inconsistent with Level3_Data in CF-compatible nc files
+            nc_varname = varname
+            if varname == 'xgrid':
+                if 'projection_x_coordinate' in nc.variables.keys():
+                    nc_varname = 'projection_x_coordinate'
+            if varname == 'ygrid':
+                if 'projection_y_coordinate' in nc.variables.keys():
+                    nc_varname = 'projection_y_coordinate'
+            if varname == 'lonmesh':
+                if 'longitude' in nc.variables.keys():
+                    nc_varname = 'longitude'
+            if varname == 'latmesh':
+                if 'latitude' in nc.variables.keys():
+                    nc_varname = 'latitude'
+            try:
+                setattr(self, varname, nc[nc_varname][:].filled(np.nan))
+            except:
+                self.logger.debug('{} cannot be filled by nan or is not a masked array'.format(nc_varname))
+                setattr(self, varname, np.array(nc[nc_varname][:]))
+        nc.close()
+        return self
 
 class Inventory(dict):
     '''class based on dict, representing a gridded emission inventory'''
