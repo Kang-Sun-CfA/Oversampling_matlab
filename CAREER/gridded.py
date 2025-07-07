@@ -361,6 +361,26 @@ class Inventory(dict):
         self.south = south
         self.north = north
     
+    def read_GFEI(self,filename):
+        nc = Dataset(filename)
+        xgrid = nc['lon'][:].data
+        ygrid = nc['lat'][:].data
+        xgrid_size = np.abs(np.nanmedian(np.diff(xgrid)))
+        ygrid_size = np.abs(np.nanmedian(np.diff(ygrid)))
+        if not np.isclose(xgrid_size,ygrid_size,rtol=1e-03):
+            self.logger.warning(f'x grid size {xgrid_size} does not equal to y grid size {ygrid_size}')
+        self.grid_size = (xgrid_size+ygrid_size)/2
+        xmask = (xgrid >= self.west) & (xgrid <= self.east)
+        ymask = (ygrid >= self.south) & (ygrid <= self.north)
+        self['xgrid'] = xgrid[xmask]
+        self['ygrid'] = ygrid[ymask]
+        xmesh,ymesh = np.meshgrid(self['xgrid'],self['ygrid'])
+        grid_size_in_m2 = np.cos(np.deg2rad(ymesh/180*np.pi))*np.square(self.grid_size*111e3)
+        # Mg a-1 km-2 to mol/s/m2: *1e6/16/(365*24*3600)/1e6
+        self['data'] = nc['emis_ch4'][:][np.ix_(ymask,xmask)].filled(np.nan)/16/(365*24*3600)
+        self['grid_size_in_m2'] = grid_size_in_m2
+        return self
+    
     def read_NEINOX(self,monthly_filenames=None,nei_dir=None,unit='mol/m2/s'):
         '''read a list of monthly NEI inventory files
         monthly_filenames:
@@ -377,9 +397,6 @@ class Inventory(dict):
         for i,filename in enumerate(monthly_filenames):
             nc = Dataset(filename)
             if i == 0:
-                monthly_fields = np.zeros((nc.dimensions['lat'].size,
-                                           nc.dimensions['lon'].size,
-                                           len(monthly_filenames)))
                 xgrid = nc['lon'][:].data
                 ygrid = nc['lat'][:].data
                 xgrid_size = np.abs(np.nanmedian(np.diff(xgrid)))
@@ -393,11 +410,14 @@ class Inventory(dict):
                 ymask = (ygrid >= self.south) & (ygrid <= self.north)
                 self['xgrid'] = xgrid[xmask]
                 self['ygrid'] = ygrid[ymask]
-                self.west = self['xgrid'].min()-self.grid_size
-                self.east = self['xgrid'].max()+self.grid_size
-                self.south = self['ygrid'].min()-self.grid_size
-                self.north = self['ygrid'].max()+self.grid_size
+#                 self.west = self['xgrid'].min()-self.grid_size
+#                 self.east = self['xgrid'].max()+self.grid_size
+#                 self.south = self['ygrid'].min()-self.grid_size
+#                 self.north = self['ygrid'].max()+self.grid_size
                 xmesh,ymesh = np.meshgrid(self['xgrid'],self['ygrid'])
+                monthly_fields = np.zeros((len(self['ygrid']),
+                                           len(self['xgrid']),
+                                           len(monthly_filenames)))
                 self['grid_size_in_m2'] = np.cos(np.deg2rad(ymesh/180*np.pi))*np.square(self.grid_size*111e3)
                 nc_unit = nc[field].units
                 if nc_unit == 'kg/m2/s' and unit=='nmol/m2/s':
@@ -412,7 +432,7 @@ class Inventory(dict):
                     self.logger.info('no unit conversion is done')
                     self[f'{field} unit'] = nc_unit
                     unit_factor = 1.
-            monthly_fields[:,:,i] = unit_factor*nc[field][:].filled(np.nan)[0,0,:,:]# time and lev are singular dimensions
+            monthly_fields[:,:,i] = unit_factor*nc[field][:].filled(np.nan)[0,0,:,:][np.ix_(ymask,xmask)]# time and lev are singular dimensions
             mons.append(dt.datetime(int(str(nc.SDATE)[0:4]),1,1)+dt.timedelta(days=-1+int(str(nc.SDATE)[-3:])))
             nc.close()
         self[field] = monthly_fields
