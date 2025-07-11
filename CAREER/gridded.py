@@ -13,23 +13,28 @@ from scipy.interpolate import RegularGridInterpolator
 import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
-import matplotlib.pyplot as plt
 import sys,os,glob
+import geopandas as gpd
+from rasterio.features import geometry_mask
+from shapely.geometry import mapping
+from rasterio.transform import from_origin
 from popy import Level3_Data, F_center2edge, Level3_List
 
 # code hosting classes for gridded, raster like datasets that interact with popy data
 
 class CDL:
     '''class to handle crop data layer (cdl) data'''
-    def __init__(self,filename,land_cover_codes_csv=None):
+    def __init__(self,filename,land_cover_codes_csv=None,shape_file=None):
         self.logger = logging.getLogger(__name__)
         self.filename = filename
         if land_cover_codes_csv:
             self.lcc_df = pd.read_csv(land_cover_codes_csv)
         else:
             self.lcc_df = None
+        if shape_file:
+            self.shape_file = shape_file
     
-    def get_fractions(self,l3=None,xgrid=None,ygrid=None,block_length=None):
+    def get_fractions(self,l3=None,xgrid=None,ygrid=None,block_length=None,if_mask=True):
         '''get fractions of land types on a l3 grid
         l3:
             a popy Level3_Data object
@@ -44,6 +49,9 @@ class CDL:
         '''
         if l3 is not None:
             xgrid,ygrid = l3['xgrid'],l3['ygrid']
+        
+        if if_mask:
+            mask = self.mask(l3=l3,shape_file=self.shape_file)
         
         nrows,ncols = len(ygrid),len(xgrid)
         block_length = block_length or max(nrows,ncols)
@@ -90,6 +98,15 @@ class CDL:
                                      dtype=np.float32)
                 for i in range(len(ygrid_block)):
                     for j in range(len(xgrid_block)):
+                        # to make sure fractions are calculated only within the mask (shapefile)
+                        if if_mask:                        
+                            i_global = i_start + i
+                            j_global = j_start + j
+                            if i_global >= mask.shape[0] or j_global >= mask.shape[1]:
+                                continue
+                            if not mask[i_global, j_global]:
+                                continue
+
                         x_min = xmeshr_cdl[i,j]
                         x_max = xmeshr_cdl[i,j+1]
                         y_min = ymeshr_cdl[i+1,j]
@@ -160,6 +177,23 @@ class CDL:
         self.xgrid,self.ygrid = xgrid,ygrid
         return
     
+    def mask(self,l3=None,shape_file=None): # to mask a shape file
+        if l3 is not None:
+            xgrid,ygrid = l3['xgrid'],l3['ygrid']
+        lon, lat = np.meshgrid(xgrid, ygrid)
+        shp = gpd.read_file(shape_file)
+        # Rasterize polygons onto the grid
+        res_lon = np.diff(xgrid)[0]
+        res_lat = np.diff(ygrid)[0]
+        west = xgrid[0] - res_lon / 2
+        north = ygrid[0] + res_lat / 2
+        transform = from_origin(west, north, res_lon, -res_lat)
+        mask = geometry_mask([mapping(geom) for geom in shp.geometry],
+                             out_shape=lon.shape,
+                             transform=transform,
+                             invert=True)
+        return mask
+    
     def select(self,code=None,land_type=None):
         if land_type == 'dominant':
             indices = np.argmax(self.fractions, axis=-1)
@@ -210,6 +244,7 @@ class CDL:
         cb = fig.colorbar(pc,ax=ax)
         figout = {'fig':fig,'pc':pc,'ax':ax,'cb':cb}
         return figout
+    
     def save_nc(self,l3_filename,
                 fields_name=None,
                 fields_rename=None,
@@ -287,8 +322,10 @@ class CDL:
             elif fn in ['fractions']:
                 vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('ygrid','xgrid','land_cover'))
             elif fn in ['Type']:
-                vid = nc.createVariable(fields_rename[i], str, dimensions=('land_cover',))
-            elif fn in ['Code', 'mean_frac']:
+                vid = nc.createVariable(fields_rename[i],str,dimensions=('land_cover',))
+            elif fn in ['Code']:
+                vid = nc.createVariable(fields_rename[i],np.int32,dimensions=('land_cover'))
+            elif fn in ['mean_frac']:
                 vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('land_cover'))
             # use standard_name to inform lat/lon vs x/y
             if fn == 'xgrid':
@@ -305,9 +342,12 @@ class CDL:
                 vid[:] = np.ma.masked_invalid(np.float32(getattr(self, fn)))
             elif fn in ['Type']:
                 vid[:] = self.df[fn].values.astype(str)
-            elif fn in ['Code', 'mean_frac']:
-                vid[:] = np.ma.masked_invalid(np.float32(getattr(self.df, fn)))                  
+            elif fn in ['Code']:
+                vid[:] = np.ma.masked_invalid(np.int32(getattr(self.df, fn)))
+            elif fn in ['mean_frac']:
+                vid[:] = np.ma.masked_invalid(np.float32(getattr(self.df, fn)))      
         nc.close()
+        
     def read_nc(self,l3_filename,
                 fields_name=None):
         fields_name = fields_name or []
