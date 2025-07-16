@@ -1,6 +1,10 @@
 import logging
 try:
     import rasterio, pyproj
+    import geopandas as gpd
+    from rasterio.features import geometry_mask
+    from shapely.geometry import mapping
+    from rasterio.transform import from_origin
 except Exception as e:
     logging.warning(e)
     logging.warning('CDL class may not work without these packages')
@@ -14,10 +18,6 @@ import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import sys,os,glob
-import geopandas as gpd
-from rasterio.features import geometry_mask
-from shapely.geometry import mapping
-from rasterio.transform import from_origin
 from popy import Level3_Data, F_center2edge, Level3_List
 
 # code hosting classes for gridded, raster like datasets that interact with popy data

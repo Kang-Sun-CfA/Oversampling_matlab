@@ -3490,14 +3490,26 @@ class Level3_List(list):
     '''a list of Level3_Data objects
     started on 2022/10/12
     '''
-    def __init__(self,dt_array,west=-180,east=180,south=-90,north=90):
+    def __init__(self,dt_array,west=-180,east=180,south=-90,north=90,day_offset=0.5):
         '''
         dt_array:
             preferably a pandas PeriodIndex object
+        day_offset:
+            move fractional year by this number of day to be a bit more accurate than 0 am
         '''
         self.logger = logging.getLogger(__name__)
         self.dt_array = dt_array
         self.df = pd.DataFrame({'count':range(len(dt_array))},index=dt_array)
+        try:
+            dti = self.df.index
+            self.df['fractional_year'] = (
+                dti.dayofyear-1+day_offset+dti.hour/24+dti.minute/1440+dti.second/86400
+            )/(365+dti.is_leap_year.astype(int))
+            self.df['fy_sin'] = np.sin(self.df['fractional_year']*2*np.pi)
+            self.df['fy_cos'] = np.cos(self.df['fractional_year']*2*np.pi)
+        except Exception as e:
+            self.logger.warning(e)
+            self.logger.warning('dt_array does not support fractional year calculation')
         self.west = west
         self.east = east
         self.south = south
@@ -3527,30 +3539,62 @@ class Level3_List(list):
             l3 = Level3_Data().read_nc(l3_filename=l3_fn,fields_name=fields_name)
             self.add(l3)
     
-    def trim(self,west,east,south,north):
-        l3s_new = Level3_List(dt_array=self.dt_array,west=west,east=east,south=south,north=north)
-        for l3 in self:
-            l3s_new.add(l3)
-        l3s_new.df = self.df.copy()
+    def trim(self,west=None,east=None,south=None,north=None,time_mask=None):
+        west = west or self.west
+        east = east or self.east
+        south = south or self.south
+        north = north or self.north
+        if time_mask is None:
+            time_mask = np.ones(len(self.df),dtype=bool)
+        assert len(time_mask) == len(self)
+        l3s_new = Level3_List(dt_array=self.dt_array[time_mask],west=west,east=east,south=south,north=north)
+        for count in self.df['count'][time_mask]:
+            l3s_new.add(self[count])
+        for key in self.df.keys():
+            if key not in 'count':
+                l3s_new.df[key] = self.df[key][time_mask]
         return l3s_new
     
     def add(self,l3):
         self.append(l3.trim(west=self.west,east=self.east,south=self.south,north=self.north))
     
-    def resample(self,rule='month_of_year',half_running_window=0):
+    def resample(self,rule='month_of_year',offset=None,weightwhat=None,weightby=None):
+        '''resample l3s to lower frequency
+        rule:
+            month_of_year or 1D, 1M, 1Q, 1Y...
+        offset:
+            input to DataFrame.resample
+        weightwhat:
+            a list of self.df keys to weight average
+        weightby:
+            name of a l3 key to nanmean as a weight
+        '''
+        if weightby is not None:
+            self.df['weight'] = [np.nanmean(l3[weightby]) for l3 in self]
         if rule == 'month_of_year':
             resampler = self.df.groupby(by=self.df.index.month)
         else:
-            resampler = self.df.resample(rule,label='right')
+            resampler = self.df.resample(rule,label='right',offset=offset)
         
-        l3s_resampled = Level3_List(resampler.indices.keys(),west=self.west,east=self.east,south=self.south,north=self.north)
-        for k,v in resampler.indices.items():
+        l3s_resampled = Level3_List(
+            resampler.indices.keys(),west=self.west,east=self.east,south=self.south,north=self.north
+        )
+        if weightwhat is not None:
+            tmp_data = np.zeros((len(l3s_resampled.df),len(weightwhat)))
+        
+        for il3,(k,v) in enumerate(resampler.indices.items()):
             l3 = Level3_Data()
+            if weightwhat is not None:
+                sub_df = self.df.iloc[v]
+                for iw,w in enumerate(weightwhat):
+                    tmp_data[il3,iw] = np.sum(sub_df[w]*sub_df['weight'])/np.sum(sub_df['weight'])
             for v0 in v:
-                for v00 in np.arange(v0-half_running_window,v0+half_running_window+1):
-                    if v00 >=0 and v00 < len(self):
-                        l3 = l3.merge(self[int(v00)])
+                l3 = l3.merge(self[int(v0)])
             l3s_resampled.add(l3)
+            
+        if weightwhat is not None:
+            for iw, w in enumerate(weightwhat):
+                l3s_resampled.df[w] = tmp_data[:,iw]
         return l3s_resampled,resampler
     
     def remove_background(self,field='column_amount',
