@@ -3486,6 +3486,14 @@ class Level3_Data(dict):
         fig_output['pc'] = pc
         return fig_output
 
+def remove_background_inp2out(inp,percentile,size,kernel):
+    '''used in l3s.remove_background'''
+    from scipy.ndimage import percentile_filter
+    from astropy.convolution import convolve_fft
+    return convolve_fft(percentile_filter(
+        inp,percentile=percentile,size=size,mode='nearest'
+    ),kernel=kernel)
+
 class Level3_List(list):
     '''a list of Level3_Data objects
     started on 2022/10/12
@@ -3558,16 +3566,19 @@ class Level3_List(list):
     def add(self,l3):
         self.append(l3.trim(west=self.west,east=self.east,south=self.south,north=self.north))
     
-    def resample(self,rule='month_of_year',offset=None,weightwhat=None,weightby=None):
+    def resample(self,rule='month_of_year',offset=None,weightwhat=None,weightby=None,adjust_circular=None):
         '''resample l3s to lower frequency
         rule:
             month_of_year or 1D, 1M, 1Q, 1Y...
         offset:
             input to DataFrame.resample
         weightwhat:
-            a list of self.df keys to weight average
+            a list of self.df keys to weight average, e.g., ['fy_cos','fy_sin']
         weightby:
-            name of a l3 key to nanmean as a weight
+            name of a l3 key to nanmean as a weight, e.g., 'total_sample_weight'
+        adjust_circular:
+            a 2D list of df.keys to adjust to unit circle (e.g., [['fy_cos','fy_sin']]. 
+            this makes time-averaged periods like a timestamp
         '''
         if weightby is not None:
             self.df['weight'] = [np.nanmean(l3[weightby]) for l3 in self]
@@ -3595,29 +3606,43 @@ class Level3_List(list):
         if weightwhat is not None:
             for iw, w in enumerate(weightwhat):
                 l3s_resampled.df[w] = tmp_data[:,iw]
+            if adjust_circular is not None:
+                for pair in adjust_circular:
+                    r = np.sqrt(np.square(l3s_resampled.df[pair[0]])+np.square(l3s_resampled.df[pair[1]]))
+                    l3s_resampled.df[pair[0]] = l3s_resampled.df[pair[0]]/r
+                    l3s_resampled.df[pair[1]] = l3s_resampled.df[pair[1]]/r
+            
         return l3s_resampled,resampler
     
-    def remove_background(self,field='column_amount',
+    def remove_background(self,field='column_amount',ncores=0,
                           vcd_percentile=25,vcd_percentile_window=(50,50),vcd_smoothing_window=None
                          ):
         '''remove background from vcd by extracting a running low percentile and then smoothing the results
         adopted from ACMAP.AQS
         creates a column_amount_p field (p stands for polluted, from ACMAP work)
         '''
-        from scipy.ndimage import percentile_filter
-        from astropy.convolution import convolve_fft
+        from functools import partial
         
         if vcd_smoothing_window is None:
             vcd_smoothing_window = vcd_percentile_window
-        for il3,l3 in enumerate(self):
-            if il3 == 0:
-                kernel=np.ones((vcd_smoothing_window))
-                ymesh,xmesh = np.meshgrid(l3['ygrid'],l3['xgrid'])
-            bg = convolve_fft(
-                percentile_filter(l3[field],
-                                  percentile=vcd_percentile,
-                                  size=vcd_percentile_window,mode='nearest'),kernel=kernel)
-            l3[f'{field}_p'] = l3[field]-bg
+        
+        kernel = np.ones(vcd_smoothing_window)
+        inps = [l3[field] for l3 in self]
+        
+        partial_func = partial(
+            remove_background_inp2out,
+            percentile=vcd_percentile,size=vcd_percentile_window,kernel=kernel
+        )
+        
+        if ncores > 0:
+            import multiprocessing
+            with multiprocessing.Pool(processes=ncores) as pool:
+                outs = pool.map(partial_func,inps)
+        else:
+            outs = [partial_func(inp) for inp in inps]
+        
+        for l3,out in zip(self,outs):
+            l3[f'{field}_p'] = l3[field]-out
     
     def get_local_hour_l3s(self,local_hour_centers,local_hour_spans):
         '''return a separate Level3_List instance defined on local hours.
@@ -3828,7 +3853,7 @@ class Level3_List(list):
         return dict(precisions=precisions,coverages=coverages,
                     precisions_r=precisions_r,coverages_r=coverages_r,ax=ax,error0=error0)
     
-    def fit_topography(self,resample_rule=None,half_running_window=0,return_resampled=False,
+    def fit_topography(self,resample_rule=None,return_resampled=False,
                        nbootstrap=None,**kwargs):
         if 'remove_intercept' in kwargs.keys():
             remove_intercept = kwargs['remove_intercept']
@@ -3866,8 +3891,8 @@ class Level3_List(list):
                     l3.topo_fit.bootstrap_params = bootstrap_params
                     l3.topo_fit.nbootstrap = nbootstrap
         else:
-            l3s_resampled,resampler = self.resample(rule=resample_rule,half_running_window=half_running_window)
-            for l3,(ind,sub_df) in zip(l3s_resampled,resampler.__iter__()):
+            l3s_resampled,resampler = self.resample(rule=resample_rule)
+            for l3,(k,v) in zip(l3s_resampled,resampler.indices.items()):
                 if nbootstrap is not None:
                     bootstrap_params = []
                     for i in range(nbootstrap):
@@ -3877,7 +3902,7 @@ class Level3_List(list):
                 if nbootstrap is not None:
                     l3.topo_fit.bootstrap_params = bootstrap_params
                     l3.topo_fit.nbootstrap = nbootstrap
-                for irow,row in sub_df.iterrows():
+                for irow,row in self.df.iloc[v].iterrows():
                     self[int(row['count'])].topo_fit = l3.topo_fit
                     self[int(row['count'])]['wind_column_topo'] = \
                     self[int(row['count'])]['wind_column']\
@@ -3904,15 +3929,15 @@ class Level3_List(list):
         if resample_rule is not None and return_resampled:
             return l3s_resampled
     
-    def fit_chemistry(self,resample_rule=None,half_running_window=0,return_resampled=False,**kwargs):
+    def fit_chemistry(self,resample_rule=None,return_resampled=False,**kwargs):
         if resample_rule is None:
             for l3 in self:
                 l3.fit_chemistry(**kwargs)
         else:
-            l3s_resampled,resampler = self.resample(rule=resample_rule,half_running_window=half_running_window)
-            for l3,(ind,sub_df) in zip(l3s_resampled,resampler.__iter__()):
+            l3s_resampled,resampler = self.resample(rule=resample_rule)
+            for l3,(k,v) in zip(l3s_resampled,resampler.indices.items()):
                 l3.fit_chemistry(**kwargs)
-                for irow,row in sub_df.iterrows():
+                for irow,row in self.df.iloc[v].iterrows():
                     self[int(row['count'])].chem_fit = l3.chem_fit
                     self[int(row['count'])]['wind_column_topo_chem'] = \
                     self[int(row['count'])]['wind_column_topo']\
@@ -3924,7 +3949,7 @@ class Level3_List(list):
         if resample_rule is not None and return_resampled:
             return l3s_resampled
     
-    def fit_bc(self,resample_rule=None,half_running_window=0,return_resampled=False,
+    def fit_bc(self,resample_rule=None,return_resampled=False,
                keys=['albedo'],orders=[[0,1]],nbootstrap=None,if_propagate_bootstrap=False,**kwargs):
         
         if 'remove_intercept' in kwargs.keys():
@@ -3966,8 +3991,8 @@ class Level3_List(list):
                     l3.bc_fit.bootstrap_params = bootstrap_params
                     l3.bc_fit.nbootstrap = nbootstrap
         else:
-            l3s_resampled,resampler = self.resample(rule=resample_rule,half_running_window=half_running_window)
-            for l3,(ind,sub_df) in zip(l3s_resampled,resampler.__iter__()):
+            l3s_resampled,resampler = self.resample(rule=resample_rule)
+            for l3,(k,v) in zip(l3s_resampled,resampler.indices.items()):
                 if nbootstrap is not None:
                     bootstrap_params = []
                     if if_propagate_bootstrap:
@@ -3985,7 +4010,7 @@ class Level3_List(list):
                 if nbootstrap is not None:
                     l3.bc_fit.bootstrap_params = bootstrap_params
                     l3.bc_fit.nbootstrap = nbootstrap
-                for irow,row in sub_df.iterrows():
+                for irow,row in self.df.iloc[v].iterrows():
                     self[int(row['count'])].bc_fit = l3.bc_fit
                     self[int(row['count'])].bc_fields = l3.bc_fields
                     wc_bc = self[int(row['count'])]['wind_column_topo'].copy()

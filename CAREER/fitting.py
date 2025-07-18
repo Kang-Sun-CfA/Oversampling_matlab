@@ -63,15 +63,13 @@ class BinFit():
         self.max_y = max_y or np.inf
         self.remove_intercept = remove_intercept
     
-    def fit_l3s(self,l3s,resample_rule=None,half_running_window=0,mask=None,
+    def fit_l3s(self,l3s,resample_rule=None,mask=None,
                 nbootstrap=None,random_state=10):
         '''
         l3s:
             a popy.Level3_List object
         resample_rule:
             rule input to l3s.resample (e.g., 1Y, 3M), month_of_year, or None (native resolution)
-        half_running_window:
-            if > 0, make running average besides resampling
         mask:
             bool mask on which to conduct the fit, fit all grid cells if no mask provided
         nbootstrap:
@@ -116,9 +114,9 @@ class BinFit():
                 fits_list.append(fits)
                 bin_names_list.append(bin_names)
         else:
-            l3s_resampled,resampler = l3s.resample(rule=resample_rule,half_running_window=half_running_window)
+            l3s_resampled,resampler = l3s.resample(rule=resample_rule)
             df = l3s_resampled.df
-            for l3,(ind,sub_df) in zip(l3s_resampled,resampler.__iter__()):
+            for l3,(k,v) in zip(l3s_resampled,resampler.indices.items()):
                 if nbootstrap is not None:
                     bootstrap_dicts = []
                     for i in range(nbootstrap):
@@ -141,12 +139,13 @@ class BinFit():
                 fits_list.append(fits)
                 bin_names_list.append(bin_names)
                 # populate predicted add_field to original l3s
-                for irow,row in sub_df.iterrows():
+                for irow,row in l3s.df.iloc[v].iterrows():
                     l3s[int(row['count'])] = self.predict_l3(
                         l3=l3s[int(row['count'])],
                         fit_params=[fit.params for fit in fits],
                         bin_names=bin_names
                     )
+            
         return l3s,fits_list,bin_names_list,df,bootstrap_dicts_list
         
     def fit_l3(self,l3,mask=None,if_bootstrap=False,random_state=None):
