@@ -247,7 +247,29 @@ class TEMPO():
                        ncores=0,block_length=300,
                        l3_ncattr_dict=None,l4_ncattr_dict=None,
                        use_TEMPOL2=True,fadf=None):
-        
+        '''regrid tempo l2 data to l3/l4
+        l2_path/dir_pattern:
+            patterns of l2 directories, e.g., %Y/%m/%d/. file names will be inferred
+        data_fields:
+            paths of variables in tempo l2 nc file
+        data_fields_l2g:
+            short names given to these variables
+        attache_l3/2:
+            if true, attach l3/2s to self
+        l3_path_pattern:
+            path pattern to save l3 files (column amounts)
+        l4_path_pattern:
+            path pattern to save l4 files (column amounts+emission estimators)
+        gradient_kw:
+            args to l4. l4 only enabled with gradient_kw provided
+        l3/4_save_fields:
+            data fields to save in l3/4 files
+        for cloud fraction, prefer effective cloud fraction (max_ecf)
+        use_TEMPOL2:
+            if true, enable l2->4 using the TEMPOL2 class. otherwise l3->4 by popy.py
+        fadf:
+            facility attributes dataframe from campd. save facility-specific l4 files
+        '''
         if l2_path_pattern is None and l2_dir_pattern is not None:
             l2_path_pattern = l2_dir_pattern
         if l2_path_pattern is None and l2_dir_pattern is None:
@@ -262,10 +284,15 @@ class TEMPO():
             self.logger.warning(f'assuming max_ecf=maxcf={maxcf}, use max_ecf instead!')
             max_ecf = maxcf
         
-        if gradient_kw is None:
-            do_l4 = False
-        else:
+        do_l4 = False
+        do_f = False
+        if gradient_kw is not None:
             do_l4 = True
+            if 'interp_geoscf_kw' in gradient_kw.keys():
+                from CAREER.level2 import GeosCfSampler
+                gcsampler = GeosCfSampler(base_dir=gradient_kw['interp_geoscf_kw']['base_dir'])
+                gckw = {k:v for k,v in gradient_kw['interp_geoscf_kw'].items() if k not in ['base_dir']}
+                do_f = True
         
         l3_save_fields = l3_save_fields or ['column_amount']
         l4_save_fields = l4_save_fields or \
@@ -321,6 +348,8 @@ class TEMPO():
                 do_DIV = False
             if do_DIV:
                 oversampling_list += ['column_amount_DIV','column_amount_DIV_xy','column_amount_DIV_rs']
+            if do_f:
+                oversampling_list += ['f']
         for date in dates:
             # DDA on tempo grid
             if use_TEMPOL2:
@@ -349,6 +378,9 @@ class TEMPO():
                     if do_l4:
                         tl2.get_theta()
                         tl2.interp_met(**gradient_kw['interp_met_kw'])
+                        if do_f:
+                            tl2 = gcsampler.interpolate_NOxNO2_ratio(tl2,**gckw)
+#                             self.logger.warning(tl2.keys())
                         tl2.get_DD(fields=['column_amount'],
                                    east_wind_field=gradient_kw['x_wind_field'],
                                    north_wind_field=gradient_kw['y_wind_field'],
@@ -514,6 +546,9 @@ class TEMPO():
                 # molec/cm2 to mol/m2
                 tempo_l2_daily.l2g_data['column_amount'] = \
                 tempo_l2_daily.l2g_data['column_amount']/6.02214e19 
+                if do_f:
+                    tempo_l2_daily.l2g_data = gcsampler.interpolate_NOxNO2_ratio(
+                        tempo_l2_daily.l2g_data,**gckw)
 
                 if do_l4:
                     tempo_l2_daily.F_prepare_gradient(**gradient_kw)
@@ -985,7 +1020,7 @@ class TEMPOL2(dict):
         if 'column_amount_DD' in self.keys():
             mask = mask & ~np.isnan(self['column_amount_DD'])
         
-        l2g_data = {k:self[k][mask] for k in ['cloud_fraction','latc','lonc',
+        l2g_data = {k:self[k][mask] for k in ['eff_cloud_fraction','latc','lonc',
                                                'surface_pressure','terrain_height',
                                                'column_amount','UTC_matlab_datenum',
                                                'across_track_position']}
@@ -1014,7 +1049,8 @@ class TEMPOL2(dict):
             'wind_stripe':'wind_stripe',
             'column_amount_DIV_xy':'column_amount_DIV_xy',
             'column_amount_DIV_rs':'column_amount_DIV_rs',
-            'column_amount_DIV':'column_amount_DIV'
+            'column_amount_DIV':'column_amount_DIV',
+            'f':'f'
         }
         for k,v in wind_column_mapping.items():
             if k not in self.keys():

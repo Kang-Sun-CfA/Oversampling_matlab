@@ -192,7 +192,7 @@ class BinFit():
         if self.q_bins is not None:
             cut_func = pd.qcut
             bins = self.q_bins
-        df['x_bins'] = cut_func(df[bin_field],bins)
+        df['x_bins'] = cut_func(df[bin_field],bins,precision=9)
         
         bin_names,fits,good_fits,bin_counts = self.fit_df_by_bins(
             df,reg_formula,no_neg_fields,regressor,min_rsquared,'x_bins')
