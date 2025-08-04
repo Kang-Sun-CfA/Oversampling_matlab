@@ -3255,7 +3255,7 @@ class Level3_Data(dict):
     def block_reduce(self,new_grid_size):
         self.check()
         if new_grid_size <= self.grid_size:
-            self.logger.warning('provide a grid size larger than {}!'.format(self.grid_size))
+            self.logger.info('provide a grid size larger than {}!'.format(self.grid_size))
             return self
         from skimage.measure import block_reduce
         reduce_factor = int(np.rint(new_grid_size/self.grid_size))
