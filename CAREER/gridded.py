@@ -50,6 +50,10 @@ class CDL:
         if l3 is not None:
             xgrid,ygrid = l3['xgrid'],l3['ygrid']
         
+        if not hasattr(self,'shape_file') and if_mask:
+            self.logger.warning('no shape file provided in the beginning, no masking')
+            if_mask = False
+        
         if if_mask:
             mask = self.mask(l3=l3,shape_file=self.shape_file)
         

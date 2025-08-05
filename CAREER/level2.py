@@ -31,6 +31,11 @@ class L2ToL4():
         us = us or ['era5_u300','era5_u10']
         vs = vs or ['era5_v300','era5_v10']
         fs = fs or ['column_amount','surface_altitude']
+        # possible names of u dot grad(z0)
+        wind_topo_fs = [
+            'terrain_height_DD','terrain_height_DD_xy','terrain_height_DD_rs',
+            'surface_altitude_DD','surface_altitude_DD_xy','surface_altitude_DD_rs'
+        ]
         if not isinstance(ds,list):
             for u,v,f in zip(us,vs,fs):
                 f_ = [f] if not isinstance(f,list) else f
@@ -38,6 +43,9 @@ class L2ToL4():
                     self.logger.warning('surface_altitude replaced by terrain_height')
                     f_ = ['terrain_height' if x == 'surface_altitude' else x for x in f_]
                 ds = self._get_DD(ds,u,v,f_)
+            for wind_topo_f in wind_topo_fs:
+                if wind_topo_f in ds.keys():
+                    ds[wind_topo_f] *= ds['column_amount']
         else:
             for data in ds:
                 for u,v,f in zip(us,vs,fs):
@@ -46,6 +54,9 @@ class L2ToL4():
                         self.logger.warning('surface_altitude replaced by terrain_height')
                         f_ = ['terrain_height' if x == 'surface_altitude' else x for x in f_]
                     data = self._get_DD(data,u,v,f_)
+                for wind_topo_f in wind_topo_fs:
+                    if wind_topo_f in data.keys():
+                        data[wind_topo_f] *= data['column_amount']
         return ds
         
     @staticmethod
@@ -448,23 +459,46 @@ class MetSampler():
                 if ifile == 0:
                     lon = san['longitude'][:].filled(np.nan)
                     lat = san['latitude'][:].filled(np.nan)
-                    lev = san['level'][:].filled(np.nan)
-                    ts = pd.to_datetime(san['time'][:].filled(np.nan), unit='h', origin='1900-01-01')
+                    
+                    if 'level' in san.dimensions.keys():
+                        lev = san['level'][:].filled(np.nan)
+                    elif 'pressure_level' in san.dimensions.keys():
+                        lev = san['pressure_level'][:].filled(np.nan)[::-1]
+                    else:
+                        self.logger.error('unknown format');return
+                    
+                    if 'time' in san.dimensions.keys():
+                        ts = pd.to_datetime(san['time'][:].filled(np.nan), unit='h', origin='1900-01-01')
+                    elif 'valid_time' in san.dimensions.keys():
+                        ts = pd.to_datetime(san['valid_time'][:].filled(np.nan), unit='s', origin='1970-01-01')
+                    else:
+                        self.logger.error('unknown format');return
+                    
                     if sel_lev is None:
                         vmask = np.ones(len(lev),dtype=bool)
                     else:
                         vmask = (lev>=sel_lev[0]) & (lev<=sel_lev[1])
+                    
                     xmask = (lon>=west) & (lon<=east)
                     ymask = (lat>=south) & (lat<=north)
                     xs,ys,zs = lon[xmask],lat[ymask][::-1],lev[vmask]
                     ijkmesh = np.ix_(vmask,ymask,xmask)
                     ii = ijkmesh[0].squeeze()
+                    # 2024 era5 3d file has pressure descending
+                    if 'pressure_level' in san.dimensions.keys():
+                        ii = ii[::-1]
                     jj = ijkmesh[1].squeeze()[::-1]#flip lat to ascending
                     kk = ijkmesh[2].squeeze()
                     var_dict = {f:[] for f in fields_3d+fields_2d}
                 else:
-                    ts = ts.append(
-                        pd.to_datetime(san['time'][:].filled(np.nan), unit='h', origin='1900-01-01'))
+                    if 'time' in san.dimensions.keys():
+                        ts = ts.append(
+                            pd.to_datetime(san['time'][:].filled(np.nan), unit='h', origin='1900-01-01'))
+                    elif 'valid_time' in san.dimensions.keys():
+                        ts = ts.append(
+                            pd.to_datetime(san['valid_time'][:].filled(np.nan), unit='s', origin='1970-01-01'))
+                    else:
+                        self.logger.error('unknown format');return
                 for f in fields_3d:
                     var_dict[f].append(san[f][:,ii,jj,kk].filled(np.nan))
                 for f in fields_2d:
@@ -521,7 +555,14 @@ class MetSampler():
                 if ifile == 0:
                     lon = er['longitude'][:].filled(np.nan)
                     lat = er['latitude'][:].filled(np.nan)
-                    ts = pd.to_datetime(er['time'][:].filled(np.nan), unit='h', origin='1900-01-01')
+                    
+                    if 'time' in er.dimensions.keys():
+                        ts = pd.to_datetime(er['time'][:].filled(np.nan), unit='h', origin='1900-01-01')
+                    elif 'valid_time' in er.dimensions.keys():
+                        ts = pd.to_datetime(er['valid_time'][:].filled(np.nan), unit='s', origin='1970-01-01')
+                    else:
+                        self.logger.error('unknown format');return
+                    
                     xmask = (lon>=west) & (lon<=east)
                     ymask = (lat>=south) & (lat<=north)
                     xs,ys = lon[xmask],lat[ymask][::-1]
@@ -530,8 +571,14 @@ class MetSampler():
                     jj = ijmesh[1].squeeze()
                     var_dict = {f:[] for f in fields_2d}
                 else:
-                    ts = ts.append(
-                        pd.to_datetime(er['time'][:].filled(np.nan), unit='h', origin='1900-01-01'))
+                    if 'time' in er.dimensions.keys():
+                        ts = ts.append(
+                            pd.to_datetime(er['time'][:].filled(np.nan), unit='h', origin='1900-01-01'))
+                    elif 'valid_time' in er.dimensions.keys():
+                        ts = ts.append(
+                            pd.to_datetime(er['valid_time'][:].filled(np.nan), unit='s', origin='1970-01-01'))
+                    else:
+                        self.logger.error('unknown format');return
                 
                 for f in fields_2d:
                     var_dict[f].append(er[f][:,ii,jj].filled(np.nan))
@@ -577,6 +624,8 @@ class S5PL2(list):
         del d
         orbits = np.unique(out['orbit'])
         orbit_masks = []
+        use_orbits,start_time,end_time = [],[],[]
+        
         for iorbit,orbit in enumerate(orbits):
             orbit_mask = out['orbit'] == orbit
             unique_times = np.unique(out['UTC_matlab_datenum'][orbit_mask])
@@ -585,8 +634,15 @@ class S5PL2(list):
             nax = len(unique_xtracks)
             if nal >=3 and nax >= 3:
                 orbit_masks.append(orbit_mask)
+                use_orbits.append(int(orbit))
+                start_time.append(datedev_py(np.nanmin(out['UTC_matlab_datenum'][orbit_mask])))
+                end_time.append(datedev_py(np.nanmax(out['UTC_matlab_datenum'][orbit_mask])))
         self.orbit_masks = orbit_masks
-        self.df = pd.DataFrame({'orbit':orbits})
+        self.df = pd.DataFrame({
+            'orbit':use_orbits,
+            'start_time':pd.DatetimeIndex(start_time),
+            'end_time':pd.DatetimeIndex(end_time)
+        })
         # materialize the list
         for idx in range(len(orbit_masks)):
             self.append(self.get_element(idx))

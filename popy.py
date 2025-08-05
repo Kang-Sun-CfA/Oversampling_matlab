@@ -8329,7 +8329,8 @@ class popy(object):
         else:
             self.l2g_data = l2g_data
             
-    def F_parallel_regrid(self,l2g_data=None,block_length=200,ncores=None):
+    def F_parallel_regrid(
+        self,l2g_data=None,block_length=200,ncores=None,no_nan_fields=None):
         '''
         regrid from l2g to l3 in parallel by cutting the l3 mesh into blocks
         l2g_data:
@@ -8338,16 +8339,38 @@ class popy(object):
             l3 mesh grid will be cut to square blocks with this length
         ncores:
             number of cores
+        no_nan_fields:
+            trim l2 pixels so fields in this list cannot be nan
         created on 2020/07/19
         fix on 2020/08/17 so multiprocess does not consume all the memory
+        revised on 2024/08/04 for compatibility with l2->4 framework
         '''
+        oversampling_list = self.oversampling_list.copy()
+        no_nan_fields = no_nan_fields or ['latc','lonc']
+        
         if l2g_data == None:
             l2g_data = self.l2g_data
+        if isinstance(l2g_data,list):
+            for l2g in l2g_data:
+                mask = np.ones(l2g['latc'].shape,dtype=bool)
+                for field in no_nan_fields:
+                    mask = mask & ~np.isnan(l2g[field])
+                for k,v in l2g.items():
+                    l2g[k] = v[mask,]
+        else:
+            mask = np.ones(l2g_data['latc'].shape,dtype=bool)
+            for field in no_nan_fields:
+                mask = mask & ~np.isnan(l2g_data[field])
+            for k,v in l2g_data.items():
+                l2g_data[k] = v[mask,]
+        
         if isinstance(l2g_data,list):
             self.logger.info('l2g_data appears to be a list. each unique layer will be oversampled, coarsened, flux-generated separately, and then merged')
             l3_object = Level3_Data(proj=self.proj,grid_size=self.flux_grid_size)
             for l2g in l2g_data:
-                l3_orbit = self.F_parallel_regrid(l2g,block_length,ncores).block_reduce(self.flux_grid_size)
+                l3_orbit = self.F_parallel_regrid(
+                    l2g,block_length,ncores,no_nan_fields
+                ).block_reduce(self.flux_grid_size)
                 if hasattr(self,'calculate_flux_divergence_kw'):
                     l3_orbit.calculate_flux_divergence(**self.calculate_flux_divergence_kw)
                 if hasattr(self,'calculate_gradient_kw'):
@@ -8363,7 +8386,6 @@ class popy(object):
         xmargin = self.xmargin ; ymargin = self.ymargin
         start_matlab_datenum = self.start_matlab_datenum
         end_matlab_datenum = self.end_matlab_datenum
-        oversampling_list = self.oversampling_list.copy()
         
         if 'UTC_matlab_datenum' not in l2g_data.keys():
             l2g_data['UTC_matlab_datenum'] = l2g_data.pop('utc')
