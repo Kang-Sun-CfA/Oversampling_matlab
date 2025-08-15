@@ -3536,8 +3536,11 @@ class Level3_List(list):
             if not all(if_exist):
                 self.logger.warning('Not all l3 files exist for the pattern!')
                 dt_len = len(self.dt_array)
-                self.dt_array = self.dt_array.delete(np.arange(dt_len)[~if_exist])
-                self.df = pd.DataFrame({'count':range(len(self.dt_array))},index=self.dt_array)
+                self.df = self.df.loc[if_exist]
+                self.df['count'] = np.arange(self.df.shape[0])
+                self.dt_array = self.df.index
+#                 self.dt_array = self.dt_array.delete(np.arange(dt_len)[~if_exist])
+#                 self.df = pd.DataFrame({'count':range(len(self.dt_array))},index=self.dt_array)
                 self.logger.warning('self.dt_array length is reduced from {} to {}'.format(dt_len,len(self.dt_array)))
         if l3_list is None:
             l3_list = [dt0.strftime(l3_path_pattern) for dt0 in self.dt_array]
@@ -3555,7 +3558,8 @@ class Level3_List(list):
         if time_mask is None:
             time_mask = np.ones(len(self.df),dtype=bool)
         assert len(time_mask) == len(self)
-        l3s_new = Level3_List(dt_array=self.dt_array[time_mask],west=west,east=east,south=south,north=north)
+        l3s_new = Level3_List(dt_array=pd.DatetimeIndex(self.dt_array)[time_mask],
+                              west=west,east=east,south=south,north=north)
         for count in self.df['count'][time_mask]:
             l3s_new.add(self[count])
         for key in self.df.keys():
