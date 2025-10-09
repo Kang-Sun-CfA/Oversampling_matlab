@@ -10,23 +10,29 @@ import logging
 from scipy.io import loadmat
 import os,sys,glob
 import matplotlib.pyplot as plt
+from matplotlib.collections import PolyCollection
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
 from netCDF4 import Dataset
 from scipy.interpolate import RegularGridInterpolator
-from popy import datedev_py, datetime2datenum
-
+from popy import datedev_py, datetime2datenum, F_ellipse
+import warnings
+warnings.filterwarnings(action='ignore', message='Mean of empty slice', category=RuntimeWarning)
 
 class L2ToL4():
     def __init__(self):
         self.logger = logging.getLogger(__name__)
     
-    def get_DD(self,ds,us=None,vs=None,fs=None):
+    def get_DD(self,ds,us=None,vs=None,fs=None,oval_inflation=1.,ifov_idxs=None):
         '''get directiona derivative
         ds:
-            the dataset, e.g., TEMPOL2 or S5PL2 classes, but not popy.l2g_data dict
+            an L2 dataset below, not popy.l2g_data dict
         us/vs:
             lists of u/v fields, default [era5_u300,era5_u10] and [era5_v300,era5_v10]
         fs:
             list of fields to get dd, default ['column_amount','surface_altitude']
+        oval_inflation,ifov_idxs:
+            only used in _get_DD_oval. see that function
         '''
         us = us or ['era5_u300','era5_u10']
         vs = vs or ['era5_v300','era5_v10']
@@ -36,17 +42,8 @@ class L2ToL4():
             'terrain_height_DD','terrain_height_DD_xy','terrain_height_DD_rs',
             'surface_altitude_DD','surface_altitude_DD_xy','surface_altitude_DD_rs'
         ]
-        if not isinstance(ds,list):
-            for u,v,f in zip(us,vs,fs):
-                f_ = [f] if not isinstance(f,list) else f
-                if 'surface_altitude' in f_ and 'surface_altitude' not in ds.keys():
-                    self.logger.warning('surface_altitude replaced by terrain_height')
-                    f_ = ['terrain_height' if x == 'surface_altitude' else x for x in f_]
-                ds = self._get_DD(ds,u,v,f_)
-            for wind_topo_f in wind_topo_fs:
-                if wind_topo_f in ds.keys():
-                    ds[wind_topo_f] *= ds['column_amount']
-        else:
+        # trompomi l2
+        if isinstance(ds,S5PL2):
             for data in ds:
                 for u,v,f in zip(us,vs,fs):
                     f_ = [f] if not isinstance(f,list) else f
@@ -57,6 +54,32 @@ class L2ToL4():
                 for wind_topo_f in wind_topo_fs:
                     if wind_topo_f in data.keys():
                         data[wind_topo_f] *= data['column_amount']
+        # iasi or cris l2
+        elif isinstance(ds,IASIL2):
+            nds = {}
+            for u,v,f in zip(us,vs,fs):
+                f_ = [f] if not isinstance(f,list) else f
+                if 'surface_altitude' in f_ and 'surface_altitude' not in ds.keys():
+                    self.logger.warning('surface_altitude replaced by terrain_height')
+                    f_ = ['terrain_height' if x == 'surface_altitude' else x for x in f_]
+                nds.update(self._get_DD_oval(
+                    ds,u,v,f_,oval_inflation=oval_inflation,ifov_idxs=ifov_idxs))
+            ds = nds
+            for wind_topo_f in wind_topo_fs:
+                if wind_topo_f in ds.keys():
+                    ds[wind_topo_f] *= ds['column_amount']
+        # tempo l2
+        else:
+            for u,v,f in zip(us,vs,fs):
+                f_ = [f] if not isinstance(f,list) else f
+                if 'surface_altitude' in f_ and 'surface_altitude' not in ds.keys():
+                    self.logger.warning('surface_altitude replaced by terrain_height')
+                    f_ = ['terrain_height' if x == 'surface_altitude' else x for x in f_]
+                ds = self._get_DD(ds,u,v,f_)
+            for wind_topo_f in wind_topo_fs:
+                if wind_topo_f in ds.keys():
+                    ds[wind_topo_f] *= ds['column_amount']
+        
         return ds
         
     @staticmethod
@@ -84,6 +107,13 @@ class L2ToL4():
         det_rs = np.cos(thetar)*np.sin(thetas) - np.sin(thetar)*np.cos(thetas)
         return thetax,thetay,thetar,thetas,det_xy,det_rs,m_per_lat,m_per_lon
     
+    @staticmethod
+    def latlon2m(lat1,lon1,lat2,lon2,m_per_lat,m_per_lon):
+        '''function to return distance in meter using latlon matrices'''
+        return np.sqrt(
+            np.square((lat1-lat2)*m_per_lat)
+            +np.square((lon1-lon2)*m_per_lon))
+    
     def _get_DD(self,data,east_wind_field=None,north_wind_field=None,fields=None):
         '''calculate directional derivatives, (u,v) dot (dvcd/dx,dvcd/dy) using xy and rs directions
         east/north_wind_field:
@@ -107,13 +137,7 @@ class L2ToL4():
         # rward and sward wind
         windr = (np.sin(thetas)*windu - np.cos(thetas)*windv)/det_rs
         winds = (-np.sin(thetar)*windu + np.cos(thetar)*windv)/det_rs
-        
-        def latlon2m(lat1,lon1,lat2,lon2,m_per_lat,m_per_lon):
-            '''function to return distance in meter using latlon matrices'''
-            return np.sqrt(
-                np.square((lat1-lat2)*m_per_lat)
-                +np.square((lon1-lon2)*m_per_lon))
-        
+                
         for field in fields:
             f = data[field]
             # gradients
@@ -122,22 +146,22 @@ class L2ToL4():
             dfdr = np.full_like(f,np.nan)
             dfds = np.full_like(f,np.nan)
             dfdx[:,1:-1] = (f[:,:-2]-f[:,2:])/ \
-            latlon2m(lat1=data['latc'][:,:-2],lon1=data['lonc'][:,:-2],
+            self.latlon2m(lat1=data['latc'][:,:-2],lon1=data['lonc'][:,:-2],
                     lat2=data['latc'][:,2:],lon2=data['lonc'][:,2:],
                     m_per_lat=m_per_lat,m_per_lon=m_per_lon[:,1:-1]
                     )
             dfdy[1:-1,:] = (f[2:,:]-f[:-2,:])/ \
-            latlon2m(lat1=data['latc'][2:,:],lon1=data['lonc'][2:,:],
+            self.latlon2m(lat1=data['latc'][2:,:],lon1=data['lonc'][2:,:],
                     lat2=data['latc'][:-2,:],lon2=data['lonc'][:-2,:],
                     m_per_lat=m_per_lat,m_per_lon=m_per_lon[1:-1,:]
                     )
             dfdr[1:-1,1:-1] = (f[2:,:-2]-f[:-2,2:])/ \
-            latlon2m(lat1=data['latc'][2:,:-2],lon1=data['lonc'][2:,:-2],
+            self.latlon2m(lat1=data['latc'][2:,:-2],lon1=data['lonc'][2:,:-2],
                     lat2=data['latc'][:-2,2:],lon2=data['lonc'][:-2,2:],
                     m_per_lat=m_per_lat,m_per_lon=m_per_lon[1:-1,1:-1]
                     )
             dfds[1:-1,1:-1] = (f[2:,2:]-f[:-2,:-2])/ \
-            latlon2m(lat1=data['latc'][2:,2:],lon1=data['lonc'][2:,2:],
+            self.latlon2m(lat1=data['latc'][2:,2:],lon1=data['lonc'][2:,2:],
                     lat2=data['latc'][:-2,:-2],lon2=data['lonc'][:-2,:-2],
                     m_per_lat=m_per_lat,m_per_lon=m_per_lon[1:-1,1:-1]
                     )
@@ -147,7 +171,154 @@ class L2ToL4():
             data[field+'_DD_rs'] = windr*dfdr + winds*dfds
             data[field+'_DD'] = (data[field+'_DD_xy']+data[field+'_DD_rs'])*0.5
         return data
+    
+    def _get_DD_oval(self,data,east_wind_field=None,north_wind_field=None,fields=None,
+                     oval_inflation=1.,ifov_idxs=None):
+        '''calculate directional derivatives, (u,v) dot (dvcd/dx,dvcd/dy) using non-tiled, oval l2 pixels
+        east/north_wind_field:
+            u/v wind field name in met data
+        fields:
+            data fields to calculate DD
+        oval_inflation:
+            inflate the l4 ovals by this number
+        ifov_idxs:
+            a list of a list of ifov idxs (0-based). 4 ifovs should define a square-like, starting from 
+            upper left, going clockwise. default values in the code
+        return:
+            a similar dict with the first dimension reduced (4->1 for iasi and 9-4 for cris). adding 
+            the DD fields
+        '''
+        if len(data['latc']) == 0:
+            return data.copy()
+        if ifov_idxs is None:
+            if isinstance(data,IASIL2):
+                # iasi, starting at upper left, going clockwise
+                # first to third defines x, second to fourth defines y
+                ifov_idxs = [[0,1,2,3]]
+                # # cris
+                # ifov_idxs = [[8,7,4,5],[7,6,3,4],[4,3,0,1],[5,4,1,2]]
+            else:
+                self.logger.error('l2 not compatible');return
+        
+        if fields is None:
+            fields = ['column_amount']
+        east_wind_field = east_wind_field or 'era5_u300'
+        north_wind_field = north_wind_field or 'era5_v300'
+        
+        latc = np.concatenate(
+            [np.nanmean(
+                data['latc'][idx,:],axis=0,keepdims=True
+            ) for idx in ifov_idxs],axis=0
+        )
 
+        lonc = np.concatenate(
+            [np.nanmean(
+                data['lonc'][idx,:],axis=0,keepdims=True
+            ) for idx in ifov_idxs],axis=0
+        )
+
+        UTC_matlab_datenum = np.concatenate(
+            [np.nanmean(
+                data['UTC_matlab_datenum'][idx,:],axis=0,keepdims=True
+            ) for idx in ifov_idxs],axis=0
+        )
+
+        oval_u = np.concatenate(
+            [np.nanmean(
+                data['u'][idx,:],axis=0,keepdims=True
+            ) for idx in ifov_idxs],axis=0
+        )
+
+        oval_v = np.concatenate(
+            [np.nanmean(
+                data['v'][idx,:],axis=0,keepdims=True
+            ) for idx in ifov_idxs],axis=0
+        )
+
+        oval_t = np.concatenate(
+            [np.nanmean(
+                data['t'][idx,:],axis=0,keepdims=True
+            ) for idx in ifov_idxs],axis=0
+        )
+        
+        ds = dict(
+            latc=latc,lonc=lonc,UTC_matlab_datenum=UTC_matlab_datenum,
+            u=oval_u,v=oval_v,t=oval_t
+        )
+        
+        m_per_lat = 111e3
+        m_per_lon = m_per_lat * np.cos(np.radians(latc)).astype(np.float32)
+
+        thetax = np.array(
+            [
+                np.arctan2(
+                    m_per_lat*(data['latc'][idx[2],:]-data['latc'][idx[0],:]),
+                    m_per_lon[i,:]*(data['lonc'][idx[2],:]-data['lonc'][idx[0],:])
+                ) for i,idx in enumerate(ifov_idxs)
+            ]
+        )
+
+        thetay = np.array(
+            [
+                np.arctan2(
+                    m_per_lat*(data['latc'][idx[3],:]-data['latc'][idx[1],:]),
+                    m_per_lon[i,:]*(data['lonc'][idx[3],:]-data['lonc'][idx[1],:])
+                ) for i,idx in enumerate(ifov_idxs)
+            ]
+        )
+
+        det_xy = np.cos(thetax)*np.sin(thetay) - np.sin(thetax)*np.cos(thetay)
+        
+        # eastward and northward wind
+        windu = np.concatenate(
+            [np.nanmean(
+                data[east_wind_field][idx,:],axis=0,keepdims=True
+            ) for idx in ifov_idxs],axis=0
+        )
+
+        windv = np.concatenate(
+            [np.nanmean(
+                data[north_wind_field][idx,:],axis=0,keepdims=True
+            ) for idx in ifov_idxs],axis=0
+        )
+
+        # xward and yward wind
+        windx = (np.sin(thetay)*windu - np.cos(thetay)*windv)/det_xy
+        windy = (-np.sin(thetax)*windu + np.cos(thetax)*windv)/det_xy
+
+        for field in fields:
+            f = data[field]
+            
+            dfdx = np.array(
+                [
+                    (f[idx[2],:]-f[idx[0],:])/self.latlon2m(
+                        lat1=data['latc'][idx[2],:],lon1=data['lonc'][idx[2],:],
+                        lat2=data['latc'][idx[0],:],lon2=data['lonc'][idx[0],:],
+                        m_per_lat=m_per_lat,m_per_lon=m_per_lon[i,:]
+                    ) for i,idx in enumerate(ifov_idxs)
+                ]
+            )
+
+            dfdy = np.array(
+                [
+                    (f[idx[3],:]-f[idx[1],:])/self.latlon2m(
+                        lat1=data['latc'][idx[3],:],lon1=data['lonc'][idx[3],:],
+                        lat2=data['latc'][idx[1],:],lon2=data['lonc'][idx[1],:],
+                        m_per_lat=m_per_lat,m_per_lon=m_per_lon[i,:]
+                    ) for i,idx in enumerate(ifov_idxs)
+                ]
+            )
+            # directional derivative
+            ds[field+'_DD'] = windx*dfdx + windy*dfdy
+            # average the field to l4 pixels as well
+            ds[field] = np.concatenate(
+                [np.nanmean(
+                    f[idx,:],axis=0,keepdims=True
+                ) for idx in ifov_idxs],axis=0
+            )
+        
+        return ds
+        
 
 class GeosCfSampler():
     def __init__(self,base_dir,
@@ -691,3 +862,228 @@ class S5PL2(list):
             for k in sub_out.keys():
                 granule[k][al_i,ax_i,] = sub_out[k][il2,]
         return granule
+
+class IASIL2(dict):
+    '''iasi l2 files flattern all soundings in a day to a long list, but actual soundings are grouped
+    by orbits, scanlines, instantaneous field of regard (ifors), and instantaneous field of view
+    (ifovs). each scanline has 30 ifors, each ifor has 4 ifovs, so each scanline has 120 pixels.
+    this class identifies/groups ifors where directional derivatives are calculated
+    '''
+    def __init__(
+        self,year,month,day,
+        west=-130,east=-63,south=23,north=52,
+        ellipse_lut_path='daysss.mat'
+    ):
+        '''
+        year, month, day:
+            int, identify a date
+        west,east,south,north:
+            spatial boundary, ifors in this box will be included by self.load_l2
+        ellipse_lut_path:
+            path to a look up table storing u, v, and t data to reconstruct IASI pixel ellipsis
+        '''
+        self.logger = logging.getLogger(__name__)
+        if not os.path.exists(ellipse_lut_path):
+            self.logger.warning(f'{ellipse_lut_path} not found. try download')
+            os.system('wget https://github.com/Kang-Sun-CfA/PU_KS_share/raw/refs/heads/master/daysss.mat')
+        pixel_lut = loadmat(ellipse_lut_path)
+        # the following are functions - interpolating major/minor axis and rotation of ellipse
+        # at given latitude and pixel number
+        f_uuu = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,121)),pixel_lut['uuu4']) 
+        f_vvv = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,121)),pixel_lut['vvv4']) 
+        f_ttt = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,121)),pixel_lut['ttt4']) 
+        self.f_uuu,self.f_vvv,self.f_ttt = f_uuu,f_vvv,f_ttt
+        date = pd.Timestamp(year=year,month=month,day=day)
+        self.date = date
+        self.west,self.east,self.south,self.north = west,east,south,north
+        # constant, 4 ifov per ifor for iasi
+        self.NIFOV_PER_IFOR = 4
+        
+    def load_l2(
+        self,l2_path_pattern,data_fields=None,am_filter=True,land_filter=True,
+        pre_filter=True,post_filter=True
+    ):
+        '''
+        l2_path_pattern:
+            pattern of l2 data path, e.g., 
+            '/projects/academic/kangsun/data/IASIcNH3/IASI_METOPC_L2_NH3_%Y%m%d_ULB-LATMOS_V4.0.0R.nc'
+        data_fields:
+            fields to read from l2 netcdf, defaults to a list code below
+        am/land/pre/post_filter:
+            whether to apply filter to keep only morning (am), land, and good pre/post retrieval data
+        '''
+        l2_list = glob.glob(self.date.strftime(l2_path_pattern))
+        
+        if len(l2_list) != 1:
+            self.logger.warning('Number of available files is not 1 for {}'.format(
+                self.date.strftime('%Y%m%d')))
+            return
+        
+        l2_path = l2_list[0]
+        NIFOV_PER_IFOR = self.NIFOV_PER_IFOR
+        if data_fields is None:
+            data_fields = ['AERIStime','latitude','longitude',
+                           'orbit_number','scanline_number','pixel_number','ifov_number',
+                           'cloud_coverage','AMPM','LS_mask',
+                           'nh3_total_column','nh3_total_column_random_uncertainty',
+                           'nh3_total_column_systematic_uncertainty',
+                           'prefilter', 'postfilter','ground_height']
+        # ncd is a dict to temporally store netcdf data. too slow to read every time
+        ncd = {}
+        with Dataset(l2_path) as nc:
+            nsounding = nc.dimensions['time'].size
+            for n in data_fields:
+                ncd[n] = nc[n][:].filled(np.nan)
+            with np.errstate(divide='ignore',invalid='ignore'):
+                # calculate the ifor number, should be 30 per scanline
+                ncd['ifor_number'] = (ncd['pixel_number']-1)//NIFOV_PER_IFOR+1
+        
+        inbox = (ncd['longitude']>=self.west) & \
+        (ncd['longitude']<=self.east) & \
+        (ncd['latitude']>=self.south) & \
+        (ncd['latitude']<=self.north) 
+        if am_filter:
+            inbox = inbox & (ncd['AMPM']==0)
+
+        orbits = np.unique(ncd['orbit_number'][inbox])
+        scanlines = []
+        ifors = []
+        all_idxs = np.arange(nsounding,dtype=int)
+        ifor_idxs = []
+        for orbit in orbits:
+            scanlines_per_orbit = np.unique(
+                ncd['scanline_number'][
+                    inbox & (ncd['orbit_number']==orbit)
+                ]
+            )
+            scanlines.append(scanlines_per_orbit)
+            ifors_per_orbit = []
+            for scanline in scanlines_per_orbit:
+                ifors_per_scanline = np.unique(
+                    ncd['ifor_number'][
+                        inbox & (ncd['orbit_number']==orbit) & \
+                        (ncd['scanline_number']==scanline)
+                    ]
+                )
+                for iifor,ifor in enumerate(ifors_per_scanline):
+                    ifor_mask = (ncd['orbit_number'] == orbit) & \
+                    (ncd['scanline_number'] == scanline) & \
+                    (ncd['ifor_number'] == ifor)
+                    if ifor_mask.sum() == NIFOV_PER_IFOR:
+                        ifor_idxs.append(all_idxs[ifor_mask])
+                    # end of ifor loop per scanline
+                ifors_per_orbit.append(ifors_per_scanline)
+                # end of scanline loop per orbit
+            ifors.append(ifors_per_orbit)
+            # end of loop over orbits
+        ifor_idxs = np.array(ifor_idxs).T
+        for field in data_fields+['ifor_number']:
+            if field == 'longitude':
+                key = 'lonc'
+            elif field == 'latitude':
+                key = 'latc'
+            elif field == 'nh3_total_column':
+                key = 'column_amount'
+            else:
+                key = field
+            self[key] = np.array([ncd[field][ifor_idx] for ifor_idx in ifor_idxs])
+        # find out elliptical parameters using lookup table            
+        self['u'] = self.f_uuu((self['latc'],self['pixel_number']))
+        self['v'] = self.f_vvv((self['latc'],self['pixel_number']))
+        self['t'] = self.f_ttt((self['latc'],self['pixel_number']))
+        # convert aeristime (seconds since 2007-1-1) to matlab datenum (days since 0000-1-1)
+        self['UTC_matlab_datenum'] = self['AERIStime']/86400+733043.
+        # standardize surface altitude naming
+        self['surface_altitude'] = self.pop('ground_height',np.zeros_like(self['latc']))
+        if land_filter:
+            self['column_amount'][self['LS_mask']!=1] = np.nan
+        if pre_filter:
+            self['column_amount'][self['prefilter']!=1] = np.nan
+        if post_filter:
+            self['column_amount'][self['postfilter']!=1] = np.nan
+        self['column_amount'][self['column_amount'] > 1e36] = np.nan # fill value is 9.97e36
+    
+    def plot(
+        self,data=None,ax=None,figsize=None,if_latlon=False,npoints=20,ifor_mask=None,
+        plot_field='column_amount',xlim=None,ylim=None,wind_kw=None,**kwargs
+    ):
+        '''plot function similar to tempo.TEMPOL2.plot'''
+        data = data or self
+        cmap = kwargs.pop('cmap','jet')
+        alpha = kwargs.pop('alpha',1)
+        func = kwargs.pop('func',lambda x:x)
+        ec = kwargs.pop('ec','none')
+        draw_colorbar = kwargs.pop('draw_colorbar',True)
+        label = kwargs.pop('label',plot_field)
+        shrink = kwargs.pop('shrink',0.75)
+        cartopy_scale = kwargs.pop('cartopy_scale','50m')
+        if ax is None:
+            figsize = kwargs.pop('figsize',(10,5))
+            if if_latlon:
+                fig,ax = plt.subplots(1,1,figsize=figsize,constrained_layout=True,
+                                     subplot_kw={"projection": ccrs.PlateCarree()})
+            else:
+                fig,ax = plt.subplots(1,1,figsize=figsize,constrained_layout=True)
+        else:
+            fig = None
+        if ifor_mask is None:
+            ifor_mask = np.ones(data['latc'].shape[1],dtype=bool)
+        verts = [F_ellipse(
+            v,u,t,npoints,lonc,latc)[0].T for v,u,t,lonc,latc in zip(
+            data['v'][:,ifor_mask].ravel(),data['u'][:,ifor_mask].ravel(),
+            data['t'][:,ifor_mask].ravel(),
+            data['lonc'][:,ifor_mask].ravel(),data['latc'][:,ifor_mask].ravel()
+        )]
+        cdata = data[plot_field][:,ifor_mask].ravel()
+        vmin = kwargs.pop('vmin',np.nanmin(cdata))
+        vmax = kwargs.pop('vmax',np.nanmax(cdata))
+        collection = PolyCollection(
+            verts,
+            array=cdata,
+            cmap=cmap,edgecolors=ec
+        )
+        collection.set_alpha(alpha)
+        collection.set_clim(vmin=vmin,vmax=vmax)
+        ax.add_collection(collection)
+        
+        if if_latlon:
+            if cartopy_scale is not None:
+                ax.coastlines(resolution=cartopy_scale, color='black', linewidth=1)
+                ax.add_feature(cfeature.STATES.with_scale(cartopy_scale), facecolor='None', edgecolor='k', 
+                               linestyle='-',zorder=0,lw=0.5)
+        else:
+            ax.set_aspect('equal', adjustable='box')
+        if draw_colorbar:
+            cb = plt.colorbar(collection,ax=ax,label=label,shrink=shrink)
+        else:
+            cb = None
+        
+        if xlim is None:
+            ax.set_xlim([np.min([v[:,0].min() for v in verts]),
+                         np.max([v[:,0].max() for v in verts])])
+        else:
+            ax.set_xlim(xlim)
+        if ylim is None:
+            ax.set_ylim([np.min([v[:,1].min() for v in verts]),
+                         np.max([v[:,1].max() for v in verts])])
+        else:
+            ax.set_ylim(ylim)
+        
+        # draw wind vectors
+        if wind_kw is not None:
+            scale = wind_kw.pop('scale',200)
+            width = wind_kw.pop('width',0.002)
+            east_wind_field = wind_kw.pop('east_wind_field','era5_u100')
+            north_wind_field = wind_kw.pop('north_wind_field','era5_v100')
+            wind_e = data[east_wind_field][:,ifor_mask]
+            wind_n = data[north_wind_field][:,ifor_mask]
+            if if_latlon:
+                basis_o1 = data['lonc'][:,ifor_mask]
+                basis_o2 = data['latc'][:,ifor_mask]
+            else:
+                self.logger.warning('not implemented for wind in if_latlon=False')
+                return
+            ax.quiver(basis_o1.ravel(),basis_o2.ravel(),
+                      wind_e.ravel(),wind_n.ravel(),scale=scale,width=width,**wind_kw)
+            
+        return dict(fig=fig,ax=ax,cb=cb)
