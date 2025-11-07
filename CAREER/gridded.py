@@ -419,7 +419,7 @@ class Inventory(dict):
         self['xgrid'] = xgrid[xmask]
         self['ygrid'] = ygrid[ymask]
         xmesh,ymesh = np.meshgrid(self['xgrid'],self['ygrid'])
-        grid_size_in_m2 = np.cos(np.deg2rad(ymesh/180*np.pi))*np.square(self.grid_size*111e3)
+        grid_size_in_m2 = np.cos(np.deg2rad(ymesh))*np.square(self.grid_size*111e3)
         # Mg a-1 km-2 to mol/s/m2: *1e6/16/(365*24*3600)/1e6
         self['data'] = nc['emis_ch4'][:][np.ix_(ymask,xmask)].filled(np.nan)/16/(365*24*3600)
         self['grid_size_in_m2'] = grid_size_in_m2
@@ -462,7 +462,7 @@ class Inventory(dict):
                 monthly_fields = np.zeros((len(self['ygrid']),
                                            len(self['xgrid']),
                                            len(monthly_filenames)))
-                self['grid_size_in_m2'] = np.cos(np.deg2rad(ymesh/180*np.pi))*np.square(self.grid_size*111e3)
+                self['grid_size_in_m2'] = np.cos(np.deg2rad(ymesh))*np.square(self.grid_size*111e3)
                 nc_unit = nc[field].units
                 if nc_unit == 'kg/m2/s' and unit=='nmol/m2/s':
                     self.logger.warning(f'unit of {field} will be converted from {nc_unit} to {unit}')

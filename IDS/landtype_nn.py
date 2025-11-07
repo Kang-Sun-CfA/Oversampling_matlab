@@ -18,19 +18,66 @@ class EmissionDataset(Dataset):
         self,emissions,years,fy,fy_sin,fy_cos,cdls,emission_func=None,
         westmost=-128,eastmost=-65,southmost=24,northmost=50,base_year=2018,
         crop_size_x=128,crop_size_y=64,stride=16,crop_fraction=0.5,random_state=10,
-        cdl_name_codes=None,epoch=0,stride_x=None,stride_y=None
+        cdl_name_codes=None,epoch=0,stride_x=None,stride_y=None,grid_size=None,
+        all_source_coords=None
     ):
+        '''
+        emissions,years,fy,fy_sin,fy_cos:
+            lists of the same length. each sample specify the emission image, year, fractional year,
+            sin/cos of fractional year
+        cdls:
+            list of CDL objects with length equal to the number of unique years
+        emission_func:
+            scale emissions by this. default *1e9, i.e., mol/m2/s to nmol/m2/s
+        w/e/s/nmost:
+            lon/lat bounds to normalize lon/lat to ~0-1
+        base_year:
+            years will be zeroed at this year
+        crop_size_x/y:
+            emissions will be cropped to samples of this W (x, lon) and H (y, lat)
+        stride(_x/y):
+            cropping is skipped by this step size
+        crop_fraction:
+            the fraction of all possible crops to be returned
+        random_state:
+            for reproducibility in crop selection
+        cdl_name_codes:
+            select and/or group cdl types, e.g., [('my_corn'),[1]] uses cdl index 1 as 'my_corn',
+            1 - selected fractions are categorized as other fraction
+        epoch:
+            current epoch integer
+        grid_size:
+            if not given, infer from cdls[0].lonmesh
+        all_source_coords:
+            an n_source x 2 array listing the lon and lat of point sources
+        '''
         stride_x = stride_x or stride
         stride_y = stride_y or stride
         self.set_epoch(epoch)
         self.emission_func = emission_func or (lambda x:x*1e9)
         self.base_year = base_year
+        
+        if all_source_coords is not None:
+            asc = torch.tensor(all_source_coords).float()
+            asc[:,0] = (asc[:,0]-westmost)/(eastmost-westmost)
+            asc[:,1] = (asc[:,1]-southmost)/(northmost-southmost)
+            self.all_source_coords = asc
+        
         xmesh = (cdls[0].lonmesh-westmost)/(eastmost-westmost)
         ymesh = (cdls[0].latmesh-southmost)/(northmost-southmost)
+        grid_size = grid_size or np.median(np.abs(np.diff(cdls[0].lonmesh[0,:])))
+        # grid inverse area, m-2 * 1e9 nmol/mol
+        self.gia = torch.tensor(
+            self.emission_func(
+                1/(np.cos(np.deg2rad(cdls[0].latmesh))*np.square(grid_size*111e3))
+            )
+        ).float()
+        self.grid_size = torch.tensor(grid_size).float()
         self.westmost,self.eastmost,self.southmost,self.northmost=westmost,\
         eastmost,southmost,northmost
         self.xmesh = torch.tensor(xmesh).float()
         self.ymesh = torch.tensor(ymesh).float()
+        
         if cdl_name_codes is None:
             cdl_name_codes = [
                 ('corn',[1]),
@@ -134,13 +181,16 @@ class EmissionDataset(Dataset):
         
         xmesh = self.xmesh[i:i+self.crop_size_y,j:j+self.crop_size_x].unsqueeze(0)
         ymesh = self.ymesh[i:i+self.crop_size_y,j:j+self.crop_size_x].unsqueeze(0)
+        gia = self.gia[i:i+self.crop_size_y,j:j+self.crop_size_x]
         
         return {
             'emission':self.emission_func(emission),
             'xmesh':xmesh,
             'ymesh':ymesh,
             'frac':frac,
-            'temporal':temporal
+            'temporal':temporal,
+            'gia':gia,
+            'grid':self.grid_size
         }
     
     def plot(self,sample_idxs=np.arange(5),figsize=(10,10),axis_off=False):
@@ -228,88 +278,209 @@ class LandTypeAttention(nn.Module):
 
 
 class SuperGaussianPSF(nn.Module):
-    def __init__(self, kernel_size=5, grid_size=0.1):
+    def __init__(self, kernel_size=5):
         super().__init__()
         assert kernel_size % 2 == 1, "Kernel size must be odd"
         self.kernel_size = kernel_size
-        self.grid_size = grid_size
         
         # Learnable parameters in the background
-        self.log_wx = nn.Parameter(torch.tensor(-2.))
-        self.log_wy = nn.Parameter(torch.tensor(-2.))
+        self.log_wx = nn.Parameter(torch.tensor(.0))
+        self.log_wy = nn.Parameter(torch.tensor(.0))
         self.log_kx = nn.Parameter(torch.tensor(0.5))
         self.log_ky = nn.Parameter(torch.tensor(0.5))
         
-        # Coordinate grid
-        self.register_buffer('xx', torch.zeros(kernel_size,kernel_size))
-        self.register_buffer('yy', torch.zeros(kernel_size,kernel_size))
-        self._setup_coords()
+        # Base coordinate grid (unit spacing) to be scaled by grid_size
+        self.register_buffer('_base_coords', torch.zeros(2,kernel_size,kernel_size))
+        self._setup_base_coords()
     
-    def _setup_coords(self):
+    def _setup_base_coords(self):
         r = (self.kernel_size - 1) // 2
-        x = torch.linspace(-r, r, self.kernel_size) * self.grid_size
+        x = torch.linspace(-r, r, self.kernel_size) # unit spacing
         xx, yy = torch.meshgrid(x, x, indexing='ij')
-        self.xx.copy_(xx.contiguous())
-        self.yy.copy_(yy.contiguous())
+        self._base_coords = torch.stack([xx,yy],dim=0) #[2,kernel_size,kernel_size]
     
-    def forward(self, x):
-        wx = F.softplus(self.log_wx) + 1e-3*self.grid_size
-        wy = F.softplus(self.log_wy) + 1e-3*self.grid_size
-        kx = F.softplus(self.log_kx) + 1.0
-        ky = F.softplus(self.log_ky) + 1.0
-
+    def _create_kernels(self,grid_size,batch_size=None):
+        '''Create kernels for batched grid_size
+        grid_size: 
+            [B,] tensor of grid sizes
+        batch_size:
+            should be just B
+        Returns: [B, 1, kernel_size, kernel_size] kernel for each sample
+        '''
+        batch_size = grid_size.shape[0]
+        # Expand base coordinates for batch: [B, 2, kernel_size, kernel_size]
+        base_coords_expanded = self._base_coords.unsqueeze(0).expand(
+            batch_size, -1, -1, -1
+        )  # [B, 2, kernel_size, kernel_size]
+        
+        # Scale coordinates by grid_size: [B, 2, kernel_size, kernel_size]
+        scaled_coords = base_coords_expanded * grid_size.view(-1, 1, 1, 1)
+        xx = scaled_coords[:, 0]  # [B, kernel_size, kernel_size]
+        yy = scaled_coords[:, 1]  # [B, kernel_size, kernel_size]
+                
+        # Get positive parameters (grid_size aware)
+        wx = torch.exp(self.log_wx) + 1e-3 * grid_size.view(-1,1,1) # [B,1,1]
+        wy = torch.exp(self.log_wy) + 1e-3 * grid_size.view(-1,1,1)
+        kx = torch.exp(self.log_kx) + 1.0
+        ky = torch.exp(self.log_ky) + 1.0
+        
+        # Compute super-Gaussian kernel
         kernel = torch.exp(
-            -(torch.abs(self.xx/wx)**kx 
-             + torch.abs(self.yy/wy)**ky)
-        )
-        kernel = (kernel / kernel.sum()).view(1, 1, self.kernel_size, self.kernel_size)
+            -(torch.abs(xx/wx)**kx 
+             + torch.abs(yy/wy)**ky)
+        ) # [B, kernel_size, kernel_size]
+        kernel = kernel / kernel.sum(dim=(-1,-2),keepdim=True) # normalize kernel per sample
+        return kernel.unsqueeze(1) # [B,1,kernel_size,kernel_size]
+    
+    def forward(self, x, grid_size):
+        '''
+        x:
+            [B,C,H,W], input tensor
+        grid_size:
+            [B], grid size in degree
+        '''
+        B, C, H, W = x.shape
+        # batched kernels, [B,1,kernel_size,kernel_size]
+        kernels = self._create_kernels(grid_size,B)
+        
         # Apply standard convolution
         padding = (self.kernel_size - 1) // 2
-        return F.conv2d(
-            F.pad(x, (padding,)*4, mode='reflect'),
-            kernel.expand(x.size(1), -1, -1, -1),
-            groups=x.size(1)
+        
+        results = []
+        for i in range(B):
+            # Apply sample-specific kernel to all channels
+            sample_result = F.conv2d(
+                F.pad(x[i:i+1], (padding,)*4, mode='reflect'),
+                kernels[i:i+1].expand(-1, C, -1, -1),  # [1, C, k, k]
+                groups=C
+            )
+            results.append(sample_result)
+        
+        return torch.cat(results, dim=0)
+    
+    def get_kernel(self, grid_size):
+        '''Returns current kernel for visualization'''
+        with torch.no_grad():
+            return self._create_kernels(grid_size)
+
+
+class PointSourceDistributor(nn.Module):
+    def __init__(self,all_source_coords):
+        '''
+        all_source_coords:
+            [n_sources,2], lon/lat of all point sources, normalized to ~0-1
+        '''
+        super().__init__()
+        self.n_sources = len(all_source_coords)
+        
+        # Store the actual source coordinates
+        self.register_buffer('all_source_coords', all_source_coords)  # [n_sources, 2]
+        
+    def forward(self,point_rates,spatial,gia):
+        '''
+        point_rates:
+            [B, n_sources], point source emission rates, output from PointSourceMLP,
+            unit mol s-1
+        spatial:
+            [B,C=2 (lon,lat),H,W]
+        gia:
+            [B, H, W], grid inverse area, returned from a dataset sample, unit 
+            m-2 nmol mol-1
+        returns:
+            [B, 1, H, W], emission from all point sources in the view
+        '''
+        B,H,W = gia.shape
+        
+        spatial_field = torch.zeros(B,1,H,W,device=point_rates.device)
+        
+        for b in range(B):
+            xmin,xmax = spatial[b,0].min(),spatial[b,0].max()
+            ymin,ymax = spatial[b,1].min(),spatial[b,1].max()
+            
+            in_view_mask = (
+                (self.all_source_coords[:,0] >= xmin) & 
+                (self.all_source_coords[:,0] <= xmax) &
+                (self.all_source_coords[:,1] >= ymin) & 
+                (self.all_source_coords[:,1] <= ymax)
+            )
+            
+            sources_in_view = torch.where(in_view_mask)[0]
+            
+            if len(sources_in_view) > 0:
+                view_coords = self.all_source_coords[sources_in_view]
+                normalized_x = (view_coords[:,0] - xmin) / (xmax-xmin)
+                normalized_y = (view_coords[:,1] - ymin) / (ymax-ymin)
+                
+                pixel_x = (normalized_x * (W - 1)).round().long().clamp(0, W-1)
+                pixel_y = (normalized_y * (H - 1)).round().long().clamp(0, H-1)
+                
+                # Get emissions for sources in view, nmol m-2 s-1
+                emissions_in_view = point_rates[b,sources_in_view]*\
+                gia[b,pixel_y,pixel_x]
+                
+                # Scatter to spatial field
+                spatial_field[b, 0, pixel_y, pixel_x] += emissions_in_view
+        
+        return spatial_field
+
+
+class PointSourceMLP(nn.Module):
+    def __init__(self, all_source_coords, temporal_dim=3, hidden_dim=64):
+        '''
+        all_source_coords:
+            [n_sources,2], lon/lat of all point sources, normalized to ~0-1
+        '''
+        super().__init__()
+        self.n_sources = len(all_source_coords)
+        self.temporal_dim = temporal_dim
+        
+        # Store the actual source coordinates
+        self.register_buffer('all_source_coords', all_source_coords)  # [n_sources, 2]
+        
+        # MLP that processes [lon, lat, temporal_features] for any point source
+        self.mlp = nn.Sequential(
+            nn.Linear(2 + temporal_dim, hidden_dim),
+            nn.LeakyReLU(0.1),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LeakyReLU(0.1),
+            nn.Linear(hidden_dim, 1),
+            nn.Softplus()  # Emissions must be positive
         )
     
-    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
-        """Special handling for coordinate buffers"""
-        # Load parameters first
-        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+    def forward(self, temporal):
+        '''
+        temporal: 
+            [B, temporal_dim]
+        returns: 
+            [B, n_sources], emission rates for all sources
+        '''
+        B = temporal.shape[0]
+        temporal_dim = self.temporal_dim
+        # Batched processing for efficiency
+        coords_expanded = self.all_source_coords.unsqueeze(0).expand(B, -1, -1)  # [B, n_sources, 2]
+        temporal_expanded = temporal.unsqueeze(1).expand(-1, self.n_sources, -1)  # [B, n_sources, temporal_dim]
+        mlp_input = torch.cat([coords_expanded, temporal_expanded], dim=-1)  # [B, n_sources, 2 + temporal_dim]
         
-        # Ensure coordinates are properly initialized
-        if prefix + 'xx' in state_dict:
-            with torch.no_grad():
-                self._setup_coords()
-    
-    @property
-    def wx(self):
-        return F.softplus(self.log_wx) + 1e-3*self.grid_size
-    
-    @property
-    def wy(self):
-        return F.softplus(self.log_wy) + 1e-3*self.grid_size
-    
-    @property
-    def kx(self):
-        return F.softplus(self.log_kx) + 1.0
-    
-    @property
-    def ky(self):
-        return F.softplus(self.log_ky) + 1.0
+        # Process all sources in parallel
+        mlp_input_flat = mlp_input.view(-1, 2 + temporal_dim)  # [B * n_sources, 2 + temporal_dim]
+        emissions_flat = self.mlp(mlp_input_flat)  # [B * n_sources, 1]
+        rates = emissions_flat.view(B, self.n_sources)  # [B, n_sources]
+        
+        return rates
 
 
 class LandTypeEmissionModel(nn.Module):
     """UNet-like module for generating emission contribution for a single land type."""
-    def __init__(self,n_land_types,in_channels=2,feat_channels=[64,128,256],
-                 temporal_dim=3,grid_size=0.1,psf_kernel_size=5,
-                 do_ConvTranspose=True,do_attention=False
+    def __init__(
+        self,n_land_types,in_channels=2,feat_channels=[64,128,256],
+        temporal_dim=3,psf_kernel_size=5,do_ConvTranspose=True,do_attention=False,
+        all_source_coords=None,point_hidden_dim=64
                 ):
         super().__init__()
         self.downs = nn.ModuleList()
         self.ups = nn.ModuleList()
         self.pool = nn.MaxPool2d(kernel_size=2,stride=2)
         self.n_land_types = n_land_types
-        self.grid_size = grid_size
 
         # Encoder (Downsampling path)
         current_in_channels = in_channels
@@ -338,7 +509,16 @@ class LandTypeEmissionModel(nn.Module):
             self.ups.append(ConvBlock(channel*2,channel))
             
         self.final_conv = nn.Conv2d(feat_channels[0],n_land_types,kernel_size=1)
-        self.psf = SuperGaussianPSF(kernel_size=psf_kernel_size, grid_size=grid_size)
+        self.psf = SuperGaussianPSF(kernel_size=psf_kernel_size)
+        
+        if all_source_coords is not None:
+            self.do_point = True
+            self.point_mlp = PointSourceMLP(
+                all_source_coords,temporal_dim=temporal_dim,hidden_dim=point_hidden_dim)
+            self.point_distributor = PointSourceDistributor(all_source_coords)
+        else:
+            self.do_point = False
+        
         self.do_attention = do_attention
         if do_attention:
             self.attention = LandTypeAttention(n_land_types)
@@ -372,17 +552,30 @@ class LandTypeEmissionModel(nn.Module):
         
         return self.final_conv(x)
     
-    def forward(self,spatial,frac,temporal=None):
+    def forward(self,spatial,frac,grid,temporal=None,gia=None):
         '''
         spatial:
-            B,C=2 (lon,lat),H=64,W=64
+            B,C=2 (lon,lat),H=crop_size_y,W=crop_size_x
         frac:
-            B,C=8 (corn, soybean, ...),H=64,W=64
+            B,C=8 (corn, soybean, ...),H=crop_size_y,W=crop_size_x
+        grid:
+            B, grid size
         temporal:
             B,C=3 (year, sin(fy), cos(fy))
+        gia:
+            B,H,W, grid inverse area
         '''
         emissions = self.get_unet_outcome(spatial,temporal)
-        predict = self.psf((emissions*frac).sum(dim=1,keepdim=True))
+        area_source = (emissions*frac).sum(dim=1,keepdim=True)
+        
+        if self.do_point:
+            point_rates = self.point_mlp(temporal)
+            point_source = self.point_distributor(point_rates,spatial,gia)
+            all_source = area_source + point_source
+        else:
+            all_source = area_source
+        
+        predict = self.psf(x=all_source,grid_size=grid)
         out = dict(emissions=emissions,predict=predict)
         if self.do_attention:
             attn_loss = self.attention(emissions)
@@ -493,10 +686,16 @@ class Trainer:
         
         self.model = model.to(self.device)
         
-        # Get all model parameters EXCEPT the PSF's special parameters
+        # parameters other than psf and point mlp
         other_params = [
             p for n, p in self.model.named_parameters()
-            if not any(k in n for k in ['log_wx', 'log_wy', 'log_kx', 'log_ky'])
+            if (not any(k in n for k in ['log_wx', 'log_wy', 'log_kx', 'log_ky'])) and ('point_mlp' not in n)
+        ]
+        
+        # parameters for point mlp
+        point_params = [
+            p for n,p in self.model.named_parameters()
+            if 'point_mlp' in n
         ]
 
         # PSF-specific parameters
@@ -506,6 +705,7 @@ class Trainer:
         # Configure optimizer with different learning rates/weight decay
         self.optimizer = torch.optim.AdamW([
             {'params': other_params, 'lr': lr, 'weight_decay': weight_decay},
+            {'params': point_params, 'lr': lr*10, 'weight_decay': weight_decay},
             {'params': psf_width_params, 'lr': lr*50, 'weight_decay': 0},
             {'params': psf_shape_params, 'lr': lr*10, 'weight_decay': 0}
         ])
@@ -547,7 +747,9 @@ class Trainer:
                 out = self.model(
                     spatial=torch.cat([batch['xmesh'],batch['ymesh']],dim=1),
                     frac=batch['frac'],
-                    temporal=batch['temporal']
+                    grid=batch['grid'],
+                    temporal=batch['temporal'],
+                    gia=batch['gia']
                 )
                 loss = self.loss_func(out['predict'],batch['emission'])
                 if smooth_weight is not None:

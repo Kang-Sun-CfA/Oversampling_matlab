@@ -11,7 +11,10 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Ellipse, Rectangle
 from matplotlib.collections import PolyCollection
 from scipy.interpolate import interp1d, RegularGridInterpolator
-import seaborn as sns
+try:
+    import seaborn as sns
+except Exception as e:
+    print(e)
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 from matplotlib.axes import Axes
