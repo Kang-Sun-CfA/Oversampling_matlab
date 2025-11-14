@@ -55,7 +55,7 @@ class L2ToL4():
                     if wind_topo_f in data.keys():
                         data[wind_topo_f] *= data['column_amount']
         # iasi or cris l2
-        elif isinstance(ds,IASIL2):
+        elif isinstance(ds,IASIL2) or isinstance(ds,CrISL2):
             nds = {}
             for u,v,f in zip(us,vs,fs):
                 f_ = [f] if not isinstance(f,list) else f
@@ -195,8 +195,9 @@ class L2ToL4():
                 # iasi, starting at upper left, going clockwise
                 # first to third defines x, second to fourth defines y
                 ifov_idxs = [[0,1,2,3]]
-                # # cris
-                # ifov_idxs = [[8,7,4,5],[7,6,3,4],[4,3,0,1],[5,4,1,2]]
+            if isinstance(data,CrISL2):
+                # cris
+                ifov_idxs = [[8,7,4,5],[7,6,3,4],[4,3,0,1],[5,4,1,2]]
             else:
                 self.logger.error('l2 not compatible');return
         
@@ -206,37 +207,37 @@ class L2ToL4():
         north_wind_field = north_wind_field or 'era5_v300'
         
         latc = np.concatenate(
-            [np.nanmean(
+            [np.mean(
                 data['latc'][idx,:],axis=0,keepdims=True
             ) for idx in ifov_idxs],axis=0
         )
 
         lonc = np.concatenate(
-            [np.nanmean(
+            [np.mean(
                 data['lonc'][idx,:],axis=0,keepdims=True
             ) for idx in ifov_idxs],axis=0
         )
 
         UTC_matlab_datenum = np.concatenate(
-            [np.nanmean(
+            [np.mean(
                 data['UTC_matlab_datenum'][idx,:],axis=0,keepdims=True
             ) for idx in ifov_idxs],axis=0
         )
 
         oval_u = np.concatenate(
-            [np.nanmean(
+            [np.mean(
                 data['u'][idx,:],axis=0,keepdims=True
             ) for idx in ifov_idxs],axis=0
         )
 
         oval_v = np.concatenate(
-            [np.nanmean(
+            [np.mean(
                 data['v'][idx,:],axis=0,keepdims=True
             ) for idx in ifov_idxs],axis=0
         )
 
         oval_t = np.concatenate(
-            [np.nanmean(
+            [np.mean(
                 data['t'][idx,:],axis=0,keepdims=True
             ) for idx in ifov_idxs],axis=0
         )
@@ -271,13 +272,13 @@ class L2ToL4():
         
         # eastward and northward wind
         windu = np.concatenate(
-            [np.nanmean(
+            [np.mean(
                 data[east_wind_field][idx,:],axis=0,keepdims=True
             ) for idx in ifov_idxs],axis=0
         )
 
         windv = np.concatenate(
-            [np.nanmean(
+            [np.mean(
                 data[north_wind_field][idx,:],axis=0,keepdims=True
             ) for idx in ifov_idxs],axis=0
         )
@@ -1004,7 +1005,7 @@ class IASIL2(dict):
         self['column_amount'][self['column_amount'] > 1e36] = np.nan # fill value is 9.97e36
     
     def plot(
-        self,data=None,ax=None,figsize=None,if_latlon=False,npoints=20,ifor_mask=None,
+        self,data=None,ax=None,figsize=None,if_latlon=False,npoints=20,
         plot_field='column_amount',xlim=None,ylim=None,wind_kw=None,**kwargs
     ):
         '''plot function similar to tempo.TEMPOL2.plot'''
@@ -1026,15 +1027,13 @@ class IASIL2(dict):
                 fig,ax = plt.subplots(1,1,figsize=figsize,constrained_layout=True)
         else:
             fig = None
-        if ifor_mask is None:
-            ifor_mask = np.ones(data['latc'].shape[1],dtype=bool)
+        mask = ~np.isnan(data['latc'])
         verts = [F_ellipse(
             v,u,t,npoints,lonc,latc)[0].T for v,u,t,lonc,latc in zip(
-            data['v'][:,ifor_mask].ravel(),data['u'][:,ifor_mask].ravel(),
-            data['t'][:,ifor_mask].ravel(),
-            data['lonc'][:,ifor_mask].ravel(),data['latc'][:,ifor_mask].ravel()
+            data['v'][mask],data['u'][mask],data['t'][mask],
+            data['lonc'][mask],data['latc'][mask]
         )]
-        cdata = data[plot_field][:,ifor_mask].ravel()
+        cdata = data[plot_field][mask]
         vmin = kwargs.pop('vmin',np.nanmin(cdata))
         vmax = kwargs.pop('vmax',np.nanmax(cdata))
         collection = PolyCollection(
@@ -1075,15 +1074,275 @@ class IASIL2(dict):
             width = wind_kw.pop('width',0.002)
             east_wind_field = wind_kw.pop('east_wind_field','era5_u100')
             north_wind_field = wind_kw.pop('north_wind_field','era5_v100')
-            wind_e = data[east_wind_field][:,ifor_mask]
-            wind_n = data[north_wind_field][:,ifor_mask]
+            wind_e = data[east_wind_field][mask]
+            wind_n = data[north_wind_field][mask]
             if if_latlon:
-                basis_o1 = data['lonc'][:,ifor_mask]
-                basis_o2 = data['latc'][:,ifor_mask]
+                basis_o1 = data['lonc'][mask]
+                basis_o2 = data['latc'][mask]
             else:
                 self.logger.warning('not implemented for wind in if_latlon=False')
                 return
-            ax.quiver(basis_o1.ravel(),basis_o2.ravel(),
-                      wind_e.ravel(),wind_n.ravel(),scale=scale,width=width,**wind_kw)
+            ax.quiver(basis_o1,basis_o2,
+                      wind_e,wind_n,scale=scale,width=width,**wind_kw)
+            
+        return dict(fig=fig,ax=ax,cb=cb)
+
+
+class CrISL2(dict):
+    '''level 2 class to handle CrIS data, similar to IASIL2
+    '''
+    def __init__(
+        self,year,month,day,
+        west=-130,east=-63,south=23,north=52,
+        ellipse_lut_path='CrIS_footprint.mat'
+    ):
+        '''
+        year, month, day:
+            int, identify a date
+        west,east,south,north:
+            spatial boundary, ifors in this box will be included by self.load_l2
+        ellipse_lut_path:
+            path to a look up table storing u, v, and t data to reconstruct CrIS pixel ellipsis
+        '''
+        self.logger = logging.getLogger(__name__)
+        if not os.path.exists(ellipse_lut_path):
+            self.logger.warning(f'{ellipse_lut_path} not found. try download')
+            os.system('wget https://github.com/Kang-Sun-CfA/PU_KS_share/raw/refs/heads/master/CrIS_footprint.mat')
+        pixel_lut = loadmat(ellipse_lut_path)
+        # the following are functions - interpolating major/minor axis and rotation of ellipse
+        # at given latitude and pixel number
+        f_uuu = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,271)),pixel_lut['uuu4']) 
+        f_vvv = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,271)),pixel_lut['vvv4']) 
+        f_ttt = RegularGridInterpolator((np.arange(-90.,91.),np.arange(1,271)),pixel_lut['ttt4']) 
+        self.f_uuu,self.f_vvv,self.f_ttt = f_uuu,f_vvv,f_ttt
+        date = pd.Timestamp(year=year,month=month,day=day)
+        self.date = date
+        self.west,self.east,self.south,self.north = west,east,south,north
+        # constant, 9 ifov per ifor for cris
+        self.NIFOV_PER_IFOR = 9
+    
+    @staticmethod
+    def _pn(number):
+        return f'p{np.abs(number):03d}_0_' if number >= 0 else f'n{np.abs(number):03d}_0_'
+    
+    def load_l2(
+        self,l2_path_pattern,data_fields=None,am_filter=True,min_LandFraction=0.,
+        min_Quality_Flag=5,min_DOF=0.1,include_Cloud_Flag=[0,2,3]
+    ):
+        '''
+        l2_path_pattern:
+            pattern of l2 data path, e.g., 
+            '/projects/academic/kangsun/data/CrISNH3/L2/%Y/%m/%d/Lite_Combined_NH3*%Y%m%d.nc'
+        data_fields:
+            fields to read from l2 netcdf, defaults to a list code below
+        am_filter:
+            whether to apply filter to keep only morning (am) data
+        min_LandFraction/Quality_Flag/DOF:
+            futher restrict data
+        include_Cloud_Flag:
+            which cloud flag to include
+        '''
+        # all file names for the day
+        l2_list_day = glob.glob(self.date.strftime(l2_path_pattern))
+        # find out only tiles in the bound
+        lon_bound = np.arange(-180,180,20)
+        lat_bound = np.arange(-90,90,15)
+        lon_bound = lon_bound[np.where(lon_bound<=self.west)[0][-1]:np.min([np.where(lon_bound>=self.east)[0][0]+1,len(lon_bound)])]
+        lat_bound = lat_bound[np.where(lat_bound<=self.south)[0][-1]:np.min([np.where(lat_bound>=self.north)[0][0]+1,len(lat_bound)])]
+        l2_list = []
+        for ilon in range(len(lon_bound[:-1])):
+            for ilat in range(len(lat_bound[:-1])):
+                key_str = self._pn(lon_bound[ilon])+self._pn(lon_bound[ilon+1])+\
+                self._pn(lat_bound[ilat])+self._pn(lat_bound[ilat+1])
+                tiles = [s for s in l2_list_day if key_str in s]
+                if len(tiles) > 1:
+                    self.logger.error('this should not happen')
+                l2_list += tiles
+        self.l2_list = l2_list
+        if len(l2_list) == 0:
+            self.logger.warning('no l2 files for {}'.format(self.date.strftime('%Y%m%d')))
+            return
+        NIFOV_PER_IFOR = self.NIFOV_PER_IFOR
+        if data_fields is None:
+            data_fields = ['DOF','Day_Night_Flag','LandFraction','Latitude','Longitude',
+                    'Quality_Flag','Run_ID','mdate','tot_col','xretv','pressure',
+                    'tot_col_total_error','Cloud_Flag']
+        ncds = []
+        for l2_path in l2_list:
+            # ncd is a dict to temporally store netcdf data. too slow to read every time
+            ncd = {}
+            with Dataset(l2_path) as nc:
+                for n in data_fields:
+                    if pd.api.types.is_string_dtype(nc['Run_ID'].dtype):
+                        ncd[n] = nc[n][:]
+                    else:
+                        ncd[n] = nc[n][:].filled(np.nan).data
+            mask = (ncd['Latitude'] >= self.south) & (ncd['Latitude'] <= self.north) &\
+            (ncd['Longitude'] >= self.west) & (ncd['Longitude'] <= self.east) &\
+            (ncd['LandFraction'] >= min_LandFraction) &\
+            (ncd['Quality_Flag'] >= min_Quality_Flag) &\
+            np.isin(ncd['Cloud_Flag'],include_Cloud_Flag)
+            if am_filter:
+                mask = mask & (ncd['Day_Night_Flag'] == 1)
+            ncd = {k:v[mask,] for k,v in ncd.items()}
+            # get surface properties and dump profiles
+            ncd['sfcvmr'] = np.zeros_like(ncd['Latitude'])
+            ncd['surface_pressure'] = np.zeros_like(ncd['Latitude'])
+            for io in range(len(ncd['Latitude'])):
+                index = (ncd['pressure'][io,] > 0)
+                pressure = ncd['pressure'][io,index]
+                xretv = ncd['xretv'][io,index]
+                ncd['sfcvmr'][io] = xretv[0]
+                ncd['surface_pressure'][io] = pressure[0]
+            # no surface altitude provided, estimate roughly
+            ncd['surface_altitude'] = np.log(1013.25/ncd['surface_pressure'])*7500
+            ncd.pop('xretv');
+            ncd.pop('pressure');
+            ncds.append(ncd)
+        
+        ncd = {}
+        for k in ncds[0].keys():
+            ncd[k] = np.concatenate([nd[k] for nd in ncds])
+        ncd['ifor_number'] = np.array([int(run_id[-8:-4]) for run_id in ncd['Run_ID']])
+        ncd['ifov_number'] = np.array([int(run_id[-3:]) for run_id in ncd['Run_ID']])
+        ncd['scanline_number'] = np.array([int(run_id[16:21]) for run_id in ncd['Run_ID']])
+        ncd['pixel_number'] = (ncd['ifor_number']-1)*9+ncd['ifov_number']
+        ncd['UTC_matlab_datenum'] = ncd['mdate']+np.float64(719529.)
+        ncd.pop('Run_ID');
+        ncd['column_amount'] = ncd.pop('tot_col')/6.02214e19
+        ncd['column_uncertainty'] = ncd.pop('tot_col_total_error')/6.02214e19
+        ncd['latc'] = ncd.pop('Latitude')
+        ncd['lonc'] = ncd.pop('Longitude')
+        # find out elliptical parameters using lookup table            
+        ncd['u'] = self.f_uuu((ncd['latc'],ncd['pixel_number']))
+        ncd['v'] = self.f_vvv((ncd['latc'],ncd['pixel_number']))
+        ncd['t'] = self.f_ttt((ncd['latc'],ncd['pixel_number']))
+        self.ncd = ncd
+        # for each unique time stamp, find unique ifor numbers
+        unique_dn = np.unique(ncd['UTC_matlab_datenum'])
+        uifors = []
+        udns = []
+        for idn,dn in enumerate(unique_dn):
+            mask = ncd['UTC_matlab_datenum'] == dn
+            uifor = list(np.unique(ncd['ifor_number'][mask]))
+            uifors += uifor
+            udns += list(np.ones(len(uifor))*dn)
+        # a dataframe to identify unique ifors
+        uifor_df = pd.DataFrame(data={'ifor':uifors,'dn':udns})
+        # initialize nan arrays [9,number of unique ifors]
+        for k in ncd.keys():
+            self[k] = np.full((NIFOV_PER_IFOR,uifor_df.shape[0]),np.nan)
+        # loop over each unique ifor, assign available ifovs from ncd
+        for irow,row in uifor_df.iterrows():
+            mask = (ncd['UTC_matlab_datenum'] == row.dn) & (ncd['ifor_number'] == row.ifor)
+            ifovs = ncd['ifov_number'][mask]
+            for ifov_idx,ifov in enumerate(ifovs):
+                for k in self.keys():
+                    self[k][ifov-1,irow] = ncd[k][mask][ifov_idx]
+    
+    def save_l2g(self,l2g_path_pattern=None,path=None,delete_existing=True):
+        path = path or self.date.strftime(l2g_path_pattern)
+        folder = os.path.split(path)[0]
+        if not os.path.exists(folder):
+            os.makedirs(folder)
+        if os.path.exists(path) and delete_existing:
+            os.remove(path)
+        with Dataset(path,'w',format='NETCDF4') as nc:
+            nc.createDimension('NIFOV_PER_IFOR',self['latc'].shape[0])
+            nc.createDimension('NIFOR',self['latc'].shape[1])
+            for k,v in self.items():
+                var = nc.createVariable(k,'f8',('NIFOV_PER_IFOR','NIFOR'))
+                var[:] = v
+    
+    def load_l2g(self,l2g_path_pattern=None,path=None):
+        path = path or self.date.strftime(l2g_path_pattern)
+        if not os.path.exists(path):
+            self.logger.warning(f'{path} does not exist')
+            return
+        with Dataset(path,'r') as nc:
+            for varname in nc.variables:
+                variable = nc.variables[varname]
+                self[varname] = variable[:].filled(np.nan)
+    
+    def plot(
+        self,data=None,ax=None,figsize=None,if_latlon=False,npoints=20,
+        plot_field='column_amount',xlim=None,ylim=None,wind_kw=None,**kwargs
+    ):
+        '''plot function similar to tempo.TEMPOL2.plot'''
+        data = data or self
+        cmap = kwargs.pop('cmap','jet')
+        alpha = kwargs.pop('alpha',1)
+        func = kwargs.pop('func',lambda x:x)
+        ec = kwargs.pop('ec','none')
+        draw_colorbar = kwargs.pop('draw_colorbar',True)
+        label = kwargs.pop('label',plot_field)
+        shrink = kwargs.pop('shrink',0.75)
+        cartopy_scale = kwargs.pop('cartopy_scale','50m')
+        if ax is None:
+            figsize = kwargs.pop('figsize',(10,5))
+            if if_latlon:
+                fig,ax = plt.subplots(1,1,figsize=figsize,constrained_layout=True,
+                                     subplot_kw={"projection": ccrs.PlateCarree()})
+            else:
+                fig,ax = plt.subplots(1,1,figsize=figsize,constrained_layout=True)
+        else:
+            fig = None
+        mask = ~np.isnan(data['latc'])
+        verts = [F_ellipse(
+            v,u,t,npoints,lonc,latc)[0].T for v,u,t,lonc,latc in zip(
+            data['v'][mask],data['u'][mask],data['t'][mask],
+            data['lonc'][mask],data['latc'][mask]
+        )]
+        cdata = data[plot_field][mask]
+        vmin = kwargs.pop('vmin',np.nanmin(cdata))
+        vmax = kwargs.pop('vmax',np.nanmax(cdata))
+        collection = PolyCollection(
+            verts,
+            array=cdata,
+            cmap=cmap,edgecolors=ec
+        )
+        collection.set_alpha(alpha)
+        collection.set_clim(vmin=vmin,vmax=vmax)
+        ax.add_collection(collection)
+        
+        if if_latlon:
+            if cartopy_scale is not None:
+                ax.coastlines(resolution=cartopy_scale, color='black', linewidth=1)
+                ax.add_feature(cfeature.STATES.with_scale(cartopy_scale), facecolor='None', edgecolor='k', 
+                               linestyle='-',zorder=0,lw=0.5)
+        else:
+            ax.set_aspect('equal', adjustable='box')
+        if draw_colorbar:
+            cb = plt.colorbar(collection,ax=ax,label=label,shrink=shrink)
+        else:
+            cb = None
+        
+        if xlim is None:
+            ax.set_xlim([np.min([v[:,0].min() for v in verts]),
+                         np.max([v[:,0].max() for v in verts])])
+        else:
+            ax.set_xlim(xlim)
+        if ylim is None:
+            ax.set_ylim([np.min([v[:,1].min() for v in verts]),
+                         np.max([v[:,1].max() for v in verts])])
+        else:
+            ax.set_ylim(ylim)
+        
+        # draw wind vectors
+        if wind_kw is not None:
+            scale = wind_kw.pop('scale',200)
+            width = wind_kw.pop('width',0.002)
+            east_wind_field = wind_kw.pop('east_wind_field','era5_u100')
+            north_wind_field = wind_kw.pop('north_wind_field','era5_v100')
+            wind_e = data[east_wind_field][mask]
+            wind_n = data[north_wind_field][mask]
+            if if_latlon:
+                basis_o1 = data['lonc'][mask]
+                basis_o2 = data['latc'][mask]
+            else:
+                self.logger.warning('not implemented for wind in if_latlon=False')
+                return
+            ax.quiver(basis_o1,basis_o2,
+                      wind_e,wind_n,scale=scale,width=width,**wind_kw)
             
         return dict(fig=fig,ax=ax,cb=cb)
