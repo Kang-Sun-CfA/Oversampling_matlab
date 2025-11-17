@@ -1122,6 +1122,35 @@ class CrISL2(dict):
         self.NIFOV_PER_IFOR = 9
     
     @staticmethod
+    def download_l2(
+        login,psword,dts,l2_dir,if_remove_tgz=True,
+        url_pattern='https://hpfx.collab.science.gc.ca/~mas001/satellite_ext/cris/noaa20/nh3/v1_6_4/lite/%Y/%m/lite_cris_noaa20_nh3_global_v1_6_4_%Y_%m_%d.tar.gz'
+    ):
+        '''
+        login,psword:
+            username and password, see https://hpfx.collab.science.gc.ca/~mas001/satellite_ext/cris/snpp/nh3/v1_6_4/CrIS_NH3_data_usage_statement.pdf
+        dts:
+            an array of dates/datetimes to download l2 files
+        l2_dir:
+            e.g., /vscratch/grp-kangsun/kangsun/CrISNH3/L2_noaa20/
+        if_remove_tgz:
+            whether to remove the tgz file
+        url_pattern:
+            default is for noaa20. replace by snpp if wanted
+        '''
+        cwd = os.getcwd()
+        for datetime in dts:
+            os.makedirs(l2_dir,exist_ok=True)
+            os.chdir(l2_dir)
+            url = datetime.strftime(url_pattern)
+            tgz_fn = os.path.split(url)[-1]
+            run_str = f'curl -u {login}:{psword} {url} -O; tar -xzf {tgz_fn}'
+            os.system(run_str)
+            if if_remove_tgz:
+                os.remove(tgz_fn)
+        os.chdir(cwd)
+            
+    @staticmethod
     def _pn(number):
         return f'p{np.abs(number):03d}_0_' if number >= 0 else f'n{np.abs(number):03d}_0_'
     
@@ -1254,7 +1283,8 @@ class CrISL2(dict):
                 var = nc.createVariable(k,'f8',('NIFOV_PER_IFOR','NIFOR'))
                 var[:] = v
     
-    def load_l2g(self,l2g_path_pattern=None,path=None):
+    def load_l2g(self,l2g_path_pattern=None,path=None,min_LandFraction=0.,
+        min_Quality_Flag=5,min_DOF=0.1,include_Cloud_Flag=[0,2,3]):
         path = path or self.date.strftime(l2g_path_pattern)
         if not os.path.exists(path):
             self.logger.warning(f'{path} does not exist')
@@ -1263,6 +1293,16 @@ class CrISL2(dict):
             for varname in nc.variables:
                 variable = nc.variables[varname]
                 self[varname] = variable[:].filled(np.nan)
+        mask = (self['latc'] >= self.south) & (self['latc'] <= self.north) &\
+            (self['lonc'] >= self.west) & (self['lonc'] <= self.east) &\
+            (self['LandFraction'] >= min_LandFraction) &\
+            (self['Quality_Flag'] >= min_Quality_Flag) &\
+            np.isin(self['Cloud_Flag'],include_Cloud_Flag)
+        for k in self.keys():
+            self[k][~mask] = np.nan
+        row_mask = np.sum(mask,axis=0) > 0
+        for k in self.keys():
+            self[k] = self[k][:,row_mask]
     
     def plot(
         self,data=None,ax=None,figsize=None,if_latlon=False,npoints=20,
