@@ -19,7 +19,7 @@ class EmissionDataset(Dataset):
         westmost=-128,eastmost=-65,southmost=24,northmost=50,base_year=2018,
         crop_size_x=128,crop_size_y=64,stride=16,crop_fraction=0.5,random_state=10,
         cdl_name_codes=None,epoch=0,stride_x=None,stride_y=None,grid_size=None,
-        all_source_coords=None
+        all_source_coords=None,jitter_kw=None
     ):
         '''
         emissions,years,fy,fy_sin,fy_cos:
@@ -50,12 +50,17 @@ class EmissionDataset(Dataset):
             if not given, infer from cdls[0].lonmesh
         all_source_coords:
             an n_source x 2 array listing the lon and lat of point sources
+        jitter_kw:
+            a dict of fy_span, and p_jitter. with a probability of p_jitter, the temporal
+            feature will be uniformly sampled from fy+/-(fy_span/2)
         '''
         stride_x = stride_x or stride
         stride_y = stride_y or stride
         self.set_epoch(epoch)
         self.emission_func = emission_func or (lambda x:x*1e9)
         self.base_year = base_year
+        self.do_jitter = False
+        self.jitter_kw = jitter_kw
         
         if all_source_coords is not None:
             asc = torch.tensor(all_source_coords).float()
@@ -77,6 +82,9 @@ class EmissionDataset(Dataset):
         eastmost,southmost,northmost
         self.xmesh = torch.tensor(xmesh).float()
         self.ymesh = torch.tensor(ymesh).float()
+        self.lonmesh = cdls[0].lonmesh
+        self.latmesh = cdls[0].latmesh
+        self.grid_size_in_m2 = np.cos(np.deg2rad(self.latmesh))*np.square(grid_size*111e3)
         
         if cdl_name_codes is None:
             cdl_name_codes = [
@@ -113,6 +121,12 @@ class EmissionDataset(Dataset):
         self.random_crop(
             crop_size_x=crop_size_x,crop_size_y=crop_size_y,stride=stride,stride_x=stride_x,stride_y=stride_y,
             crop_fraction=crop_fraction,random_state=random_state,epoch=epoch)
+        
+    def set_jitter(self,TF,jitter_kw=None):
+        jitter_kw = jitter_kw or self.jitter_kw
+        if jitter_kw is None:
+            TF = False
+        self.do_jitter = TF
         
     def random_crop(
         self,crop_size_x=128,crop_size_y=64,stride=16,crop_fraction=0.5,
@@ -178,6 +192,14 @@ class EmissionDataset(Dataset):
                 ]
             ),dtype=torch.float32
         )
+        # temporal augmentation
+        if self.do_jitter:
+            do_jitter = torch.rand(1) < self.jitter_kw['p_jitter']
+            if do_jitter:
+                temporal[0] += (torch.rand(1)[0]-0.5)*self.jitter_kw['fy_span']
+                fy2pi = 2*np.pi*(temporal[0]%1)
+                temporal[1] = torch.sin(fy2pi)
+                temporal[2] = torch.cos(fy2pi)
         
         xmesh = self.xmesh[i:i+self.crop_size_y,j:j+self.crop_size_x].unsqueeze(0)
         ymesh = self.ymesh[i:i+self.crop_size_y,j:j+self.crop_size_x].unsqueeze(0)
@@ -658,9 +680,10 @@ class SmoothnessLoss(nn.Module):
         self.gradient_kernel = torch.tensor([[0,1,0],[1,-4,1],[0,1,0]], 
                                           dtype=torch.float32).view(1,1,3,3)
     
-    def forward(self, emissions,n_land_types=8,scale_weights=[1.0, 0.5, 0.25]):
-        total_loss = 0
-        B, _, H, W = emissions.shape
+    def forward(self,emissions,scale_weights=[1.0, 0.5, 0.25]):
+        abs_loss = 0
+        rel_loss = 0
+        B, C, H, W = emissions.shape
         
         for i, weight in enumerate(scale_weights):
             # Downsample emission map
@@ -670,11 +693,15 @@ class SmoothnessLoss(nn.Module):
             if self.gradient_kernel.device != scaled.device:
                 self.gradient_kernel = self.gradient_kernel.to(scaled.device)
             gradients = F.conv2d(
-                scaled, self.gradient_kernel.expand(n_land_types,1,3,3), 
-                groups=n_land_types, padding=1)
-            total_loss += weight * gradients.abs().mean()
+                scaled, self.gradient_kernel.expand(C,1,3,3), 
+                groups=C, padding=1)
+            abs_variance = gradients.abs().mean()
+            rel_variance = gradients.abs().mean(dim=[-2,-1])/(scaled.abs().mean(dim=[-2,-1])+1e-6)
+            rel_variance = rel_variance.mean()
+            abs_loss += weight * abs_variance
+            rel_loss += weight * rel_variance
             
-        return total_loss
+        return abs_loss, rel_loss
 
 class Trainer:
     def __init__(self,model,loss_func=MaskedLoss(),lr=1e-4,weight_decay=0.01,device='auto'):
@@ -705,7 +732,7 @@ class Trainer:
         # Configure optimizer with different learning rates/weight decay
         self.optimizer = torch.optim.AdamW([
             {'params': other_params, 'lr': lr, 'weight_decay': weight_decay},
-            {'params': point_params, 'lr': lr*10, 'weight_decay': weight_decay},
+            {'params': point_params, 'lr': lr*50, 'weight_decay': weight_decay},
             {'params': psf_width_params, 'lr': lr*50, 'weight_decay': 0},
             {'params': psf_shape_params, 'lr': lr*10, 'weight_decay': 0}
         ])
@@ -714,6 +741,115 @@ class Trainer:
         # Only enable mixed precision on CUDA
         self.scaler = torch.cuda.amp.GradScaler(enabled=(self.device.type == 'cuda'))
     
+    def load_model(self, path, load_optimizer=True, strict=True):
+        """
+        Load a previously saved model checkpoint
+        
+        Args:
+            path: Path to checkpoint file
+            load_optimizer: Whether to load optimizer state
+            strict: Whether to strictly enforce state_dict matching
+        """
+        checkpoint = torch.load(path, map_location=self.device)
+        
+        # Load model state
+        self.model.load_state_dict(checkpoint['model_state_dict'], strict=strict)
+        
+        # Load optimizer state if requested
+        if load_optimizer and 'optimizer_state_dict' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        self.model = self.model.to(self.device)
+        # Load training history
+        if 'epoch' in checkpoint:
+            self.epoch = checkpoint['epoch']
+        if 'train_history' in checkpoint:
+            self.train_history = checkpoint['train_history']
+        if 'val_history' in checkpoint:
+            self.val_history = checkpoint['val_history']
+            
+#         print(f"Loaded model from epoch {self.epoch}")
+#         return checkpoint
+    
+    def inference(self,ds):
+        '''perform inference on an EmissionDataset instance (ds)'''
+        n_land_type = ds[0]['frac'].shape[0]
+        nframe = len(ds.emissions)
+        ncrop = len(ds.selected_crops)
+        crop_size_x = ds.crop_size_x
+        crop_size_y = ds.crop_size_y
+        # make sure each batch represent a frame
+        test_loader = DataLoader(ds,batch_size=ncrop,shuffle=False,drop_last=True)
+
+        pure_emissions = np.zeros((nframe,n_land_type)+ds.xmesh.shape)
+        fracs = np.zeros_like(pure_emissions)
+        pred_emissions = np.zeros((nframe,)+ds.xmesh.shape)
+        point_emissions = np.zeros((nframe,ds.all_source_coords.shape[0]))
+
+        self.model.eval()
+        with torch.no_grad():
+            # exactly one batch per frame
+            for iframe,batch in enumerate(test_loader):
+                batch = self._to_device(batch)
+
+                out = self.model(
+                    spatial=torch.cat([batch['xmesh'],batch['ymesh']],dim=1),
+                    frac=batch['frac'],
+                    grid=batch['grid'],
+                    temporal=batch['temporal'],
+                    gia=batch['gia']
+                )
+                # populate area emissions for this frame
+                D_pure = np.zeros((n_land_type,)+ds.xmesh.shape)
+                D_pred = np.zeros(ds.xmesh.shape)
+                for icrop in range(ncrop):
+                    E_pure = out['emissions'][icrop].cpu().detach().numpy()
+                    E_pred = out['predict'][icrop][0].cpu().detach().numpy()
+                    F_pure = batch['frac'][icrop].cpu().detach().numpy()
+                    ij = ds.selected_crops[icrop]
+                    pure_emissions[
+                        iframe,:,ij[0]:ij[0]+crop_size_y,ij[1]:ij[1]+crop_size_x
+                    ] += E_pure
+                    fracs[
+                        iframe,:,ij[0]:ij[0]+crop_size_y,ij[1]:ij[1]+crop_size_x
+                    ] += F_pure
+                    pred_emissions[
+                        iframe,ij[0]:ij[0]+crop_size_y,ij[1]:ij[1]+crop_size_x
+                    ] += E_pred
+
+                    D_pure[
+                        :,ij[0]:ij[0]+crop_size_y,ij[1]:ij[1]+crop_size_x
+                    ] += np.ones(E_pure.shape)
+                    D_pred[
+                        ij[0]:ij[0]+crop_size_y,ij[1]:ij[1]+crop_size_x
+                    ] += np.ones(E_pred.shape)
+
+                pure_emissions[iframe,] /= D_pure
+                fracs[iframe,] /= D_pure
+                pred_emissions[iframe,] /= D_pred
+
+                point_rates = self.model.point_mlp(batch['temporal'])
+                point_emissions[iframe,:] = point_rates[0].cpu()
+
+        land_ER = np.sum(
+            pure_emissions*fracs*np.broadcast_to(
+                ds.grid_size_in_m2[np.newaxis,np.newaxis,...],fracs.shape
+            ),axis=(-1,-2)
+        )
+        land_A = np.sum(
+            fracs*np.broadcast_to(
+                ds.grid_size_in_m2[np.newaxis,np.newaxis,...],fracs.shape
+            ),axis=(-1,-2)
+        )
+        land_E = land_ER/land_A
+        return dict(
+            pure_emissions=pure_emissions,
+            fracs=fracs,
+            pred_emissions=pred_emissions,
+            point_ER=point_emissions,
+            land_E=land_E
+        )
+        
     def load_data(self,train_data,val_data=None,batch_size=32,shuffle=True):
         self.train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=shuffle, 
                                      pin_memory=(self.device.type == 'cuda'))
@@ -727,8 +863,8 @@ class Trainer:
     def train_epoch(self,epoch,attn_weight=1e-3,temporal_kw=None,smooth_weight=1e-3,verbose=False):
         self.model.train()
         total_loss = 0
-        total_recon_loss = 0
-        total_attn_loss = 0
+        total_absvar_loss = 0
+        total_relvar_loss = 0
         start_time = time.time()
         # Simple progress tracking
         num_batches = len(self.train_loader)
@@ -753,8 +889,10 @@ class Trainer:
                 )
                 loss = self.loss_func(out['predict'],batch['emission'])
                 if smooth_weight is not None:
-                    loss += smooth_weight*smooth_loss(
-                        out['emissions'],n_land_types=self.model.n_land_types)
+                    absvar_loss,relvar_loss = smooth_loss(out['emissions'])
+                    loss += smooth_weight*(absvar_loss+relvar_loss)
+                else:
+                    absvar_loss,relvar_loss = torch.tensor(0.),torch.tensor(0.)
                 if 'attn_loss' in out.keys():
                     loss += attn_weight*attn_loss
             
@@ -773,6 +911,8 @@ class Trainer:
                 self.optimizer.step()
             
             total_loss += loss.item()
+            total_absvar_loss += absvar_loss.item()
+            total_relvar_loss += relvar_loss.item()
             # Simple progress display
             progress = (batch_idx + 1) / num_batches
             bar_length = 20
@@ -785,7 +925,9 @@ class Trainer:
         epoch_time = time.time() - start_time
         print(f'\rEpoch {epoch + 1} [{"="*20}] 100% | Time: {epoch_time:.1f}s | Loss: {total_loss/num_batches:.3e}')
         
-        return total_loss/len(self.train_loader)
+        return total_loss/len(self.train_loader),\
+    total_absvar_loss/len(self.train_loader),\
+    total_relvar_loss/len(self.train_loader)
     
     def validate(self,val_loader=None):
         val_loader = val_loader or self.val_loader
@@ -799,9 +941,18 @@ class Trainer:
                 out = self.model(
                     spatial=torch.cat([batch['xmesh'],batch['ymesh']],dim=1),
                     frac=batch['frac'],
-                    temporal=batch['temporal']
+                    grid=batch['grid'],
+                    temporal=batch['temporal'],
+                    gia=batch['gia']
                 )
                 recon_loss = self.loss_func(out['predict'],batch['emission'])
                 total_loss += recon_loss.item()
             
         return total_loss/len(self.val_loader)
+    
+    def save_model(self,path,**kwargs):
+        torch.save({
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            **kwargs
+        }, path)

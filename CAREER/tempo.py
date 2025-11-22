@@ -4,7 +4,6 @@ np.seterr(divide='ignore', invalid='ignore')
 import datetime as dt
 import matplotlib.pyplot as plt
 import pandas as pd
-import geopandas as gpd
 import logging
 from popy import Level3_Data, F_center2edge, Level3_List, popy, datedev_py, datetime2datenum
 import cartopy.crs as ccrs
