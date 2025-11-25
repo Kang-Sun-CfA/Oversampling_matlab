@@ -15,7 +15,7 @@ def subset_list(l,idxs):
 
 class EmissionDataset(Dataset):
     def __init__(
-        self,emissions,years,fy,fy_sin,fy_cos,cdls,emission_func=None,
+        self,emissions,years,fy,fy_sin,fy_cos,cdls,fd=None,emission_func=None,
         westmost=-128,eastmost=-65,southmost=24,northmost=50,base_year=2018,
         crop_size_x=128,crop_size_y=64,stride=16,crop_fraction=0.5,random_state=10,
         cdl_name_codes=None,epoch=0,stride_x=None,stride_y=None,grid_size=None,
@@ -25,6 +25,8 @@ class EmissionDataset(Dataset):
         emissions,years,fy,fy_sin,fy_cos:
             lists of the same length. each sample specify the emission image, year, fractional year,
             sin/cos of fractional year
+        fd:
+            fractional day. if provided, fd_sin and fd_cos will be added to the time feature
         cdls:
             list of CDL objects with length equal to the number of unique years
         emission_func:
@@ -117,6 +119,12 @@ class EmissionDataset(Dataset):
         self.fy_sin = fy_sin
         self.fy_cos = fy_cos
         self.cdl_years = cdl_years
+        if fd is not None:
+            if np.isscalar(fd):
+                fd = np.ones_like(fy)*fd
+            self.fd_sin = np.sin(2*np.pi*fd)
+            self.fd_cos = np.cos(2*np.pi*fd)
+            self.fd = fd
         
         self.random_crop(
             crop_size_x=crop_size_x,crop_size_y=crop_size_y,stride=stride,stride_x=stride_x,stride_y=stride_y,
@@ -182,24 +190,43 @@ class EmissionDataset(Dataset):
         fy_cos = self.fy_cos[img_idx]
         frac = self.fracs[np.where(self.cdl_years==year)[0][0]
                          ][:,i:i+self.crop_size_y,j:j+self.crop_size_x]
-                
-        temporal = torch.tensor(
-            np.array(
-                [
-                    year+fy-self.base_year,
-                    fy_sin,
-                    fy_cos
-                ]
-            ),dtype=torch.float32
-        )
+        if hasattr(self,'fd_sin'):
+            fd_sin = self.fd_sin[img_idx]
+            fd_cos = self.fd_cos[img_idx]
+            temporal = torch.tensor(
+                np.array(
+                    [
+                        year+fy-self.base_year,
+                        fy_sin,
+                        fy_cos,
+                        fd_sin,
+                        fd_cos
+                    ]
+                ),dtype=torch.float32
+            )
+        else:
+            temporal = torch.tensor(
+                np.array(
+                    [
+                        year+fy-self.base_year,
+                        fy_sin,
+                        fy_cos
+                    ]
+                ),dtype=torch.float32
+            )
         # temporal augmentation
         if self.do_jitter:
-            do_jitter = torch.rand(1) < self.jitter_kw['p_jitter']
-            if do_jitter:
+            jitter_fy = torch.rand(1) < self.jitter_kw['p_jitter']
+            if jitter_fy and 'fy_span' in self.jitter_kw.keys():
                 temporal[0] += (torch.rand(1)[0]-0.5)*self.jitter_kw['fy_span']
                 fy2pi = 2*np.pi*(temporal[0]%1)
                 temporal[1] = torch.sin(fy2pi)
                 temporal[2] = torch.cos(fy2pi)
+            jitter_fd = torch.rand(1) < self.jitter_kw['p_jitter']
+            if jitter_fd and 'fd_span' in self.jitter_kw.keys():
+                jittered_fd = self.fd[img_idx]+(torch.rand(1)[0]-0.5)*self.jitter_kw['fd_span']
+                temporal[3] = torch.sin(2*np.pi*jittered_fd)
+                temporal[4] = torch.cos(2*np.pi*jittered_fd)
         
         xmesh = self.xmesh[i:i+self.crop_size_y,j:j+self.crop_size_x].unsqueeze(0)
         ymesh = self.ymesh[i:i+self.crop_size_y,j:j+self.crop_size_x].unsqueeze(0)
@@ -583,7 +610,7 @@ class LandTypeEmissionModel(nn.Module):
         grid:
             B, grid size
         temporal:
-            B,C=3 (year, sin(fy), cos(fy))
+            B,C=temporal_dim, (year, sin(fy), cos(fy)) if 3, add sin(fd), cos(fd) for 5
         gia:
             B,H,W, grid inverse area
         '''
@@ -948,7 +975,7 @@ class Trainer:
                 recon_loss = self.loss_func(out['predict'],batch['emission'])
                 total_loss += recon_loss.item()
             
-        return total_loss/len(self.val_loader)
+        return total_loss/len(val_loader)
     
     def save_model(self,path,**kwargs):
         torch.save({
