@@ -132,6 +132,7 @@ class EmissionDataset(Dataset):
         
     def set_jitter(self,TF,jitter_kw=None):
         jitter_kw = jitter_kw or self.jitter_kw
+        self.jitter_kw = jitter_kw
         if jitter_kw is None:
             TF = False
         self.do_jitter = TF
@@ -214,7 +215,11 @@ class EmissionDataset(Dataset):
                     ]
                 ),dtype=torch.float32
             )
-        # temporal augmentation
+        
+        xmesh = self.xmesh[i:i+self.crop_size_y,j:j+self.crop_size_x].clone().unsqueeze(0)
+        ymesh = self.ymesh[i:i+self.crop_size_y,j:j+self.crop_size_x].clone().unsqueeze(0)
+        
+        # temporal/spatial augmentation
         if self.do_jitter:
             jitter_fy = torch.rand(1) < self.jitter_kw['p_jitter']
             if jitter_fy and 'fy_span' in self.jitter_kw.keys():
@@ -227,9 +232,17 @@ class EmissionDataset(Dataset):
                 jittered_fd = self.fd[img_idx]+(torch.rand(1)[0]-0.5)*self.jitter_kw['fd_span']
                 temporal[3] = torch.sin(2*np.pi*jittered_fd)
                 temporal[4] = torch.cos(2*np.pi*jittered_fd)
+            jitter_xy = torch.rand(1) < self.jitter_kw['p_jitter']
+            if jitter_xy and 'xy_span' in self.jitter_kw.keys():
+                x_span = self.jitter_kw['xy_span']*self.grid_size
+                x_span = x_span/(self.eastmost-self.westmost)
+                jittered_x = torch.randn_like(xmesh)*x_span
+                xmesh += jittered_x
+                y_span = self.jitter_kw['xy_span']*self.grid_size
+                y_span = y_span/(self.northmost-self.southmost)
+                jittered_y = torch.randn_like(ymesh)*y_span
+                ymesh += jittered_y
         
-        xmesh = self.xmesh[i:i+self.crop_size_y,j:j+self.crop_size_x].unsqueeze(0)
-        ymesh = self.ymesh[i:i+self.crop_size_y,j:j+self.crop_size_x].unsqueeze(0)
         gia = self.gia[i:i+self.crop_size_y,j:j+self.crop_size_x]
         
         return {
@@ -701,16 +714,21 @@ def augment_temporal(temporal_features,
     
     return result
 
+
 class SmoothnessLoss(nn.Module):
     def __init__(self):
         super().__init__()
         self.gradient_kernel = torch.tensor([[0,1,0],[1,-4,1],[0,1,0]], 
                                           dtype=torch.float32).view(1,1,3,3)
+        
     
-    def forward(self,emissions,scale_weights=[1.0, 0.5, 0.25]):
+    def forward(self,emissions,scale_weights=[1.0, 0.5, 0.25],channel_weights=1.):
         abs_loss = 0
         rel_loss = 0
         B, C, H, W = emissions.shape
+        if np.isscalar(channel_weights):
+            channel_weights = channel_weights*torch.ones(C)
+        channel_weights = channel_weights.expand(B,-1)
         
         for i, weight in enumerate(scale_weights):
             # Downsample emission map
@@ -723,12 +741,16 @@ class SmoothnessLoss(nn.Module):
                 scaled, self.gradient_kernel.expand(C,1,3,3), 
                 groups=C, padding=1)
             abs_variance = gradients.abs().mean()
-            rel_variance = gradients.abs().mean(dim=[-2,-1])/(scaled.abs().mean(dim=[-2,-1])+1e-6)
+            # [B,C]
+            rel_variance = (
+                gradients.abs().mean(dim=[-2,-1])/(scaled.abs().mean(dim=[-2,-1])+1e-6)
+            )*channel_weights
             rel_variance = rel_variance.mean()
             abs_loss += weight * abs_variance
             rel_loss += weight * rel_variance
             
         return abs_loss, rel_loss
+
 
 class Trainer:
     def __init__(self,model,loss_func=MaskedLoss(),lr=1e-4,weight_decay=0.01,device='auto'):
@@ -796,7 +818,7 @@ class Trainer:
             self.val_history = checkpoint['val_history']
             
 #         print(f"Loaded model from epoch {self.epoch}")
-#         return checkpoint
+        return checkpoint
     
     def inference(self,ds):
         '''perform inference on an EmissionDataset instance (ds)'''
@@ -887,7 +909,15 @@ class Trainer:
         return {k: v.to(self.device, non_blocking=(self.device.type == 'cuda')) 
                 for k, v in data.items()}
     
-    def train_epoch(self,epoch,attn_weight=1e-3,temporal_kw=None,smooth_weight=1e-3,verbose=False):
+    def train_epoch(
+        self,
+        epoch,
+        attn_weight=1e-3,
+        temporal_kw=None,
+        smooth_weight=1e-3,
+        relative_variance_channel_weights=1.,
+        verbose=False
+    ):
         self.model.train()
         total_loss = 0
         total_absvar_loss = 0
@@ -916,7 +946,8 @@ class Trainer:
                 )
                 loss = self.loss_func(out['predict'],batch['emission'])
                 if smooth_weight is not None:
-                    absvar_loss,relvar_loss = smooth_loss(out['emissions'])
+                    absvar_loss,relvar_loss = smooth_loss(
+                        out['emissions'],channel_weights=relative_variance_channel_weights)
                     loss += smooth_weight*(absvar_loss+relvar_loss)
                 else:
                     absvar_loss,relvar_loss = torch.tensor(0.),torch.tensor(0.)
