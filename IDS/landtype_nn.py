@@ -720,16 +720,18 @@ class SmoothnessLoss(nn.Module):
         super().__init__()
         self.gradient_kernel = torch.tensor([[0,1,0],[1,-4,1],[0,1,0]], 
                                           dtype=torch.float32).view(1,1,3,3)
-        
     
     def forward(self,emissions,scale_weights=[1.0, 0.5, 0.25],channel_weights=1.):
-        abs_loss = 0
-        rel_loss = 0
+        var_loss = 0
+        neg_loss = 0
         B, C, H, W = emissions.shape
         if np.isscalar(channel_weights):
             channel_weights = channel_weights*torch.ones(C)
+        else:
+            channel_weights = torch.tensor(channel_weights).float()
         channel_weights = channel_weights.expand(B,-1)
-        
+        if channel_weights.device != emissions.device:
+            channel_weights = channel_weights.to(emissions.device)
         for i, weight in enumerate(scale_weights):
             # Downsample emission map
             scaled = F.avg_pool2d(emissions, kernel_size=2**i)
@@ -742,14 +744,13 @@ class SmoothnessLoss(nn.Module):
                 groups=C, padding=1)
             abs_variance = gradients.abs().mean()
             # [B,C]
-            rel_variance = (
-                gradients.abs().mean(dim=[-2,-1])/(scaled.abs().mean(dim=[-2,-1])+1e-6)
-            )*channel_weights
-            rel_variance = rel_variance.mean()
-            abs_loss += weight * abs_variance
-            rel_loss += weight * rel_variance
+            weighted_variance = gradients.abs().mean(dim=[-2,-1])*channel_weights
+            weighted_variance = weighted_variance.mean()
+            var_loss += weight * weighted_variance
             
-        return abs_loss, rel_loss
+            neg_loss += weight * F.relu(-scaled).mean()  # [B, C, H, W], zero for positive
+            
+        return var_loss, neg_loss
 
 
 class Trainer:
@@ -915,13 +916,14 @@ class Trainer:
         attn_weight=1e-3,
         temporal_kw=None,
         smooth_weight=1e-3,
-        relative_variance_channel_weights=1.,
+        negative_weight=0.,
+        variance_channel_weights=1.,
         verbose=False
     ):
         self.model.train()
         total_loss = 0
-        total_absvar_loss = 0
-        total_relvar_loss = 0
+        total_var_loss = 0
+        total_neg_loss = 0
         start_time = time.time()
         # Simple progress tracking
         num_batches = len(self.train_loader)
@@ -946,11 +948,11 @@ class Trainer:
                 )
                 loss = self.loss_func(out['predict'],batch['emission'])
                 if smooth_weight is not None:
-                    absvar_loss,relvar_loss = smooth_loss(
-                        out['emissions'],channel_weights=relative_variance_channel_weights)
-                    loss += smooth_weight*(absvar_loss+relvar_loss)
+                    var_loss,neg_loss = smooth_loss(
+                        out['emissions'],channel_weights=variance_channel_weights)
+                    loss += smooth_weight*var_loss + negative_weight*neg_loss
                 else:
-                    absvar_loss,relvar_loss = torch.tensor(0.),torch.tensor(0.)
+                    var_loss,neg_loss = torch.tensor(0.),torch.tensor(0.)
                 if 'attn_loss' in out.keys():
                     loss += attn_weight*attn_loss
             
@@ -969,8 +971,8 @@ class Trainer:
                 self.optimizer.step()
             
             total_loss += loss.item()
-            total_absvar_loss += absvar_loss.item()
-            total_relvar_loss += relvar_loss.item()
+            total_var_loss += var_loss.item()
+            total_neg_loss += neg_loss.item()
             # Simple progress display
             progress = (batch_idx + 1) / num_batches
             bar_length = 20
@@ -984,8 +986,8 @@ class Trainer:
         print(f'\rEpoch {epoch + 1} [{"="*20}] 100% | Time: {epoch_time:.1f}s | Loss: {total_loss/num_batches:.3e}')
         
         return total_loss/len(self.train_loader),\
-    total_absvar_loss/len(self.train_loader),\
-    total_relvar_loss/len(self.train_loader)
+    total_var_loss/len(self.train_loader),\
+    total_neg_loss/len(self.train_loader)
     
     def validate(self,val_loader=None):
         val_loader = val_loader or self.val_loader
