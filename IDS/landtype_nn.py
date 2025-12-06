@@ -715,6 +715,38 @@ def augment_temporal(temporal_features,
     return result
 
 
+class CorrelationLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self,emissions,cor_weights=None):
+        B, C, H, W = emissions.shape
+        N = H*W
+        eps = 1e-8
+        if cor_weights is None:
+            cor_weights = torch.tril(torch.ones((C,C)),diagonal=-1) # only lower tri matters
+        
+        cor_weights = cor_weights.to(emissions.device)
+        
+        X = emissions.view(B,C,N)
+        X_centered = (X-X.mean(dim=2,keepdim=True)).double()
+#         print(f'X_centered mean {X_centered.mean()}')
+#         print(f"X_centered range: [{X_centered.min().item():.3e}, {X_centered.max().item():.3e}]")
+         # Compute covariance matrices [B, C, C]
+        cov = torch.bmm(X_centered, X_centered.transpose(1, 2)) / N
+#         print(f'cov mean {cov.mean()}')
+        # Compute standard deviations [B, C]
+        var = (X_centered ** 2).mean(dim=2)
+        std = torch.sqrt(var + eps)
+#         std = X_centered.std(dim=2, unbiased=True)
+#         print(f'std mean {std.mean()}')
+        # Compute correlation matrices [B, C, C]
+        corr = cov / (std.unsqueeze(2) @ std.unsqueeze(1) + eps)
+        cor_loss = (corr*cor_weights.expand(B,C,C)).abs().sum(dim=(-2,-1)).mean()
+#         print(cor_loss)
+        return cor_loss
+
+
 class SmoothnessLoss(nn.Module):
     def __init__(self):
         super().__init__()
@@ -722,8 +754,8 @@ class SmoothnessLoss(nn.Module):
                                           dtype=torch.float32).view(1,1,3,3)
     
     def forward(self,emissions,scale_weights=[1.0, 0.5, 0.25],channel_weights=1.):
-        var_loss = 0
-        neg_loss = 0
+        var_loss,neg_loss = 0,0
+        
         B, C, H, W = emissions.shape
         if np.isscalar(channel_weights):
             channel_weights = channel_weights*torch.ones(C)
@@ -732,6 +764,7 @@ class SmoothnessLoss(nn.Module):
         channel_weights = channel_weights.expand(B,-1)
         if channel_weights.device != emissions.device:
             channel_weights = channel_weights.to(emissions.device)
+        
         for i, weight in enumerate(scale_weights):
             # Downsample emission map
             scaled = F.avg_pool2d(emissions, kernel_size=2**i)
@@ -916,14 +949,18 @@ class Trainer:
         attn_weight=1e-3,
         temporal_kw=None,
         smooth_weight=1e-3,
+        smooth_scale_weights=[1,0.5,0.25],
         negative_weight=0.,
+        corrcoef_weight=0.,
         variance_channel_weights=1.,
+        cor_channel_weights=None,
         verbose=False
     ):
         self.model.train()
         total_loss = 0
         total_var_loss = 0
         total_neg_loss = 0
+        total_cor_loss = 0
         start_time = time.time()
         # Simple progress tracking
         num_batches = len(self.train_loader)
@@ -931,6 +968,8 @@ class Trainer:
             print(f"Epoch {epoch + 1} [", end='', flush=True)
         if smooth_weight is not None:
             smooth_loss = SmoothnessLoss()
+        if corrcoef_weight is not None:
+            correlation_loss = CorrelationLoss()
         for batch_idx, batch in enumerate(self.train_loader):
             if temporal_kw is not None:
                 batch['temporal'] = augment_temporal(batch['temporal'],**temporal_kw)
@@ -947,12 +986,25 @@ class Trainer:
                     gia=batch['gia']
                 )
                 loss = self.loss_func(out['predict'],batch['emission'])
+                
+                if corrcoef_weight is not None:
+                    cor_loss = correlation_loss(
+                        out['emissions'],cor_weights=cor_channel_weights
+                    )
+                    loss += corrcoef_weight*cor_loss
+                    
+                else:
+                    cor_loss = torch.tensor(0.)
+                
                 if smooth_weight is not None:
                     var_loss,neg_loss = smooth_loss(
-                        out['emissions'],channel_weights=variance_channel_weights)
+                        out['emissions'],channel_weights=variance_channel_weights,
+                        scale_weights=smooth_scale_weights
+                    )
                     loss += smooth_weight*var_loss + negative_weight*neg_loss
                 else:
                     var_loss,neg_loss = torch.tensor(0.),torch.tensor(0.)
+                
                 if 'attn_loss' in out.keys():
                     loss += attn_weight*attn_loss
             
@@ -973,6 +1025,7 @@ class Trainer:
             total_loss += loss.item()
             total_var_loss += var_loss.item()
             total_neg_loss += neg_loss.item()
+            total_cor_loss += cor_loss.item()
             # Simple progress display
             progress = (batch_idx + 1) / num_batches
             bar_length = 20
@@ -987,7 +1040,8 @@ class Trainer:
         
         return total_loss/len(self.train_loader),\
     total_var_loss/len(self.train_loader),\
-    total_neg_loss/len(self.train_loader)
+    total_neg_loss/len(self.train_loader),\
+    total_cor_loss/len(self.train_loader)
     
     def validate(self,val_loader=None):
         val_loader = val_loader or self.val_loader
