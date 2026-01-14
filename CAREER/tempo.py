@@ -92,7 +92,7 @@ class TEMPO():
             self.xys = [([self.west,self.west,self.east,self.east],
                          [self.south,self.north,self.north,self.south])]   
     
-    def load_scans(self,l3_path_pattern,
+    def load_scans(self,l3_path_pattern,block_reduce=None,
                    min_utc_hour=None,max_utc_hour=None,
                    fields_name=None,
                    tendency=None,
@@ -102,6 +102,8 @@ class TEMPO():
         '''load l3/l4 scans
         l3_path_pattern:
             use %Y%m%d format and *
+        block_reduce:
+            if not none, block reduce l3 to this grid size
         min/max_utc_hour:
             limit scan time within these hours. infer from local hours if possible
         fields_name:
@@ -185,7 +187,10 @@ class TEMPO():
         l3s.df['end_time'] = days_df['end_time']
         l3s.df['scan_num'] = days_df['scan_num']
         for iscan,(irow,row) in enumerate(days_df.iterrows()):
-            l3s.add(Level3_Data().read_nc(row.path,fields_name))
+            l3 = Level3_Data().read_nc(row.path,fields_name)
+            if block_reduce is not None:
+                l3 = l3.block_reduce(block_reduce)
+            l3s.add(l3)
         self.l3s = l3s
         if do_tendency:
             self.l3s.get_storage(field='column_amount',tendency=tendency)
@@ -766,6 +771,8 @@ class TEMPOL2(dict):
             start_alongtrack_idx += along_tracks[igranule]
 
         mask = (self['qa']==0)
+        # from atbd: -10^19 molecules cm-2 < VCDtotal < 10^19 molecules cm-2, enforce tvcd
+        mask = mask & ((self['column_amount'] > -1e19) & (self['column_amount'] < 1e19))
         if max_ecf is not None:
             mask = mask & (self['eff_cloud_fraction']<=max_ecf)
         if max_crf is not None:
