@@ -3523,7 +3523,7 @@ class Level3_List(list):
         self.south = south
         self.north = north
     
-    def read_nc_pattern(self,l3_path_pattern=None,l3_list=None,fields_name=None):
+    def read_nc_pattern(self,l3_path_pattern=None,l3_list=None,fields_name=None,block_reduce=None):
         fields_name = fields_name or ['column_amount','surface_altitude','wind_topo','wind_column']
         if l3_list is None and l3_path_pattern is None:
             self.logger.error('either l3_list or l3_path_pattern has to be provided!')
@@ -3548,6 +3548,8 @@ class Level3_List(list):
         for l3_fn in l3_list:
             self.logger.info('loading {}'.format(l3_fn))
             l3 = Level3_Data().read_nc(l3_filename=l3_fn,fields_name=fields_name)
+            if block_reduce:
+                l3 = l3.block_reduce(block_reduce)
             self.add(l3)
     
     def trim(self,west=None,east=None,south=None,north=None,time_mask=None):
@@ -3558,7 +3560,7 @@ class Level3_List(list):
         if time_mask is None:
             time_mask = np.ones(len(self.df),dtype=bool)
         assert len(time_mask) == len(self)
-        l3s_new = Level3_List(dt_array=pd.DatetimeIndex(self.dt_array)[time_mask],
+        l3s_new = Level3_List(dt_array=self.df.index[time_mask],
                               west=west,east=east,south=south,north=north)
         for count in self.df['count'][time_mask]:
             l3s_new.add(self[count])
