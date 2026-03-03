@@ -3546,7 +3546,7 @@ class Level3_List(list):
             l3_list = [dt0.strftime(l3_path_pattern) for dt0 in self.dt_array]
             
         for l3_fn in l3_list:
-            self.logger.info('loading {}'.format(l3_fn))
+            self.logger.debug('loading {}'.format(l3_fn))
             l3 = Level3_Data().read_nc(l3_filename=l3_fn,fields_name=fields_name)
             if block_reduce:
                 l3 = l3.block_reduce(block_reduce)

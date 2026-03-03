@@ -464,16 +464,16 @@ class Inventory(dict):
                                            len(monthly_filenames)))
                 self['grid_size_in_m2'] = np.cos(np.deg2rad(ymesh))*np.square(self.grid_size*111e3)
                 nc_unit = nc[field].units
-                if nc_unit == 'kg/m2/s' and unit=='nmol/m2/s':
+                if nc_unit in ['kg/m2/s','kgNO2/m2/s'] and unit=='nmol/m2/s':
                     self.logger.warning(f'unit of {field} will be converted from {nc_unit} to {unit}')
                     self[f'{field} unit'] = unit
                     unit_factor = 1e9/0.046
-                elif nc_unit == 'kg/m2/s' and unit=='mol/m2/s':
+                elif nc_unit in ['kg/m2/s','kgNO2/m2/s'] and unit=='mol/m2/s':
                     self.logger.warning(f'unit of {field} will be converted from {nc_unit} to {unit}')
                     self[f'{field} unit'] = unit
                     unit_factor = 1/0.046
                 else:
-                    self.logger.info('no unit conversion is done')
+                    self.logger.warning('no unit conversion is done')
                     self[f'{field} unit'] = nc_unit
                     unit_factor = 1.
             monthly_fields[:,:,i] = unit_factor*nc[field][:].filled(np.nan)[0,0,:,:][np.ix_(ymask,xmask)]# time and lev are singular dimensions
@@ -485,7 +485,7 @@ class Inventory(dict):
             
         return self
     
-    def regrid_to_l3(self,l3=None,xgrid=None,ygrid=None,method=None):
+    def regrid_to_l3(self,data=None,l3=None,xgrid=None,ygrid=None,method=None):
         '''regrid inventory to match the mesh of a l3 data object
         method:
             if none, choose from drop_in_the_box and interpolate based on the relative grid size of inventory and l3
@@ -504,20 +504,22 @@ class Inventory(dict):
         if ygrid is None:
             ygrid = l3['ygrid']
         ymesh,xmesh = np.meshgrid(ygrid,xgrid)
+        if data is None:
+            data = self['data']
         if method in ['interpolate']:
-            f = RegularGridInterpolator((self['ygrid'],self['xgrid']),self['data'],bounds_error=False)
-            data = f((ymesh,xmesh)).T
+            f = RegularGridInterpolator((self['ygrid'],self['xgrid']),data,bounds_error=False)
+            data_interp = f((ymesh,xmesh)).T
         elif method in ['drop_in_the_box']:
-            data = np.full((len(inv['ygrid']),len(inv['xgrid'])),np.nan)
+            data_interp = np.full((len(inv['ygrid']),len(inv['xgrid'])),np.nan)
             for iy,y in enumerate(inv['ygrid']):
                 ymask = (self['ygrid']>=y-inv.grid_size/2) & (self['ygrid']<y+inv.grid_size/2)
                 for ix,x in enumerate(inv['xgrid']):
                     xmask = (self['xgrid']>=x-inv.grid_size/2) & (self['xgrid']<x+inv.grid_size/2)
                     if np.sum(ymask) == 0 and np.sum(xmask) == 0:
                         continue
-                    data[iy,ix] = np.nanmean(self['data'][np.ix_(ymask,xmask)])
+                    data_interp[iy,ix] = np.nanmean(data[np.ix_(ymask,xmask)])
         
-        return data
+        return data_interp
     
     def plot(self,ax=None,scale='log',**kwargs):
         if ax is None:
