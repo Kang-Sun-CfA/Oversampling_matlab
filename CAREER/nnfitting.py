@@ -1,12 +1,196 @@
 import numpy as np
 import pandas as pd
+import os,sys,glob
 import logging
+import yaml
 import matplotlib.pyplot as plt
 import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+
+class ChemFitConfig(dict):
+    def __init__(self,run_id,**kwargs):
+        self.logger = logging.getLogger(__name__)
+        self['run_id'] = run_id
+        self['run_dir'] = kwargs.pop(
+            'run_dir',os.path.join('/projects/academic/kangsun/kangsun/IDS/v03',self['run_id']))
+        self['l3_path_pattern'] = kwargs.pop(
+            'l3_path_pattern',
+            '/projects/academic/kangsun/zolalaya/data/Cornbelt_NOx/s5p_cornbelt/%Y/%m/CORNBELT_S5P_NO2_%Y_%m_%d.nc'
+        )
+        self['nei_dir'] = kwargs.pop('nei_dir','/projects/academic/kangsun/jobaerah/Data_NEI/')
+        # fit_mask will be initialized using this threshold on annual NEI
+        self['max_neinox'] = kwargs.pop('max_neinox',1e-9)
+        self['grid_sizes'] = kwargs.pop('grid_sizes',[0.1])
+        # a list of start/end for daily period index. a l3s will be loaded per start/end date
+        self['l3s_ranges'] = kwargs.pop(
+            'l3s_ranges',
+            [[f'{y}-01-01',f'{y}-12-31'] for y in range(2020,2025)]
+        )
+        self['crop_x'] = kwargs.pop('crop_x',64)
+        self['crop_y'] = kwargs.pop('crop_y',self['crop_x'])
+        # a list of resampling rules for training dataset
+        self['train_intervals'] = kwargs.pop(
+            'train_intervals',
+            ['1Y','21d','28d','35d']
+        )
+        # a list of list of resampling offsets for training dataset
+        self['train_offsets'] = kwargs.pop(
+            'train_offsets',
+            [[None],['0d','5d','16d'],['0d','7d','14d'],['0d','18d','27d']]
+        )
+        # a list of stride sizes for training dataset
+        self['train_stride_xs'] = kwargs.pop('train_strid_xs',[4,8,8,8])
+        self['train_stride_ys'] = kwargs.pop('train_strid_ys',self['train_stride_xs'].copy())
+        # a list of milestones for training data crop fraction, as [epoch1, value1, epoch2, value2]
+        self['train_milestones'] = kwargs.pop(
+            'train_milestones',
+            [[0,1,100,0],[0,0,100,0.7],[0,0,100,0.7],[0,0,100,0.7]]
+        )
+        
+        # a list of resampling rules for val/testing dataset
+        self['eval_intervals'] = kwargs.pop(
+            'eval_intervals',
+            ['1M','21d','28d','35d']
+        )
+        # a list of list of resampling offsets for val/testing dataset
+        self['eval_offsets'] = kwargs.pop(
+            'eval_offsets',
+            [[None],['10d'],['21d'],['9d']]
+        )
+        # a list of stride sizes for val/testing dataset
+        self['eval_stride_xs'] = kwargs.pop('eval_strid_xs',[64,64,64,64])
+        self['eval_stride_ys'] = kwargs.pop('eval_strid_ys',self['eval_stride_xs'].copy())
+        # training configs
+        self['lr'] = kwargs.pop('lr',1e-4)
+        self['weight_decay'] = kwargs.pop('weight_decay',0.01)
+        self['batch_size'] = kwargs.pop('batch_size',256)
+        self['start_epoch'] = kwargs.pop('start_epoch',0)
+        self['end_epoch'] = kwargs.pop('end_epoch',200)
+        self['L1Loss_or_MSE'] = kwargs.pop('L1Loss_or_MSE','L1Loss')
+        self['smoothness_weight_milestones'] = kwargs.pop(
+            'smoothness_weight_milestones',[0,0,100,5e-3])
+        # smoothness on different levels of aggregation on unet_out
+        self['smoothness_scale_weights'] = kwargs.pop(
+            'smoothness_scale_weights',
+            [1,0.5,0.5,0.25]
+        )
+        # smoothness on different channels of unet_out
+        self['smoothness_channel_weights'] = kwargs.pop(
+            'smoothness_channel_weights',
+            [2,1]
+        )
+        self['save_best_model'] = kwargs.pop('save_best_model',True)
+        self.check()
+        
+    def check(self):
+        if not os.path.exists(self['run_dir']):
+            run_dir = self['run_dir']
+            self.logger.warning(f'{run_dir} does not exist, trying to create one')
+            try:
+                os.makedirs(self['run_dir'])
+            except Exception as e:
+                self.logger.warning(e)
+        if not all(
+            [
+                len(self[k])==len(self['train_intervals']) 
+                for k in ['train_stride_xs','train_stride_ys','train_offsets','train_milestones']
+            ]
+        ):
+            self.logger.error('train config lists have to be the same size!')
+        if not all(
+            [
+                len(self[k])==len(self['eval_intervals']) 
+                for k in ['eval_stride_xs','eval_stride_ys','eval_offsets']
+            ]
+        ):
+            self.logger.error('eval config lists have to be the same size!')
+        
+    def to_yaml(self,rel_path='config.yml',abs_path=None):
+        path = abs_path or os.path.join(self['run_dir'],rel_path)
+        with open(path,'w') as stream:
+            yaml.dump({k:v for k,v in self.items()},stream,sort_keys=False)
+    
+    def read_yaml(self,rel_path='config.yml',abs_path=None):
+        path = abs_path or os.path.join(self['run_dir'],rel_path)
+        with open(path,'r') as stream:
+            control = yaml.full_load(stream)
+        for k,v in control.items():
+            self[k] = v
+        self.check()
+        
+    def sbatch_ccr(
+        self,slurm_path=None,config_path=None,python_script_path=None,
+        module_list=None,submit=True,**kwargs
+    ):
+        if slurm_path is None:
+            slurm_path = os.path.join(self['run_dir'],'run_job.sh')
+        if config_path is None:
+            config_path = os.path.join(self['run_dir'],'config.yml')
+            self.logger.warning(f'saving current config dict to {config_path}')
+            self.to_yaml()
+        else:
+            self.read_yaml(abs_path=config_path)
+            self.logger.warning(f'current config overwritten by {config_path}')
+        if python_script_path is None:
+            python_script_path = os.path.join(os.path.split(self['run_dir'])[0],'train_chemfit.py')
+            self.logger.warning(f'assuming python script at {python_script_path}')
+        if module_list is None:
+            module_list = [
+                'gcc/11.2.0','openmpi/4.1.1', 'pytorch/1.13.1-CUDA-11.8.0', 
+                'scipy-bundle/2021.10', 'matplotlib/3.4.3', 
+                'netcdf4-python/1.5.7', 'cartopy', 'statsmodels', 'scikit-image'
+            ]
+        with open(slurm_path,'w') as fid:
+            fid.write('#!/bin/bash')
+            fid.write('\n')
+            account = kwargs.pop('account','kangsun')
+            fid.write('#SBATCH --account={}'.format(account))
+            fid.write('\n')
+            fid.write('#SBATCH --partition={}'.format(kwargs.pop('partition',account)))
+            fid.write('\n')
+            fid.write('#SBATCH --qos={}'.format(kwargs.pop('qos',account)))
+            fid.write('\n')
+            fid.write('#SBATCH --cluster={}'.format(kwargs.pop('cluster','faculty')))
+            fid.write('\n')
+            fid.write('#SBATCH --time={:.0f}:00:00'.format(kwargs.pop('time',1)))
+            fid.write('\n')
+            fid.write('#SBATCH --nodes={:.0f}'.format(kwargs.pop('nodes',1)))
+            fid.write('\n')
+            fid.write('#SBATCH --ntasks-per-node={:.0f}'.format(kwargs.pop('ntasks',3)))
+            fid.write('\n')
+            fid.write('#SBATCH --mem={:.0f}'.format(kwargs.pop('mem',50000)))
+            fid.write('\n')
+            fid.write('#SBATCH --gpus-per-node={:.0f}'.format(kwargs.pop('gpus',1)))
+            fid.write('\n')
+            fid.write('#SBATCH --job-name={}'.format(self['run_id']))
+            fid.write('\n')
+            fid.write('#SBATCH --output={}.out'.format(self['run_id']))
+            fid.write('\n')
+            if 'email' in kwargs.keys():
+                fid.write('#SBATCH --mail-user={}'.format(kwargs['email']))
+                fid.write('\n')
+                fid.write('#SBATCH --mail-type=ALL')
+                fid.write('\n')
+            fid.write('#SBATCH --requeue')
+            fid.write('\n')
+            fid.write('ulimit -s unlimited')
+            fid.write('\n')
+            fid.write('module load '+' '.join(module_list))
+            fid.write('\n')
+            fid.write(f'python3 {python_script_path} {config_path}')
+            fid.write('\n')
+        
+        if submit:
+            cwd = os.getcwd()
+            os.chdir(self['run_dir'])
+            os.system(f'sbatch {slurm_path}')
+            run_dir = self['run_dir']
+            self.logger.warning(f'{slurm_path} submitted! check {run_dir} for results')
+            os.chdir(cwd)
+
 
 class ChemFitDataset(Dataset):
     def __init__(
@@ -115,7 +299,9 @@ class ChemFitDataset(Dataset):
         sigma = 0.5*torch.std(
             xy[mask].ravel()-rs[mask].ravel()
         )
-        scaler = 0.96+15.79*grid_size
+        if torch.isnan(sigma):
+            sigma = torch.tensor(1e3)
+        scaler = 1.02+18.21*grid_size
         return sigma*scaler
         
     def random_crop(
@@ -556,6 +742,34 @@ class ChemFitTrainer:
             **kwargs
         }, path)
     
+    def validate(self,val_loader,scale_random_error=True):
+        self.model.eval()
+        total_loss = 0
+        with torch.no_grad():
+            for batch in val_loader:
+                batch = self._to_device(batch)
+                unet_out = self.model(
+                    spatial=batch['spatial'],
+                    temporal=batch['temporal']
+                )
+                if scale_random_error:
+                    error_scaler = batch['random_error'].view(-1,1,1,1)
+                else:
+                    error_scaler = 1.
+                # B,1,H,W
+                predict = (
+                    unet_out*torch.cat([batch['VCD'],batch['WT']],dim=1)
+                ).sum(dim=1,keepdim=True)/error_scaler
+                target = -batch['DD']/error_scaler
+                
+                loss = self.data_loss_func(
+                    predict=predict,target=target,
+                    mask=batch['valid_mask']*batch['fit_mask']
+                )
+                total_loss += loss.item()
+            
+        return total_loss/len(val_loader)
+    
     def train_epoch(
         self,
         epoch,
@@ -578,9 +792,8 @@ class ChemFitTrainer:
         total_var_loss = 0
         total_neg_loss = 0
         start_time = time.time()
-        # Simple progress tracking
         num_batches = len(self.data_loader)
-        
+        norms = []
         for batch_idx, batch in enumerate(self.data_loader):
             batch = self._to_device(batch)
             self.optimizer.zero_grad()
@@ -630,16 +843,18 @@ class ChemFitTrainer:
                 total_norm = torch.norm(
                     torch.stack([torch.norm(p.grad.detach(), 2) for p in parameters]), 2
                 ).item()
+                norms.append(total_norm)
                 self.logger.info(f"Step Gradient Norm: {total_norm:.4f}")
                 for name, param in self.model.named_parameters():
                     if param.grad is None:
                         self.logger.warning(f"No gradient for {name}")
                     elif torch.all(param.grad == 0):
                         self.logger.warning(f"Zero gradients for {name}")
-                        ntotal = batch['nan_mask'].numel()
-                        nfit = (batch['nan_mask']*batch['fit_mask']).sum()
+                        ntotal = batch['valid_mask'].numel()
+                        nfit = (batch['valid_mask']*batch['fit_mask']).sum()
                         self.logger.warning(f'good pixels {nfit}')
                         self.logger.warning(f'total {ntotal}')
+                        return batch
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
@@ -652,6 +867,12 @@ class ChemFitTrainer:
         
         # Epoch summary
         epoch_time = time.time() - start_time
-        self.logger.warning(f'\rEpoch {epoch + 1} | Time: {epoch_time:.1f}s | Loss: {total_loss/num_batches:.3f} | Sample: {self.data_loader.batch_size}x{num_batches}')
-        
-        return total_loss/num_batches,total_var_loss/num_batches,total_neg_loss/num_batches
+        self.logger.warning(f'\rEpoch {epoch + 1} | Time: {epoch_time:.1f}s | Loss: {total_loss/num_batches:.4f} | Sample: {self.data_loader.batch_size}x{num_batches}')
+        result = dict(
+            train_loss=total_loss/num_batches,
+            smooth_loss=total_var_loss/num_batches,
+            epoch_time=epoch_time,
+            sample_size=len(self.data_loader.dataset),
+            grad_norm=np.mean(norms)
+        )
+        return result
