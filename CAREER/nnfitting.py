@@ -67,6 +67,8 @@ class ChemFitConfig(dict):
         self['lr'] = kwargs.pop('lr',1e-4)
         self['weight_decay'] = kwargs.pop('weight_decay',0.01)
         self['batch_size'] = kwargs.pop('batch_size',256)
+        self['max_norm'] = kwargs.pop('max_norm',1.0)
+        self['initial_grad_scaler'] = kwargs.pop('initial_grad_scaler',1024.0)
         self['start_epoch'] = kwargs.pop('start_epoch',0)
         self['end_epoch'] = kwargs.pop('end_epoch',200)
         self['L1Loss_or_MSE'] = kwargs.pop('L1Loss_or_MSE','L1Loss')
@@ -681,7 +683,7 @@ class ChemFitTrainer:
             self.data_loss_func = MaskedLoss()
         
         # Only enable mixed precision on CUDA
-        initial_grad_scaler=initial_grad_scaler or 65536.
+        initial_grad_scaler=initial_grad_scaler or 1024.
         self.scaler = torch.cuda.amp.GradScaler(
             init_scale=initial_grad_scaler,
             enabled=(self.device.type == 'cuda'))
@@ -777,7 +779,7 @@ class ChemFitTrainer:
         smoothness_scale_weights=[1,0.5,0.25],
         smoothness_channel_weights=1.,
         negativity_weight=None,
-        max_norm=None,
+        max_norm=1.0,
         scale_random_error=True
     ):
         self.model.train()
@@ -836,8 +838,8 @@ class ChemFitTrainer:
             
             if self.device.type == 'cuda':
                 self.scaler.scale(loss).backward()
+                self.scaler.unscale_(self.optimizer)
                 if max_norm:
-                    self.scaler.unscale_(self.optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(),max_norm=max_norm)
                 parameters = [p for p in self.model.parameters() if p.grad is not None]
                 total_norm = torch.norm(
