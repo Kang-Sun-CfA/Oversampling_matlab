@@ -21,6 +21,7 @@ class ChemFitConfig(dict):
             '/projects/academic/kangsun/zolalaya/data/Cornbelt_NOx/s5p_cornbelt/%Y/%m/CORNBELT_S5P_NO2_%Y_%m_%d.nc'
         )
         self['nei_dir'] = kwargs.pop('nei_dir','/projects/academic/kangsun/jobaerah/Data_NEI/')
+        self['pretrained_model_path'] = kwargs.pop('pretrained_model_path',None)
         # fit_mask will be initialized using this threshold on annual NEI
         self['max_neinox'] = kwargs.pop('max_neinox',1e-9)
         self['grid_sizes'] = kwargs.pop('grid_sizes',[0.1])
@@ -733,6 +734,26 @@ class ChemFitTrainer:
             pin_memory=(self.device.type=='cuda')
         )
     
+    def load_model(self,path,load_optimizer=True,strict=True):
+        
+        checkpoint = torch.load(path, map_location=self.device)
+        
+        # Load model state
+        self.model.load_state_dict(checkpoint['model_state_dict'], strict=strict)
+        
+        # Load optimizer state if requested
+        if load_optimizer and 'optimizer_state_dict' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        self.model = self.model.to(self.device)
+        # Load training history
+        if 'epoch' in checkpoint:
+            self.epoch = checkpoint['epoch']
+        if 'train_history' in checkpoint:
+            self.train_history = checkpoint['train_history']
+        if 'val_history' in checkpoint:
+            self.val_history = checkpoint['val_history']
+    
     def _to_device(self,data):
         return {k: v.to(self.device, non_blocking=(self.device.type == 'cuda')) 
                 for k, v in data.items()}
@@ -815,7 +836,12 @@ class ChemFitTrainer:
                     unet_out*torch.cat([batch['VCD'],batch['WT']],dim=1)
                 ).sum(dim=1,keepdim=True)/error_scaler
                 target = -batch['DD']/error_scaler
-                
+                if (torch.sum(torch.isnan(predict)) > 0) or (torch.sum(torch.isinf(predict)) > 0):
+                    self.logger.warning(f'epoch {epoch}, batch {ibatch} has invalid predict, skipping')
+                    continue
+                if (torch.sum(torch.isnan(target)) > 0) or (torch.sum(torch.isinf(target)) > 0):
+                    self.logger.warning(f'epoch {epoch}, batch {ibatch} has invalid target, skipping')
+                    continue
                 loss = self.data_loss_func(
                     predict=predict,target=target,
                     mask=batch['valid_mask']*batch['fit_mask']
@@ -856,7 +882,6 @@ class ChemFitTrainer:
                         nfit = (batch['valid_mask']*batch['fit_mask']).sum()
                         self.logger.warning(f'good pixels {nfit}')
                         self.logger.warning(f'total {ntotal}')
-                        return batch
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
