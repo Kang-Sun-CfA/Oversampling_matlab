@@ -73,6 +73,20 @@ class ChemFitConfig(dict):
         self['start_epoch'] = kwargs.pop('start_epoch',0)
         self['end_epoch'] = kwargs.pop('end_epoch',200)
         self['L1Loss_or_MSE'] = kwargs.pop('L1Loss_or_MSE','L1Loss')
+        # var loss
+        self['var_weight_milestones'] = kwargs.pop(
+            'var_weight_milestones',[0,0,100,5e-3])
+        # variance on different levels of aggregation on unet_out
+        self['var_scale_weights'] = kwargs.pop(
+            'var_scale_weights',
+            [1,0.5,0.5,0.25]
+        )
+        # variance on different channels of unet_out
+        self['var_channel_weights'] = kwargs.pop(
+            'var_channel_weights',
+            [2,1]
+        )
+        # smoothness loss
         self['smoothness_weight_milestones'] = kwargs.pop(
             'smoothness_weight_milestones',[0,0,100,5e-3])
         # smoothness on different levels of aggregation on unet_out
@@ -86,6 +100,8 @@ class ChemFitConfig(dict):
             [2,1]
         )
         self['save_best_model'] = kwargs.pop('save_best_model',True)
+        self['clamp_max_sigma'] = kwargs.pop('clamp_max_sigma',None)
+        self['clamp_min_sigma'] = kwargs.pop('clamp_min_sigma',3.)
         self.check()
         
     def check(self):
@@ -594,6 +610,33 @@ class UNet(nn.Module):
         return self.final_conv(x)
 
 
+class VarLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self,unet_out,scale_weights=[1.0, 0.5, 0.25],channel_weights=1.):
+        var_loss = 0
+        
+        B, C, H, W = unet_out.shape
+        if np.isscalar(channel_weights):
+            channel_weights = channel_weights*torch.ones(C)
+        else:
+            channel_weights = torch.tensor(channel_weights).float()
+        channel_weights = channel_weights.expand(B,-1)
+        if channel_weights.device != unet_out.device:
+            channel_weights = channel_weights.to(unet_out.device)
+        
+        for i, weight in enumerate(scale_weights):
+            # Downsample unet output
+            scaled = F.avg_pool2d(unet_out, kernel_size=2**i)
+            # [B,C]
+            weighted_variance = torch.var(scaled,dim=[-2,-1],correction=0)*channel_weights
+            weighted_variance = weighted_variance.mean()
+            var_loss += weight * weighted_variance
+                        
+        return var_loss
+
+
 class SmoothnessLoss(nn.Module):
     def __init__(self):
         super().__init__()
@@ -799,12 +842,20 @@ class ChemFitTrainer:
         smoothness_weight=1e-3,
         smoothness_scale_weights=[1,0.5,0.25],
         smoothness_channel_weights=1.,
+        var_weight=1e-3,
+        var_scale_weights=[1,0.5,0.25],
+        var_channel_weights=1.,
         negativity_weight=None,
         max_norm=1.0,
-        scale_random_error=True
+        scale_random_error=True,
+        clamp_max_sigma=None,
+        clamp_min_sigma=3.
     ):
         self.model.train()
         
+        if var_weight is not None:
+            var_loss_func = VarLoss()
+            
         if smoothness_weight is not None:
             smoothness_loss_func = SmoothnessLoss()
         
@@ -813,6 +864,7 @@ class ChemFitTrainer:
         
         total_loss = 0
         total_var_loss = 0
+        total_smo_loss = 0
         total_neg_loss = 0
         start_time = time.time()
         num_batches = len(self.data_loader)
@@ -836,6 +888,10 @@ class ChemFitTrainer:
                     unet_out*torch.cat([batch['VCD'],batch['WT']],dim=1)
                 ).sum(dim=1,keepdim=True)/error_scaler
                 target = -batch['DD']/error_scaler
+                # watch out target is -DD, so sink is positive in target, emission contamination is negative
+                target = torch.clamp(target,min=clamp_min_sigma,max=clamp_max_sigma)
+                if not scale_random_error and (clamp_max_sigma is not None or clamp_min_sigma is not None):
+                    self.logger.warning('make sure max/min clamp is absolute DD values!')
                 if (torch.sum(torch.isnan(predict)) > 0) or (torch.sum(torch.isinf(predict)) > 0):
                     self.logger.warning(f'epoch {epoch}, batch {ibatch} has invalid predict, skipping')
                     continue
@@ -846,6 +902,16 @@ class ChemFitTrainer:
                     predict=predict,target=target,
                     mask=batch['valid_mask']*batch['fit_mask']
                 )
+                if var_weight is not None:
+                    var_loss = var_loss_func(
+                        unet_out,
+                        scale_weights=var_scale_weights,
+                        channel_weights=var_channel_weights
+                    )
+                    loss += var_weight*var_loss
+                else:
+                    var_loss = torch.tensor(0.)
+                
                 if smoothness_weight is not None:
                     smoothness_loss = smoothness_loss_func(
                         unet_out,
@@ -889,7 +955,8 @@ class ChemFitTrainer:
                 self.optimizer.step()
             
             total_loss += loss.item()
-            total_var_loss += smoothness_loss.item()
+            total_var_loss += var_loss.item()
+            total_smo_loss += smoothness_loss.item()
             total_neg_loss += negativity_loss.item()
         
         # Epoch summary
@@ -897,9 +964,11 @@ class ChemFitTrainer:
         self.logger.warning(f'\rEpoch {epoch + 1} | Time: {epoch_time:.1f}s | Loss: {total_loss/num_batches:.4f} | Sample: {self.data_loader.batch_size}x{num_batches}')
         result = dict(
             train_loss=total_loss/num_batches,
-            smooth_loss=total_var_loss/num_batches,
+            var_loss=total_var_loss/num_batches,
+            smooth_loss=total_smo_loss/num_batches,
             epoch_time=epoch_time,
             sample_size=len(self.data_loader.dataset),
-            grad_norm=np.mean(norms)
+            grad_norm=np.mean(norms),
+            grad_norms=norms
         )
         return result
