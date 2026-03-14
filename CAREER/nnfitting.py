@@ -853,6 +853,9 @@ class ChemFitTrainer:
     ):
         self.model.train()
         
+        if clamp_min_sigma > 0:
+            clamp_min_sigma = -np.abs(clamp_min_sigma)
+        
         if var_weight is not None:
             var_loss_func = VarLoss()
             
