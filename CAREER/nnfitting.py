@@ -11,9 +11,9 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 class ChemFitConfig(dict):
-    def __init__(self,run_id,**kwargs):
+    def __init__(self,**kwargs):
         self.logger = logging.getLogger(__name__)
-        self['run_id'] = run_id
+        self['run_id'] = kwargs.pop('run_id','test')
         self['run_dir'] = kwargs.pop(
             'run_dir',os.path.join('/projects/academic/kangsun/kangsun/IDS/v03',self['run_id']))
         self['l3_path_pattern'] = kwargs.pop(
@@ -22,6 +22,10 @@ class ChemFitConfig(dict):
         )
         self['nei_dir'] = kwargs.pop('nei_dir','/projects/academic/kangsun/jobaerah/Data_NEI/')
         self['pretrained_model_path'] = kwargs.pop('pretrained_model_path',None)
+        self['west'] = kwargs.pop('west',-128)
+        self['east'] = kwargs.pop('east',-65)
+        self['south'] = kwargs.pop('south',24)
+        self['north'] = kwargs.pop('north',50)
         # fit_mask will be initialized using this threshold on annual NEI
         self['max_neinox'] = kwargs.pop('max_neinox',1e-9)
         self['grid_sizes'] = kwargs.pop('grid_sizes',[0.1])
@@ -30,6 +34,12 @@ class ChemFitConfig(dict):
             'l3s_ranges',
             [[f'{y}-01-01',f'{y}-12-31'] for y in range(2020,2025)]
         )
+        # fraction of raw l3s to be reserved for validation
+        self['val_fraction'] = kwargs.pop('val_fraction',0.2)
+        # val_fraction will be selected in trunks of this interval
+        self['val_interval'] = kwargs.pop('val_fraction','1M')
+        # make random selection reproducible
+        self['val_random_state'] = kwargs.pop('val_random_state',10)
         self['crop_x'] = kwargs.pop('crop_x',64)
         self['crop_y'] = kwargs.pop('crop_y',self['crop_x'])
         # a list of resampling rules for training dataset
@@ -40,7 +50,7 @@ class ChemFitConfig(dict):
         # a list of list of resampling offsets for training dataset
         self['train_offsets'] = kwargs.pop(
             'train_offsets',
-            [[None],['0d','5d','16d'],['0d','7d','14d'],['0d','18d','27d']]
+            [[None],['0d','5d','10d','16d'],['0d','7d','14d','21d'],['0d','18d','27d']]
         )
         # a list of stride sizes for training dataset
         self['train_stride_xs'] = kwargs.pop('train_strid_xs',[4,8,8,8])
@@ -54,15 +64,15 @@ class ChemFitConfig(dict):
         # a list of resampling rules for val/testing dataset
         self['eval_intervals'] = kwargs.pop(
             'eval_intervals',
-            ['1M','21d','28d','35d']
+            ['1M','35d']
         )
         # a list of list of resampling offsets for val/testing dataset
         self['eval_offsets'] = kwargs.pop(
             'eval_offsets',
-            [[None],['10d'],['21d'],['9d']]
+            [[None],['9d']]
         )
         # a list of stride sizes for val/testing dataset
-        self['eval_stride_xs'] = kwargs.pop('eval_strid_xs',[64,64,64,64])
+        self['eval_stride_xs'] = kwargs.pop('eval_strid_xs',[8,8])
         self['eval_stride_ys'] = kwargs.pop('eval_strid_ys',self['eval_stride_xs'].copy())
         # training configs
         self['lr'] = kwargs.pop('lr',1e-4)
@@ -73,6 +83,19 @@ class ChemFitConfig(dict):
         self['start_epoch'] = kwargs.pop('start_epoch',0)
         self['end_epoch'] = kwargs.pop('end_epoch',200)
         self['L1Loss_or_MSE'] = kwargs.pop('L1Loss_or_MSE','L1Loss')
+        
+        # fft loss
+        self['fft_weight_milestones'] = kwargs.pop(
+            'fft_weight_milestones',[0,0,100,5e-3])
+        # cutoff freq (0-1) on unet_out, freq higher than this will be penalized
+        self['fft_cutoff_freq'] = kwargs.pop('fft_cutoff_freq',0.5)
+        # fft weights on different channels of unet_out
+        self['fft_channel_weights'] = kwargs.pop(
+            'fft_channel_weights',[2,1]
+        )
+        # options for pinking unet_out, linear, quadratic, or binary
+        self['fft_schedule'] = kwargs.pop('fft_schedule','linear')
+        
         # var loss
         self['var_weight_milestones'] = kwargs.pop(
             'var_weight_milestones',[0,0,100,5e-3])
@@ -86,6 +109,7 @@ class ChemFitConfig(dict):
             'var_channel_weights',
             [2,1]
         )
+        
         # smoothness loss
         self['smoothness_weight_milestones'] = kwargs.pop(
             'smoothness_weight_milestones',[0,0,100,5e-3])
@@ -99,6 +123,7 @@ class ChemFitConfig(dict):
             'smoothness_channel_weights',
             [2,1]
         )
+        
         self['save_best_model'] = kwargs.pop('save_best_model',True)
         self['clamp_max_sigma'] = kwargs.pop('clamp_max_sigma',None)
         self['clamp_min_sigma'] = kwargs.pop('clamp_min_sigma',3.)
@@ -610,6 +635,83 @@ class UNet(nn.Module):
         return self.final_conv(x)
 
 
+class FFTLoss(nn.Module):
+    def __init__(self, cutoff_freq=0.5, weight_schedule='linear'):
+        '''
+        cutoff_freq: 
+            frequency threshold (0-1). frequencies above this are penalized
+        weight_schedule: 
+            'linear' - linear ramp up to max frequency
+            'quadratic' - quadratic ramp (more aggressive on very high freqs)
+            'binary' - equal weight for all frequencies above cutoff
+        '''
+        super().__init__()
+        self.cutoff_freq = cutoff_freq
+        self.weight_schedule = weight_schedule
+        
+    def _create_frequency_weights(self, H, W, device):
+        '''Create weight mask for frequency domain'''
+        # Create frequency grid
+        u = torch.fft.fftfreq(H, d=1.0, device=device).view(-1, 1)  # [H, 1]
+        v = torch.fft.fftfreq(W, d=1.0, device=device).view(1, -1)  # [1, W]
+        
+        # Radial frequency (normalized to [0, 1])
+        freq_radial = torch.sqrt(u**2 + v**2)
+        freq_radial = freq_radial / freq_radial.max()  # Normalize to [0, 1]
+        
+        # Create weight mask based on schedule
+        if self.weight_schedule == 'linear':
+            # Linear ramp from cutoff to 1.0
+            weights = torch.clamp((freq_radial - self.cutoff_freq) / (1 - self.cutoff_freq), 0, 1)
+        
+        elif self.weight_schedule == 'quadratic':
+            # Quadratic ramp (emphasizes very high frequencies)
+            weights = torch.clamp((freq_radial - self.cutoff_freq) / (1 - self.cutoff_freq), 0, 1)
+            weights = weights ** 2
+            
+        elif self.weight_schedule == 'binary':
+            # Binary mask: 1 for frequencies above cutoff, 0 below
+            weights = (freq_radial > self.cutoff_freq).float()
+        
+        else:
+            raise ValueError(f"Unknown weight_schedule: {self.weight_schedule}")
+        
+        return weights.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+    
+    def forward(self,unet_out,channel_weights=1.):
+        
+        B, C, H, W = unet_out.shape
+        device = unet_out.device
+        if np.isscalar(channel_weights):
+            channel_weights = channel_weights*torch.ones(C)
+        else:
+            channel_weights = torch.tensor(channel_weights).float()
+        channel_weights = channel_weights.expand(B,-1)
+        if channel_weights.device != unet_out.device:
+            channel_weights = channel_weights.to(unet_out.device)
+        
+        # Create frequency weights
+        weights = self._create_frequency_weights(H, W, device)  # [1, 1, H, W]
+            
+        # Compute 2D FFT
+        fft = torch.fft.fft2(unet_out)  # Complex tensor [B, C, H, W]
+
+        # Magnitude spectrum (power)
+        magnitude = torch.abs(fft)  # [B, C, H, W]
+
+        # Apply frequency weights
+        weighted_magnitude = magnitude * weights
+
+        # Sum weighted high frequencies, [B,C]
+        high_freq_energy = weighted_magnitude.sum(dim=(-2, -1))
+
+        # Normalize by total energy
+        total_energy = magnitude.sum(dim=(-2, -1)) + 1e-8
+        high_freq_ratio = channel_weights*high_freq_energy/total_energy
+        
+        return high_freq_ratio.mean()
+
+
 class VarLoss(nn.Module):
     def __init__(self):
         super().__init__()
@@ -845,6 +947,10 @@ class ChemFitTrainer:
         var_weight=1e-3,
         var_scale_weights=[1,0.5,0.25],
         var_channel_weights=1.,
+        fft_weight=1e-3,
+        fft_channel_weights=1.,
+        fft_cutoff_freq=0.5,
+        fft_schedule='linear',
         negativity_weight=None,
         max_norm=1.0,
         scale_random_error=True,
@@ -855,6 +961,10 @@ class ChemFitTrainer:
         
         if clamp_min_sigma > 0:
             clamp_min_sigma = -np.abs(clamp_min_sigma)
+        
+        if fft_weight is not None:
+            fft_loss_func = FFTLoss(
+                cutoff_freq=fft_cutoff_freq,weight_schedule=fft_schedule)
         
         if var_weight is not None:
             var_loss_func = VarLoss()
@@ -868,6 +978,7 @@ class ChemFitTrainer:
         total_loss = 0
         total_var_loss = 0
         total_smo_loss = 0
+        total_fft_loss = 0
         total_neg_loss = 0
         start_time = time.time()
         num_batches = len(self.data_loader)
@@ -905,6 +1016,15 @@ class ChemFitTrainer:
                     predict=predict,target=target,
                     mask=batch['valid_mask']*batch['fit_mask']
                 )
+                if fft_weight is not None:
+                    fft_loss = fft_loss_func(
+                        unet_out,
+                        channel_weights=fft_channel_weights
+                    )
+                    loss += fft_weight*fft_loss
+                else:
+                    fft_loss = torch.tensor(0.)
+                
                 if var_weight is not None:
                     var_loss = var_loss_func(
                         unet_out,
@@ -959,6 +1079,7 @@ class ChemFitTrainer:
             
             total_loss += loss.item()
             total_var_loss += var_loss.item()
+            total_fft_loss += fft_loss.item()
             total_smo_loss += smoothness_loss.item()
             total_neg_loss += negativity_loss.item()
         
@@ -968,6 +1089,7 @@ class ChemFitTrainer:
         result = dict(
             train_loss=total_loss/num_batches,
             var_loss=total_var_loss/num_batches,
+            fft_loss=total_fft_loss/num_batches,
             smooth_loss=total_smo_loss/num_batches,
             epoch_time=epoch_time,
             sample_size=len(self.data_loader.dataset),
