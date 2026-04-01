@@ -22,10 +22,21 @@ class ChemFitConfig(dict):
         )
         self['nei_dir'] = kwargs.pop('nei_dir','/projects/academic/kangsun/jobaerah/Data_NEI/')
         self['pretrained_model_path'] = kwargs.pop('pretrained_model_path',None)
-        self['west'] = kwargs.pop('west',-128)
-        self['east'] = kwargs.pop('east',-65)
-        self['south'] = kwargs.pop('south',24)
-        self['north'] = kwargs.pop('north',50)
+        self['train_wesns'] = kwargs.pop(
+            'train_wesns',[
+                dict(west=-104,east=-80.5,south=36,north=46)
+            ]
+        )
+        self['val_wesns'] = kwargs.pop(
+            'val_wesns',[
+                dict(west=-104,east=-95,south=38,north=46),
+                dict(west=-90,east=-81,south=37,north=45)
+            ]
+        )
+        self['west'] = kwargs.pop('west',min([d['west'] for d in self['train_wesns']]))
+        self['east'] = kwargs.pop('east',max([d['east'] for d in self['train_wesns']]))
+        self['south'] = kwargs.pop('south',min([d['south'] for d in self['train_wesns']]))
+        self['north'] = kwargs.pop('north',max([d['north'] for d in self['train_wesns']]))
         # fit_mask will be initialized using this threshold on annual NEI
         self['max_neinox'] = kwargs.pop('max_neinox',1e-9)
         self['grid_sizes'] = kwargs.pop('grid_sizes',[0.1])
@@ -38,6 +49,8 @@ class ChemFitConfig(dict):
         self['val_fraction'] = kwargs.pop('val_fraction',0.2)
         # val_fraction will be selected in trunks of this interval
         self['val_interval'] = kwargs.pop('val_fraction','1M')
+        # folds of cross validation
+        self['nfold'] = kwargs.pop('nfold',1)
         # make random selection reproducible
         self['val_random_state'] = kwargs.pop('val_random_state',10)
         self['crop_x'] = kwargs.pop('crop_x',64)
@@ -53,8 +66,8 @@ class ChemFitConfig(dict):
             [[None],['0d','5d','10d','16d'],['0d','7d','14d','21d'],['0d','18d','27d']]
         )
         # a list of stride sizes for training dataset
-        self['train_stride_xs'] = kwargs.pop('train_strid_xs',[4,8,8,8])
-        self['train_stride_ys'] = kwargs.pop('train_strid_ys',self['train_stride_xs'].copy())
+        self['train_stride_xs'] = kwargs.pop('train_stride_xs',[4,8,8,8])
+        self['train_stride_ys'] = kwargs.pop('train_stride_ys',self['train_stride_xs'].copy())
         # a list of milestones for training data crop fraction, as [epoch1, value1, epoch2, value2]
         self['train_milestones'] = kwargs.pop(
             'train_milestones',
@@ -72,8 +85,8 @@ class ChemFitConfig(dict):
             [[None],['9d']]
         )
         # a list of stride sizes for val/testing dataset
-        self['eval_stride_xs'] = kwargs.pop('eval_strid_xs',[8,8])
-        self['eval_stride_ys'] = kwargs.pop('eval_strid_ys',self['eval_stride_xs'].copy())
+        self['eval_stride_xs'] = kwargs.pop('eval_stride_xs',[8,8])
+        self['eval_stride_ys'] = kwargs.pop('eval_stride_ys',self['eval_stride_xs'].copy())
         # training configs
         self['lr'] = kwargs.pop('lr',1e-4)
         self['weight_decay'] = kwargs.pop('weight_decay',0.01)
@@ -113,6 +126,8 @@ class ChemFitConfig(dict):
         # smoothness loss
         self['smoothness_weight_milestones'] = kwargs.pop(
             'smoothness_weight_milestones',[0,0,100,5e-3])
+        self['smoothness_B_weight_milestones'] = kwargs.pop(
+            'smoothness_B_weight_milestones',[0,0,100,1])
         # smoothness on different levels of aggregation on unet_out
         self['smoothness_scale_weights'] = kwargs.pop(
             'smoothness_scale_weights',
@@ -125,8 +140,14 @@ class ChemFitConfig(dict):
         )
         
         self['save_best_model'] = kwargs.pop('save_best_model',True)
+        self['save_final_model'] = kwargs.pop('save_final_model',False)
         self['clamp_max_sigma'] = kwargs.pop('clamp_max_sigma',None)
         self['clamp_min_sigma'] = kwargs.pop('clamp_min_sigma',3.)
+        # hyperparameters for tuning. they must be iterable with the same length
+        self['hps'] = kwargs.pop(
+            'hps',
+            ['smoothness_weight_milestones','smoothness_B_weight_milestones']
+        )
         self.check()
         
     def check(self):
@@ -137,6 +158,14 @@ class ChemFitConfig(dict):
                 os.makedirs(self['run_dir'])
             except Exception as e:
                 self.logger.warning(e)
+        
+        if self['nfold'] > 1 and self['val_fraction'] > 0:
+            self.logger.warning('val fraction {} will be replaced by 1/nfold'.format(self['val_fraction']))
+        
+        if self['hps'] is not None:
+            nhps = [len(self[hp]) for hp in self['hps']]
+            if not all(x == nhps[0] for x in nhps):
+                self.logger.error('named hp must have the same length!')
         if not all(
             [
                 len(self[k])==len(self['train_intervals']) 
@@ -242,7 +271,7 @@ class ChemFitDataset(Dataset):
         resample_rule=pd.Timedelta(days=28),resample_offset=pd.Timedelta(days=0),min_D=2,
         crop_x=64,crop_y=64,stride_x=11,stride_y=11,
         crop_fraction=0.5,initial_random_state=10,randomize_crops_per_frame=True,
-        DD_scaling=1e9,VCD_scaling=1e4,WT_scaling=1e6,
+        DD_scaling=1e9,VCD_scaling=1e4,WT_scaling=1e6,remove_background_kw=None,
         westmost=-128,eastmost=-65,southmost=24,northmost=50,
         base_year=2018,jitter_kw=None
     ):
@@ -264,6 +293,13 @@ class ChemFitDataset(Dataset):
         self.do_jitter = False
         self.jitter_kw = jitter_kw
         
+        if remove_background_kw is not None:
+            self.remove_background = True
+            self.VCD_field = 'column_amount_p'
+        else:
+            self.remove_background = False
+            self.VCD_field = 'column_amount'
+        
         # spatial domain
         lonmesh,latmesh = np.meshgrid(l3s[0]['xgrid'],l3s[0]['ygrid'])
         xmesh = (lonmesh-westmost)/(eastmost-westmost)
@@ -284,6 +320,10 @@ class ChemFitDataset(Dataset):
         )[0] # resampled l3s, named as l3r
         time_mask = (np.array([np.nanmean(l['num_samples']) for l in l3r])>min_D)
         l3r = l3r.trim(time_mask=time_mask)
+        
+        if self.remove_background:
+            l3r.remove_background(**remove_background_kw)
+        
         start = l3r.df.index.to_timestamp(how='start')
         end = l3r.df.index.to_timestamp(how='end')
         mid = start + (end - start) / 2
@@ -296,7 +336,7 @@ class ChemFitDataset(Dataset):
             for k,v in l.items():
                 l[k] = torch.tensor(v).float()
             valid_mask = (~torch.isnan(l['column_amount_DD'])) &\
-            (~torch.isnan(l['column_amount'])) &\
+            (~torch.isnan(l[self.VCD_field])) &\
             (~torch.isnan(l['surface_altitude_DD'])) &\
             (l['num_samples'] > 0.7)
             l['valid_mask'] = valid_mask
@@ -472,7 +512,7 @@ class ChemFitDataset(Dataset):
                 i:i+self.crop_y,j:j+self.crop_x
             ].unsqueeze(0)*self.DD_scaling
         
-        VCD = l3['column_amount'][
+        VCD = l3[self.VCD_field][
             i:i+self.crop_y,j:j+self.crop_x
         ].unsqueeze(0)*self.VCD_scaling
         WT = l3['surface_altitude_DD'][
@@ -776,6 +816,47 @@ class SmoothnessLoss(nn.Module):
         return var_loss
 
 
+class LaplacianLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gradient_kernel = torch.tensor([[0,1,0],[1,-4,1],[0,1,0]], 
+                                          dtype=torch.float32).view(1,1,3,3)
+    
+    def forward(self,unet_out,scale_weights=[1.0, 0.5, 0.25],channel_weights=1.):
+        
+        B, C, H, W = unet_out.shape
+        if np.isscalar(channel_weights):
+            channel_weights = channel_weights*torch.ones(C)
+        else:
+            channel_weights = torch.tensor(channel_weights).float()
+        channel_weights = channel_weights.expand(B,-1)
+        if channel_weights.device != unet_out.device:
+            channel_weights = channel_weights.to(unet_out.device)
+        
+        lap_mean_loss = 0.
+        lap_std_loss = 0.
+        for i, weight in enumerate(scale_weights):
+            # Downsample unet output
+            scaled = F.avg_pool2d(unet_out, kernel_size=2**i)
+            
+            # Calculate Laplacian
+            if self.gradient_kernel.device != scaled.device:
+                self.gradient_kernel = self.gradient_kernel.to(scaled.device)
+            gradients = F.conv2d(
+                scaled, self.gradient_kernel.expand(C,1,3,3), 
+                groups=C, padding=1)
+            # [B,C] per scale
+            lap_BC = gradients.abs().mean(dim=[-2,-1])*channel_weights*weight
+            # std across B
+            lap_B_std = lap_BC.mean(dim=-1).std()
+            # mean laplacian per scale
+            lap_mean = lap_BC.mean()
+            lap_mean_loss += lap_mean
+            lap_std_loss += lap_B_std
+                        
+        return lap_mean_loss,lap_std_loss
+
+
 class NegativityLoss(nn.Module):
     def __init__(self):
         super().__init__()
@@ -942,6 +1023,7 @@ class ChemFitTrainer:
         self,
         epoch,
         smoothness_weight=1e-3,
+        smoothness_B_weight=1.,
         smoothness_scale_weights=[1,0.5,0.25],
         smoothness_channel_weights=1.,
         var_weight=1e-3,
@@ -955,7 +1037,8 @@ class ChemFitTrainer:
         max_norm=1.0,
         scale_random_error=True,
         clamp_max_sigma=None,
-        clamp_min_sigma=3.
+        clamp_min_sigma=3.,
+        verbose=False
     ):
         self.model.train()
         
@@ -970,7 +1053,7 @@ class ChemFitTrainer:
             var_loss_func = VarLoss()
             
         if smoothness_weight is not None:
-            smoothness_loss_func = SmoothnessLoss()
+            smoothness_loss_func = LaplacianLoss()
         
         if negativity_weight is not None:
             negativity_loss_func = NegativityLoss()
@@ -978,6 +1061,7 @@ class ChemFitTrainer:
         total_loss = 0
         total_var_loss = 0
         total_smo_loss = 0
+        total_smb_loss = 0
         total_fft_loss = 0
         total_neg_loss = 0
         start_time = time.time()
@@ -1036,14 +1120,16 @@ class ChemFitTrainer:
                     var_loss = torch.tensor(0.)
                 
                 if smoothness_weight is not None:
-                    smoothness_loss = smoothness_loss_func(
+                    smoothness_loss, smoothness_B_loss = smoothness_loss_func(
                         unet_out,
                         scale_weights=smoothness_scale_weights,
                         channel_weights=smoothness_channel_weights
                     )
                     loss += smoothness_weight*smoothness_loss
+                    if smoothness_B_weight is not None:
+                        loss += smoothness_B_weight*smoothness_B_loss
                 else:
-                    smoothness_loss = torch.tensor(0.)
+                    smoothness_loss,smoothness_B_loss = torch.tensor(0.),torch.tensor(0.)
                     
                 if negativity_weight is not None:
                     negativity_loss = negativity_loss_func(unet_out)
@@ -1081,19 +1167,23 @@ class ChemFitTrainer:
             total_var_loss += var_loss.item()
             total_fft_loss += fft_loss.item()
             total_smo_loss += smoothness_loss.item()
+            total_smb_loss += smoothness_B_loss.item()
             total_neg_loss += negativity_loss.item()
         
         # Epoch summary
         epoch_time = time.time() - start_time
-        self.logger.warning(f'\rEpoch {epoch + 1} | Time: {epoch_time:.1f}s | Loss: {total_loss/num_batches:.4f} | Sample: {self.data_loader.batch_size}x{num_batches}')
+        if verbose:
+            self.logger.warning(f'\rEpoch {epoch + 1} | Time: {epoch_time:.1f}s | Loss: {total_loss/num_batches:.4f} | Sample: {self.data_loader.batch_size}x{num_batches}')
         result = dict(
             train_loss=total_loss/num_batches,
             var_loss=total_var_loss/num_batches,
             fft_loss=total_fft_loss/num_batches,
             smooth_loss=total_smo_loss/num_batches,
+            smooth_B_loss=total_smb_loss/num_batches,
             epoch_time=epoch_time,
             sample_size=len(self.data_loader.dataset),
-            grad_norm=np.mean(norms),
+            grad_norm=np.nanmean(norms),
+            nan_norm=np.sum(np.isnan(norms)),
             grad_norms=norms
         )
         return result
