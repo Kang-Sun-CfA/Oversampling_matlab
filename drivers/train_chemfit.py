@@ -353,7 +353,7 @@ for ifold in range(config['nfold']):
                     best_val_loss = val_loss
                     best_val_epoch = epoch
                     if config['save_best_model'] is not False:
-                        model_filename = f'best_model_fold{ifold}_hp{iph}.pt'
+                        model_filename = f'best_model_fold{ifold}_hp{ihp}.pt'
                         trainer.save_model(
                             path=os.path.join(config['run_dir'],model_filename),
                             epoch=epoch
@@ -371,11 +371,11 @@ for ifold in range(config['nfold']):
             y=[f'fold{ifold}_hp{ihp}_smooth_loss'],ax=ax
         )
         fig_lap.savefig(os.path.join(config['run_dir'],'lap_loss_plot.pdf'))
-        if config['save_best_model'] is not False:
-            model_filename = f'final_model_fold{ifold}_hp{iph}.pt'
+        if config['save_final_model'] is not False:
+            model_filename = f'final_model_fold{ifold}_hp{ihp}.pt'
             trainer.save_model(
                 path=os.path.join(config['run_dir'],model_filename),
                 epoch=epoch
             )
-loss_df = pd.concat(loss_dfs,axis=1)
-loss_df.to_csv(os.path.join(config['run_dir'],'loss.csv'))
+        loss_df = pd.concat(loss_dfs,axis=1)
+        loss_df.to_csv(os.path.join(config['run_dir'],'loss.csv'))
