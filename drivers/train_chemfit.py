@@ -3,6 +3,7 @@ import pandas as pd
 from scipy.ndimage import gaussian_filter
 import sys,os,glob
 sys.path.append('/user/kangsun/Oversampling_matlab/')
+import time
 import logging
 # logging.basicConfig(level=logging.INFO)
 from popy import Level3_List, Level3_Data
@@ -228,21 +229,23 @@ fig_lap,axs_lap = plt.subplots(
     np.ceil(config['nfold']/3).astype(int),3,
     figsize=(12,5),sharex=True,sharey=True,constrained_layout=True
 )
+
+# decide which loss criteria makes the best model
+criteria_name = config['best_criteria']['name']
+rolling_window = config['best_criteria']['rolling_window']
+if criteria_name == 'val_loss' and not eval_ds_dict:
+    logging.warning('val not on, use train_loss as criteria instead of val_loss')
+    criteria_name = 'train_loss'
+
 # one model per fold per hyperparameter
 for ifold in range(config['nfold']):
     # build val loader for this fold if needed
     if eval_ds_dict:
         vloader_dict = {
             k[1:]:DataLoader(
-                v,batch_size=1,shuffle=False,pin_memory=(device.type == 'cuda')
+                v,batch_size=config['batch_size'],shuffle=False,pin_memory=(device.type == 'cuda')
             ) for k,v in val_ds_dict.items() if k[0]==f'fold{ifold}'
         }
-        all_vloader = DataLoader(
-            ConcatDataset(
-                [v for k,v in val_ds_dict.items() if k[0]==f'fold{0}']
-            ),
-            batch_size=1,shuffle=False,pin_memory=(device.type == 'cuda')
-        )
     
     # loop over hyperparameters
     for ihp in range(nhp):
@@ -285,8 +288,8 @@ for ifold in range(config['nfold']):
             )
             loss_df = pd.concat([loss_df,vloss_df],axis=1)
         
-        best_val_loss = float('inf')
-        best_val_epoch = 0
+        best_loss = float('inf')
+        best_epoch = 0
         # loop over epochs
         for iepoch,epoch in enumerate(epochs):
             dss = []
@@ -335,31 +338,50 @@ for ifold in range(config['nfold']):
                 fft_channel_weights=config['fft_channel_weights'],
                 max_norm=config['max_norm'],
                 clamp_max_sigma=config['clamp_max_sigma'],
-                clamp_min_sigma=config['clamp_min_sigma']
+                clamp_min_sigma=config['clamp_min_sigma'],
+                verbose=config['interactive']
             )
             for k in result_flds:
                 loss_df[f'fold{ifold}_hp{ihp}_{k}'].iloc[iepoch] = result[k]
             if eval_ds_dict:
-                val_loss = trainer.validate(all_vloader)
-                header = f'fold{ifold}_hp{ihp}_val_loss'
-                loss_df[header].iloc[iepoch] = val_loss
+                if config['interactive']:
+                    val_t0 = time.time()
                 for k,v in val_ds_dict.items(): 
                     if k[0]==f'fold{ifold}':
                         val_id = '_'.join(k[1:])
+                        val_loss_ds = trainer.validate(vloader_dict[k[1:]])
                         loss_df[
                             f'{header}_{val_id}'
-                        ].iloc[iepoch] = trainer.validate(vloader_dict[k[1:]])
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    best_val_epoch = epoch
-                    if config['save_best_model'] is not False:
-                        model_filename = f'best_model_fold{ifold}_hp{ihp}.pt'
-                        trainer.save_model(
-                            path=os.path.join(config['run_dir'],model_filename),
-                            epoch=epoch
-                        )
+                        ].iloc[iepoch] = val_loss_ds
+                        # default the first val domain/interval as the overall val loss
+                        if k == (f'fold{ifold}','domain0',config['eval_intervals'][0]):
+                            val_loss = val_loss_ds
+                            header = f'fold{ifold}_hp{ihp}_val_loss'
+                            loss_df[header].iloc[iepoch] = val_loss
+                if config['interactive']:
+                    val_t = time.time()-val_t0
+                    logging.warning(f'inference takes {val_t:.1f}s')
+                if False:#config['interactive']:
+                    ax = axs_val.ravel()[ifold]
+                    loss_df.plot(
+                        y=[f'fold{ifold}_hp{ihp}_val_loss'],ax=ax
+                    )
+                    fig_val.savefig(os.path.join(config['run_dir'],'val_loss_plot.pdf'))
+            
+            df_criteria = f'fold{ifold}_hp{ihp}_{criteria_name}'
+            criteria_value = loss_df[df_criteria].iloc[max(iepoch-rolling_window+1,0):iepoch+1].mean()
+            if criteria_value < best_loss:
+                best_loss = criteria_value
+                best_epoch = epoch
+                if config['save_best_model'] is not False:
+                    model_filename = f'best_model_fold{ifold}_hp{ihp}.pt'
+                    trainer.save_model(
+                        path=os.path.join(config['run_dir'],model_filename),
+                        epoch=epoch
+                    )                
+        # end of epoch loop
         loss_dfs.append(loss_df)
-        if eval_ds_dict:
+        if eval_ds_dict and not config['interactive']:
             ax = axs_val.ravel()[ifold]
             loss_df.plot(
                 y=[f'fold{ifold}_hp{ihp}_val_loss'],ax=ax

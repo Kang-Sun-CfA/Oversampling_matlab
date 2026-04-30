@@ -88,8 +88,12 @@ class ChemFitConfig(dict):
         self['eval_stride_xs'] = kwargs.pop('eval_stride_xs',[8,8])
         self['eval_stride_ys'] = kwargs.pop('eval_stride_ys',self['eval_stride_xs'].copy())
         # training configs
-        self['lr'] = kwargs.pop('lr',1e-4)
-        self['weight_decay'] = kwargs.pop('weight_decay',0.01)
+        self['lr'] = kwargs.pop(
+            'lr',dict(temporal_film=1e-4,other=1e-4)
+        )
+        self['weight_decay'] = kwargs.pop(
+            'weight_decay',dict(temporal_film=1e-3,other=1e-2)
+        )
         self['batch_size'] = kwargs.pop('batch_size',256)
         self['max_norm'] = kwargs.pop('max_norm',1.0)
         self['initial_grad_scaler'] = kwargs.pop('initial_grad_scaler',1024.0)
@@ -140,14 +144,18 @@ class ChemFitConfig(dict):
         )
         
         self['save_best_model'] = kwargs.pop('save_best_model',True)
+        self['best_criteria'] = kwargs.pop(
+            'best_criteria',dict(name='val_loss',rolling_window=3)
+        )
         self['save_final_model'] = kwargs.pop('save_final_model',False)
         self['clamp_max_sigma'] = kwargs.pop('clamp_max_sigma',None)
         self['clamp_min_sigma'] = kwargs.pop('clamp_min_sigma',3.)
         # hyperparameters for tuning. they must be iterable with the same length
         self['hps'] = kwargs.pop(
-            'hps',
-            ['smoothness_weight_milestones','smoothness_B_weight_milestones']
+            'hps',[]
+#             ['smoothness_weight_milestones','smoothness_B_weight_milestones']
         )
+        self['interactive'] = kwargs.pop('interactive',False)
         self.check()
         
     def check(self):
@@ -159,6 +167,10 @@ class ChemFitConfig(dict):
             except Exception as e:
                 self.logger.warning(e)
         
+        if isinstance(self['lr'],dict) and isinstance(self['weight_decay'],dict):
+            if self['lr'].keys() != self['weight_decay'].keys():
+                self.logger.error('keys of lr and wd have to be the same!')
+        
         if self['nfold'] > 1 and self['val_fraction'] > 0:
             self.logger.warning('val fraction {} will be replaced by 1/nfold'.format(self['val_fraction']))
         
@@ -166,6 +178,9 @@ class ChemFitConfig(dict):
             nhps = [len(self[hp]) for hp in self['hps']]
             if not all(x == nhps[0] for x in nhps):
                 self.logger.error('named hp must have the same length!')
+        else:
+            self['hps'] = []
+        
         if not all(
             [
                 len(self[k])==len(self['train_intervals']) 
@@ -588,7 +603,7 @@ class TemporalFiLM(nn.Module):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(temporal_dim,spatial_dim*2),  # Outputs [gamma, beta]
-            nn.SiLU()  # Smooth activation (optional)
+#             nn.SiLU()  # Smooth activation (optional)
         )
         self.temporal_dim = temporal_dim
         self.spatial_dim = spatial_dim
@@ -901,8 +916,32 @@ class ChemFitTrainer:
         
         self.model = model.to(self.device)
         
-        self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),lr=lr,weight_decay=weight_decay)
+        if isinstance(lr,dict):
+            dicts_to_optim = []
+            for p_group_name,p_group_lr in lr.items():
+                if p_group_name != 'other':
+                    params = [
+                        p for n,p in self.model.named_parameters()
+                        if p_group_name in n
+                    ]
+                else:
+                    params = [
+                        p for n,p in self.model.named_parameters()
+                        if not any (pgn in n for pgn in lr.keys() if pgn != 'other')
+                    ]
+                if isinstance(weight_decay,dict):
+                    p_group_wd = weight_decay[p_group_name]
+                else:
+                    p_group_wd = weight_decay
+                dicts_to_optim.append(
+                    dict(
+                        params=params,lr=p_group_lr,weight_decay=p_group_wd
+                    )
+                )
+            self.optimizer = torch.optim.AdamW(dicts_to_optim)
+        else:
+            self.optimizer = torch.optim.AdamW(
+                self.model.parameters(),lr=lr,weight_decay=weight_decay)
         
         if L1Loss_or_MSE == 'MSE':
             self.data_loss_func = MaskedLoss(loss_func=nn.MSELoss(reduction='none'))
