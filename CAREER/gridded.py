@@ -19,6 +19,8 @@ import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import sys,os,glob
 from popy import Level3_Data, F_center2edge, Level3_List
+from scipy.ndimage import gaussian_filter
+from shapely.geometry import Polygon
 
 # code hosting classes for gridded, raster like datasets that interact with popy data
 
@@ -395,10 +397,270 @@ class CDL:
         nc.close()
         return self
 
+
+class BUI():
+    '''Bottom-Up Inventory
+    important attributes:
+    (raw_)data: time x channel x lat (y) x lon (x)
+    df: index should be series of time
+    '''
+    def __init__(
+        self,dt_array,name='inventory',west=-130,east=-63,south=23,north=52
+    ):
+        self.logger = logging.getLogger(__name__)
+        self.name = name
+        self.west = west
+        self.east = east
+        self.south = south
+        self.north = north
+        if not isinstance(dt_array,pd.PeriodIndex):
+            self.logger.warning('converting dt_array to PeriodIndex')
+            try:
+                self.dt_array = pd.PeriodIndex(dt_array)
+            except Exception as e:
+                self.dt_array = dt_array
+                self.logger.warning(e)
+        else:
+            self.dt_array = dt_array
+        self.df = pd.DataFrame(
+            index=self.dt_array,
+            data=dict(count=range(len(dt_array)))
+        )
+        
+    def read_CAMS_NOx(self,fn_pattern,fields=['sum'],gaussian_sigma=None):
+        fns = []
+        for yr in self.df.index.start_time.year.unique().sort_values():
+            fns.append(pd.Timestamp(year=yr,month=1,day=1).strftime(fn_pattern))
+        self.fns = fns
+        self.fields = np.array(fields)
+        for ifn,fn in enumerate(fns):
+            with Dataset(fn,'r') as nc:
+                if ifn == 0:
+                    xgrid = nc['lon'][:].data
+                    ygrid = nc['lat'][:].data
+                    xgrid_size = np.abs(np.nanmedian(np.diff(xgrid)))
+                    ygrid_size = np.abs(np.nanmedian(np.diff(ygrid)))
+                    self.raw_xgrid_size = xgrid_size
+                    self.raw_ygrid_size = ygrid_size
+                    if not np.isclose(xgrid_size,ygrid_size,rtol=1e-03):
+                        self.logger.warning(
+                            f'x grid size {xgrid_size} does not equal to y grid size {ygrid_size}'
+                        )
+                    self.raw_grid_size = (xgrid_size+ygrid_size)/2
+                    xmask = (xgrid >= self.west) & (xgrid <= self.east)
+                    ymask = (ygrid >= self.south) & (ygrid <= self.north)
+                    xidx = np.arange(len(xmask),dtype=int)[xmask]
+                    yidx = np.arange(len(ymask),dtype=int)[ymask]
+                    self.raw_xgrid = xgrid[xmask]
+                    self.raw_ygrid = ygrid[ymask]
+                    xmesh,ymesh = np.meshgrid(self.raw_xgrid,self.raw_ygrid)
+                    self.raw_data = np.zeros(
+                        (len(self.df.index),
+                         len(fields),
+                         len(self.raw_ygrid),
+                         len(self.raw_xgrid))
+                    )
+                    self.raw_grid_size_in_m2 = np.cos(
+                        np.deg2rad(ymesh))*np.square(self.raw_grid_size*111e3)
+                for ifield,field in enumerate(fields):
+                    image = nc[field][:,yidx,xidx].filled(np.nan)/0.030 #kgNO to mol
+                    if gaussian_sigma:
+                        image = np.array(
+                            [
+                                gaussian_filter(img,sigma=gaussian_sigma,mode='reflect')
+                                for img in image
+                            ]
+                        )
+                    self.raw_data[
+                        ifn*12:(ifn+1)*12,ifield,:,:
+                    ] = image
+        self.add_stats_to_df(raw=True,name=None,stats='mean')
+    
+    def blur(self,gaussian_sigma,raw=True):
+        data_name = 'raw_data' if raw else 'data'
+        for itime in range(self.raw_data.shape[0]):
+            for ichannel in range(self.raw_data.shape[1]):
+                getattr(self,data_name)[itime,ichannel] = \
+                gaussian_filter(
+                    getattr(self,data_name)[itime,ichannel],
+                    sigma=gaussian_sigma,mode='reflect'
+                )
+                
+    def regrid_to_l3(self,l3=None,xgrid=None,ygrid=None,method='interpolate'):        
+        if xgrid is None:
+            xgrid = l3['xgrid']
+        if ygrid is None:
+            ygrid = l3['ygrid']
+        self.xgrid,self.ygrid = xgrid,ygrid
+        xgrid_size = np.abs(np.nanmedian(np.diff(xgrid)))
+        ygrid_size = np.abs(np.nanmedian(np.diff(ygrid)))
+        self.xgrid_size = xgrid_size
+        self.ygrid_size = ygrid_size
+        
+        if np.array_equal(xgrid,self.raw_xgrid) and np.array_equal(ygrid,self.raw_ygrid):
+            self.logger.warning('easy, grids are the same')
+            self.data = self.raw_data
+            return
+        self.data = np.zeros(
+            (
+                self.raw_data.shape[0],
+                self.raw_data.shape[1],
+                len(ygrid),len(xgrid)
+            )
+        )
+        if method in ['interpolate','interpolation']:
+            ymesh,xmesh = np.meshgrid(ygrid,xgrid)
+            for itime in range(self.raw_data.shape[0]):
+                for ichannel in range(self.raw_data.shape[1]):
+                    f = RegularGridInterpolator(
+                        (self.raw_ygrid,self.raw_xgrid),
+                        self.raw_data[itime,ichannel],bounds_error=False
+                    )
+                    self.data[itime,ichannel] = f((ymesh,xmesh)).T
+        elif method in ['tessellate','tessellation']:
+            # make a 2d array of source grid polygons
+            spolygons = np.empty((len(self.raw_ygrid),len(self.raw_xgrid)),dtype=object)
+            for iy,y in enumerate(self.raw_ygrid):
+                for ix,x in enumerate(self.raw_xgrid):
+                    sx = [
+                        x-self.raw_xgrid_size/2,
+                        x-self.raw_xgrid_size/2,
+                        x+self.raw_xgrid_size/2,
+                        x+self.raw_xgrid_size/2
+                    ]
+                    sy = [
+                        y-self.raw_ygrid_size/2,
+                        y+self.raw_ygrid_size/2,
+                        y+self.raw_ygrid_size/2,
+                        y-self.raw_ygrid_size/2
+                    ]
+                    spolygons[iy,ix] = Polygon(np.vstack((sx,sy)).T)
+            # complex 2d array, each element is a 2d array for a target grid cell
+            # each row of that 2d array corresponds to an overlapping grid cell
+            # columns are y/x index and fractional area of all overlapping cells
+            source_weights = np.empty((len(ygrid),len(xgrid)),dtype=object)
+            # loop over each target grid
+            for iy,y in enumerate(ygrid):
+                for ix,x in enumerate(xgrid):
+                    # make a polygon for each target grid
+                    tx = [x-xgrid_size/2,x-xgrid_size/2,x+xgrid_size/2,x+xgrid_size/2]
+                    ty = [y-ygrid_size/2,y+ygrid_size/2,y+ygrid_size/2,y-ygrid_size/2]
+                    tpolygon = Polygon(np.vstack((tx,ty)).T)
+                    # identify source grids that may overlap with the target grid
+                    xmask = (bui.raw_xgrid+bui.raw_xgrid_size/2 >= x-xgrid_size/2) &\
+                    (bui.raw_xgrid-bui.raw_xgrid_size/2 <= x+xgrid_size/2)
+                    ymask = (bui.raw_ygrid+bui.raw_ygrid_size/2 >= y-ygrid_size/2) &\
+                    (bui.raw_ygrid-bui.raw_ygrid_size/2 <= y+ygrid_size/2)
+                    xidxs = np.arange(len(xmask),dtype=int)[xmask]
+                    yidxs = np.arange(len(ymask),dtype=int)[ymask]
+                    wts = np.empty((len(yidxs)*len(xidxs),3))
+                    iwt = 0
+                    for yidx in yidxs:
+                        for xidx in xidxs:
+                            spolygon = spolygons[yidx,xidx]
+                            wts[iwt,:2] = [yidx,xidx]
+                            wts[iwt,2] = tpolygon.intersection(spolygon).area
+                            iwt += 1
+                    wts[:,2] = wts[:,2]/wts[:,2].sum()
+                    source_weights[iy,ix] = wts
+            for itime in range(self.raw_data.shape[0]):
+                for ichannel in range(self.raw_data.shape[1]):
+                    raw_map = self.raw_data[itime,ichannel]
+                    for iy,y in enumerate(ygrid):
+                        for ix,x in enumerate(xgrid):
+                            wts = source_weights[iy,ix]
+                            rows,cols = zip(*wts[:,:2].astype(int))
+                            self.data[itime,ichannel,iy,ix] = \
+                            raw_map[rows,cols].dot(wts[:,2])
+        
+        self.add_stats_to_df(raw=False,name=None,stats='mean')
+    
+    def add_stats_to_df(self,raw=True,name=None,stats='mean'):
+        name = name or ''
+        if raw:
+            data = self.raw_data
+            name += 'raw'
+        else:
+            data = self.data
+            name += 'regrid'
+        if stats == 'mean':
+            for ifield,field in enumerate(self.fields):
+                self.df[f'{name}_{field}'] = data[:,ifield,:,:].mean(axis=(-1,-2))
+    
+    def resample(self,rule='month_of_year',offset=None):
+        if rule == 'month_of_year':
+            resampler = self.df.groupby(by=self.df.index.month)
+            dt_array = resampler.indices.keys()
+        else:
+            resampler = self.df.resample(rule,offset=offset)
+            dt_array = pd.PeriodIndex(resampler.indices.keys())
+        new_bui = BUI(
+            dt_array=dt_array,name=f'{self.name}_{rule}',
+            west=self.west,east=self.east,south=self.south,north=self.north
+        )
+        new_bui.raw_xgrid,new_bui.raw_ygrid,new_bui.raw_grid_size,new_bui.fields = \
+        self.raw_xgrid,self.raw_ygrid,self.raw_grid_size,self.fields
+        new_bui.raw_data = np.empty(
+            (
+                len(new_bui.df.index),
+                self.raw_data.shape[1],
+                self.raw_data.shape[2],
+                self.raw_data.shape[3]
+            )
+        )
+        for i,(k,v) in enumerate(resampler.indices.items()):
+            new_bui.raw_data[i] = self.raw_data[v].mean(axis=0)
+        new_bui.add_stats_to_df(raw=True,name=None,stats='mean')
+        return new_bui
+    
+    def plot(
+        self,ax=None,plot_raw=True,scale='log',field='sum',dt=None,
+        mask_threshold=None,**kwargs
+    ):
+        if ax is None:
+            fig,ax = plt.subplots(1,1,figsize=(10,5),
+                                  subplot_kw={"projection": ccrs.PlateCarree()})
+        else:
+            fig = plt.gcf()
+        if plot_raw:
+            xgrid,ygrid,data = self.raw_xgrid,self.raw_ygrid,self.raw_data
+        else:
+            xgrid,ygrid,data = self.xgrid,self.ygrid,self.data
+        if mask_threshold:
+            data = data < mask_threshold
+            scale = 'linear'
+        data = data[:,self.fields==field,:,:].squeeze(axis=1)
+        if dt is None:
+            data = data.mean(axis=0)
+        else:
+            data = data[self.df.index==dt,:,:].squeeze(axis=0)
+        if scale == 'log':
+            from matplotlib.colors import LogNorm
+            if 'vmin' in kwargs:
+                inputNorm = LogNorm(vmin=kwargs['vmin'],vmax=kwargs['vmax'])
+                kwargs.pop('vmin');
+                kwargs.pop('vmax');
+            else:
+                inputNorm = LogNorm()
+            pc = ax.pcolormesh(*F_center2edge(xgrid,ygrid),data
+                               ,norm=inputNorm,
+                                         **kwargs)
+        else:
+            pc = ax.pcolormesh(*F_center2edge(xgrid,ygrid),data,**kwargs)
+        ax.set_extent([self.west,self.east,self.south,self.north])
+        ax.coastlines(resolution='50m', color='black', linewidth=1)
+        ax.add_feature(cfeature.STATES.with_scale('50m'), facecolor='None',
+                       edgecolor='black', linewidth=1)
+        cb = fig.colorbar(pc,ax=ax)
+        figout = {'fig':fig,'pc':pc,'ax':ax,'cb':cb}
+        return figout
+
+
 class Inventory(dict):
     '''class based on dict, representing a gridded emission inventory'''
     def __init__(self,name='inventory',west=-180,east=180,south=-90,north=90):
         self.logger = logging.getLogger(__name__)
+        self.logger.warning('Inventory is obsolete. Use BUI instead!')
         self.name = name
         self.west = west
         self.east = east
