@@ -1,13 +1,9 @@
 import logging
 try:
     import rasterio, pyproj
-    import geopandas as gpd
-    from rasterio.features import geometry_mask
-    from shapely.geometry import mapping
-    from rasterio.transform import from_origin
 except Exception as e:
     logging.warning(e)
-    logging.warning('CDL class may not work without these packages')
+    logging.warning('CDL.get_fractions does not work without these packages')
 from netCDF4 import Dataset
 import numpy as np
 import pandas as pd
@@ -23,8 +19,193 @@ from scipy.ndimage import gaussian_filter
 from shapely.geometry import Polygon
 
 # code hosting classes for gridded, raster like datasets that interact with popy data
-
 class CDL:
+    '''class to handle crop data layer (cdl) data'''
+    def __init__(self,lcc_path=None,lcc_df=None):
+        self.logger = logging.getLogger(__name__)
+        if lcc_df is None:
+            if lcc_path is None:
+                self.logger.warning('no lcc provided, trying download')
+                url = "https://www.nass.usda.gov/Research_and_Science/Cropland/docs/cdl_legend_colors.html"
+                html_tables = pd.read_html(url)
+                lcc_df = html_tables[0].drop(columns=['Color'])
+            else:
+                lcc_df = pd.read_csv(lcc_path,index_col=0)
+        self.lcc_df = lcc_df
+    
+    def combine(self,cdl_name_codes=None):
+        if cdl_name_codes is None:
+            cdl_name_codes = [
+                ('corn',[1]),
+                ('soybean',[5]),
+                ('dev_o',[121]),
+                ('dev_l',[122]),
+                ('dev_m',[123]),
+                ('dev_h',[124]),
+                ('wetland',[190,195]),
+                ('forest',[141,143,142])
+            ]
+        new_shape = list(self.data.shape)
+        new_shape[1] = len(cdl_name_codes)+1
+        new_data = np.zeros(new_shape,dtype=np.float32)
+        lcc_df = []
+        for i,name_code in enumerate(cdl_name_codes):
+            new_data[:,i] = self.data[:,self.lcc_df['Code'].isin(name_code[1])].sum(axis=1)
+            local_df = self.lcc_df.loc[self.lcc_df['Code'] == name_code[1][0]].copy()
+            local_df['Class_Name'] = name_code[0]
+            lcc_df.append(local_df)
+        new_data[:,-1] = 1-new_data[:,:-1].sum(axis=1)
+        assert all(new_data.ravel()>=0) and all(new_data.ravel()<=1)
+        lcc_df = pd.concat(lcc_df)
+        local_df[
+            ['Code','Class_Name','ESRI_Red','ESRI_Green','ESRI_Blue','ColorHex']
+        ] = [0,'other',255,255,255,'#FFFFFF']
+        lcc_df = pd.concat([lcc_df,local_df]).reset_index(drop=True)
+        new_cdl = CDL(lcc_df=lcc_df)
+        new_cdl.df = self.df.copy()
+        new_cdl.data = new_data
+        new_cdl.cdl_name_codes = cdl_name_codes
+        return new_cdl
+        
+    def read_nc(self,filenames,years):
+        assert len(filenames) == len(years)
+        self.df = pd.DataFrame(
+            index=pd.DatetimeIndex([pd.Timestamp(y,1,1) for y in years]).to_period(),
+            data=range(len(years))
+        )
+        for iyear,(filename,year) in enumerate(zip(filenames,years)):
+            with Dataset(filename,'r') as nc:
+                assert year == nc.variables['year'][:].squeeze()
+                if iyear == 0:
+                    self.xgrid = nc.variables['lon'][:].filled(np.nan)
+                    self.ygrid = nc.variables['lat'][:].filled(np.nan)
+                    data = nc.variables['data'][:].filled(np.nan)
+                    self.data = np.zeros(
+                        (len(years),)+data.shape[1:],dtype=np.float32
+                    )
+                self.data[iyear] = data
+    
+    def save_nc(self,filenames,years):
+        for iyear,(filename,year) in enumerate(zip(filenames,years)):
+            with Dataset(filename,'w',format='NETCDF4') as nc:
+                nc.createDimension('B',1)
+                nc.createDimension('C',self.data.shape[1])
+                nc.createDimension('H',self.data.shape[2])
+                nc.createDimension('W',self.data.shape[3])
+                var = nc.createVariable('data',np.float32,('B','C','H','W'))
+                var[:] = self.data[iyear]
+                var = nc.createVariable('lat',np.float32,('H'))
+                var[:] = self.ygrid
+                var = nc.createVariable('lon',np.float32,('W'))
+                var[:] = self.xgrid
+                var = nc.createVariable('year',np.float32,('B'))
+                var[:] = year
+    
+    def get_year_fractions(self,filename,codes,xgrid,ygrid,block_length):
+        nrows,ncols = len(ygrid),len(xgrid)
+        # open tif file
+        land_cover = rasterio.open(filename)
+        cdl_crs = land_cover.crs
+        wgs84 = pyproj.CRS('EPSG:4326')
+        cdl_proj = pyproj.CRS(cdl_crs)
+        # transformer from wgs84 to cdl' projection
+        transformer = pyproj.Transformer.from_crs(wgs84,cdl_proj,always_xy=True)
+        # loop over blocks
+        iblock = 0
+        block_fractions = []
+        nblock_row = len(range(0,nrows,block_length))
+        nblock_col = len(range(0,ncols,block_length))
+        nblock = nblock_row*nblock_col
+        self.logger.info(f'divide l3 grid to {nblock} blocks')
+        for i_start in range(0,nrows,block_length):
+            for j_start in range(0,ncols,block_length):
+                iblock+=1
+                i_end = min(i_start + block_length, nrows)
+                j_end = min(j_start + block_length, ncols)
+                ygrid_block = ygrid[i_start:i_end]
+                xgrid_block = xgrid[j_start:j_end]
+                # l3 grid corners to cdl's crs
+                xmeshr_cdl,ymeshr_cdl = transformer.transform(
+                    *np.meshgrid(
+                    *F_center2edge(xgrid_block,ygrid_block)))
+                min_x = max(land_cover.bounds.left,np.min(xmeshr_cdl))
+                max_x = min(land_cover.bounds.right,np.max(xmeshr_cdl))
+                min_y = max(land_cover.bounds.bottom,np.min(ymeshr_cdl))
+                max_y = min(land_cover.bounds.top,np.max(ymeshr_cdl))
+
+                window = land_cover.window(min_x,min_y,max_x,max_y
+                                        ).round_offsets().round_shape()
+                window_transform = land_cover.window_transform(window)
+                img_data = land_cover.read(1,window=window,fill_value=0)
+                self.logger.info('CDL block {} has shape {}x{}'.format(
+                    iblock,img_data.shape[0],img_data.shape[1]))
+                
+                fractions = np.zeros(
+                    (len(codes),len(ygrid_block),len(xgrid_block)),dtype=np.float32
+                )
+                for i in range(len(ygrid_block)):
+                    for j in range(len(xgrid_block)):
+                        x_min = xmeshr_cdl[i,j]
+                        x_max = xmeshr_cdl[i,j+1]
+                        y_min = ymeshr_cdl[i+1,j]
+                        y_max = ymeshr_cdl[i,j]
+
+                        # Convert bounds to pixel coordinates
+                        col_min, row_max = ~window_transform * (x_min, y_max)
+                        col_max, row_min = ~window_transform * (x_max, y_min)
+
+                        # Round to get integer pixel indices
+                        col_min = int(np.floor(col_min))
+                        col_max = int(np.ceil(col_max))
+                        row_min = int(np.floor(row_min))
+                        row_max = int(np.ceil(row_max))
+
+                        # Clip to the actual data window
+                        col_min = max(0, col_min)
+                        col_max = min(img_data.shape[1], col_max)
+                        row_min = max(0, row_min)
+                        row_max = min(img_data.shape[0], row_max)
+
+                        patch = img_data[row_min:row_max,col_min:col_max]
+
+                        counts = np.bincount(patch.ravel(),
+                                             minlength=codes.max()+1
+                                            )
+                        total_pixels = patch.size
+                        if total_pixels > 0:
+                            fractions[:,i,j] = counts[codes]/total_pixels
+                block_fractions.append(fractions)
+        
+        land_cover.close()
+        # assemble fractions from blocks to one piece
+        all_fractions = np.block(
+            [block_fractions[i:i+nblock_col] for i in range(0,nblock,nblock_col)]
+        )
+        return all_fractions
+    
+    def get_fractions(
+        self,filenames,years,l3=None,xgrid=None,ygrid=None,block_length=None
+    ):
+        assert len(filenames) == len(years)
+        if l3 is not None:
+            xgrid,ygrid = l3['xgrid'],l3['ygrid']
+        self.xgrid,self.ygrid = xgrid,ygrid
+        self.df = pd.DataFrame(
+            index=pd.DatetimeIndex([pd.Timestamp(y,1,1) for y in years]).to_period(),
+            data=range(len(years))
+        )
+        codes = self.lcc_df['Code']
+        self.data = np.zeros(
+            (len(years),len(codes),len(ygrid),len(xgrid)),dtype=np.float32
+        )
+        block_length = block_length or max(nrows,ncols)
+        for iyear,(filename,year) in enumerate(zip(filenames,years)):
+            self.data[iyear] = self.get_year_fractions(
+                filename,codes,xgrid,ygrid,block_length
+            )
+
+
+class CDL_old:
     '''class to handle crop data layer (cdl) data'''
     def __init__(self,filename,land_cover_codes_csv=None,shape_file=None):
         self.logger = logging.getLogger(__name__)
@@ -590,7 +771,10 @@ class BUI():
     def resample(self,rule='month_of_year',offset=None):
         if rule == 'month_of_year':
             resampler = self.df.groupby(by=self.df.index.month)
-            dt_array = resampler.indices.keys()
+            # dummy year of 2000 for monthly climatology
+            dt_array = pd.DatetimeIndex(
+                [pd.Timestamp(2000,m,1) for m in resampler.indices.keys()]
+            ).to_period()
         else:
             resampler = self.df.resample(rule,offset=offset)
             dt_array = pd.PeriodIndex(resampler.indices.keys())
