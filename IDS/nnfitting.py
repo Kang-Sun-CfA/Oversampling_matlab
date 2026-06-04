@@ -164,6 +164,7 @@ DEFAULT_CONFIG_DICT = {
             'enabled':False
         },
         'unet_out':{
+            'enabled':True,
             'plot_channels':[0],
             'save_data':False
         }

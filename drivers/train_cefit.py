@@ -502,27 +502,27 @@ for ifold in range(config.data.nfold):
         if cfg.experiment.interactive:
             loss_df = pd.concat(loss_dfs,axis=1)
             loss_df.to_csv(os.path.join(cfg.experiment.run_dir,'loss.csv'))
+        if cfg.saving.unet_out.enabled:
             infer = Inferencer(models=[trainer.model],device=device)
             unet_out = infer.inference(test_ds,trim=tkw.trim)
-        
-        for unet_c in cfg.saving.unet_out.plot_channels:
-            fig,ax = plt.subplots(1,1,figsize=(12,10),constrained_layout=True)
-            im = ax.imshow(
-                unet_out[0,:,unet_c].mean(axis=0),origin='lower')
-            fig.colorbar(im,shrink=0.35)
-            fig.savefig(
-                os.path.join(
+            for unet_c in cfg.saving.unet_out.plot_channels:
+                fig,ax = plt.subplots(1,1,figsize=(12,10),constrained_layout=True)
+                im = ax.imshow(
+                    unet_out[0,:,unet_c].mean(axis=0),origin='lower')
+                fig.colorbar(im,shrink=0.35)
+                fig.savefig(
+                    os.path.join(
+                        cfg.experiment.run_dir,
+                        f'unet_out_{ifold}_{ihp}_{unet_c}.png'
+                    ),dpi=150,bbox_inches='tight'
+                )
+            if cfg.saving.unet_out.save_data:
+                pkl_fn = os.path.join(
                     cfg.experiment.run_dir,
-                    f'unet_out_{ifold}_{ihp}_{unet_c}.png'
-                ),dpi=150,bbox_inches='tight'
-            )
-        if cfg.saving.unet_out.save_data:
-            pkl_fn = os.path.join(
-                cfg.experiment.run_dir,
-                f'unet_out_{ifold}_{ihp}.pkl'
-            )
-            with open(pkl_fn, 'wb') as file:
-                pickle.dump({'unet_out':unet_out},file)
+                    f'unet_out_{ifold}_{ihp}.pkl'
+                )
+                with open(pkl_fn, 'wb') as file:
+                    pickle.dump({'unet_out':unet_out},file)
         if cfg.saving.final_model.enabled:
             model_filename = f'final_model_fold{ifold}_hp{ihp}.pt'
             trainer.save_model(
@@ -530,7 +530,6 @@ for ifold in range(config.data.nfold):
                 epoch=epoch
             )
     # end of hp loop
-#     break
 # end of fold loop
 loss_df = pd.concat(loss_dfs,axis=1)
 loss_df.to_csv(os.path.join(cfg.experiment.run_dir,'loss.csv'))
