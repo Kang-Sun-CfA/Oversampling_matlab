@@ -34,8 +34,7 @@ from CAREER.gridded import CDL, BUI
 from IDS.nnfitting import CEConfig, CEDataset, CETrainer, FluxCombiner, Inferencer
 
 if len(sys.argv) > 1:
-    config = CEConfig()
-    config.from_yaml(path=config_path)
+    config = CEConfig.from_yaml(path=config_path)
 
 cfgs = config.get_hp_combinations() if config.hp_tuning.enabled else [config]
 
@@ -516,6 +515,7 @@ for ifold in range(config.data.nfold):
                         f'unet_out_{ifold}_{ihp}_{unet_c}.png'
                     ),dpi=150,bbox_inches='tight'
                 )
+                plt.close()
             if cfg.saving.unet_out.save_data:
                 pkl_fn = os.path.join(
                     cfg.experiment.run_dir,

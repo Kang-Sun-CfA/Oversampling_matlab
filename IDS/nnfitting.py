@@ -348,10 +348,7 @@ class CEConfig:
         if config_path is None:
             config_path = os.path.join(run_dir,'config.yml')
             self.logger.warning(f'saving current config dict to {config_path}')
-            self.to_yaml()
-        else:
-            self.from_yaml(path=config_path)
-            self.logger.warning(f'current config overwritten by {config_path}')
+            self.to_yaml(abs_path=config_path)
         if python_script_path is None:
             python_script_path = os.path.join(os.path.split(run_dir)[0],'train_cefit.py')
             self.logger.warning(f'assuming python script at {python_script_path}')
