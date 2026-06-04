@@ -33,7 +33,23 @@ class CDL:
                 lcc_df = pd.read_csv(lcc_path,index_col=0)
         self.lcc_df = lcc_df
     
+    def trim(self,west,east,south,north):
+        '''trim the cdl same way as Level3_Data.trim, assuming grids are aligned'''
+        xmask = (self.xgrid >= west) & (self.xgrid <= east)
+        ymask = (self.ygrid >= south) & (self.ygrid <= north)
+        new_cdl = CDL(lcc_df=self.lcc_df)
+        new_cdl.df = self.df.copy()
+        new_cdl.xgrid,new_cdl.ygrid = self.xgrid[xmask],self.ygrid[ymask]
+        if hasattr(self,'cdl_name_codes'):
+            new_cdl.cdl_name_codes = self.cdl_name_codes.copy()
+        ijmesh = np.ix_(ymask,xmask)
+        ii = ijmesh[0]
+        jj = ijmesh[1]
+        new_cdl.data = self.data[:,:,ii,jj]
+        return new_cdl
+    
     def combine(self,cdl_name_codes=None):
+        '''combine 133 cdl categories, returning a new cdl with a less C dimension'''
         if cdl_name_codes is None:
             cdl_name_codes = [
                 ('corn',[1]),
@@ -63,14 +79,15 @@ class CDL:
         lcc_df = pd.concat([lcc_df,local_df]).reset_index(drop=True)
         new_cdl = CDL(lcc_df=lcc_df)
         new_cdl.df = self.df.copy()
-        new_cdl.data = new_data
+        new_cdl.xgrid,new_cdl.ygrid,new_cdl.data = self.xgrid,self.ygrid,new_data
         new_cdl.cdl_name_codes = cdl_name_codes
         return new_cdl
         
     def read_nc(self,filenames,years):
         assert len(filenames) == len(years)
         self.df = pd.DataFrame(
-            index=pd.DatetimeIndex([pd.Timestamp(y,1,1) for y in years]).to_period(),
+            index=pd.DatetimeIndex([pd.Timestamp(y,1,1) for y in years]).to_period(
+                freq='1Y'),
             data=range(len(years))
         )
         for iyear,(filename,year) in enumerate(zip(filenames,years)):
@@ -607,7 +624,19 @@ class BUI():
             index=self.dt_array,
             data=dict(count=range(len(dt_array)))
         )
-        
+    
+    def trim(self,west,east,south,north):
+        '''trim the bui same way as Level3_Data.trim, assuming grids are aligned'''
+        xmask = (self.xgrid >= west) & (self.xgrid <= east)
+        ymask = (self.ygrid >= south) & (self.ygrid <= north)
+        new_bui = BUI(dt_array=self.dt_array,west=west,east=east,south=south,north=north)
+        new_bui.xgrid,new_bui.ygrid = self.xgrid[xmask],self.ygrid[ymask]
+        ijmesh = np.ix_(ymask,xmask)
+        ii = ijmesh[0]
+        jj = ijmesh[1]
+        new_bui.data = self.data[:,:,ii,jj]
+        return new_bui
+    
     def read_CAMS_NOx(self,fn_pattern,fields=['sum'],gaussian_sigma=None):
         fns = []
         for yr in self.df.index.start_time.year.unique().sort_values():

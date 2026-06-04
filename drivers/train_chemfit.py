@@ -7,7 +7,8 @@ import time
 import logging
 # logging.basicConfig(level=logging.INFO)
 from popy import Level3_List, Level3_Data
-from CAREER.gridded import CDL, Inventory
+from CAREER.gridded import Inventory
+from CAREER.gridded import CDL_old as CDL
 import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
