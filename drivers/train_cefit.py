@@ -59,10 +59,15 @@ north = np.max(
     [d.north for d in config.data.train]+[d.north for d in config.data.validation]
 )
 tkw = config.data.test
-txgrid = arange_(tkw.west,tkw.east-tkw.grid_size/2,tkw.grid_size)+tkw.grid_size/2
-tygrid = arange_(tkw.south,tkw.north-tkw.grid_size/2,tkw.grid_size)+tkw.grid_size/2
+twest,teast = tkw.west or west, tkw.east or east
+tsouth,tnorth = tkw.south or south, tkw.north or north
+tgrid_size = tkw.grid_size or np.min(grid_sizes)
+tstart = tkw.start or config.data.l3s.ranges[0].start
+tend = tkw.end or config.data.l3s.ranges[-1].end
+txgrid = arange_(twest,teast-tgrid_size/2,tgrid_size)+tgrid_size/2
+tygrid = arange_(tsouth,tnorth-tgrid_size/2,tgrid_size)+tgrid_size/2
 
-tdt_array = pd.period_range(tkw.start,tkw.end,freq=tkw.freq)
+tdt_array = pd.period_range(tstart,tend,freq=tkw.freq)
 test_ds = CEDataset(xgrid=txgrid,ygrid=tygrid,dt_array=tdt_array)
 test_ds.random_crop(
     crop_x=tkw.crop_x,crop_y=tkw.crop_y,stride_x=tkw.stride_x,stride_y=tkw.stride_y,
@@ -70,7 +75,7 @@ test_ds.random_crop(
 )
 
 
-if config.data.bui.enabled:
+if config.data.bui.enabled and config.data.reload:
     bui = BUI(
         dt_array=pd.period_range(
             config.data.bui.range.start,
@@ -91,7 +96,7 @@ if config.data.bui.enabled:
     else:
         raise ValueError('bui not implemented!')
 
-if config.data.cdl.enabled:
+if config.data.cdl.enabled and config.data.reload:
     cdl_dict = {}
     for grid_size in grid_sizes:
         cdl = CDL(lcc_path=config.data.cdl.lcc_path)
@@ -116,25 +121,28 @@ if config.data.nfold == 1 and config.data.val_fraction == 0:
 else:
     do_val = True
 # arrays holding train/val datasets
-train_dss = np.empty(
-    (
-        config.data.nfold,
-        len(config.data.l3s.ranges),
-        len(config.data.train)
-    ),
-    dtype=object
-)
-if do_val:
-    val_dss = np.empty(
+if config.data.reload:
+    train_dss = np.empty(
         (
             config.data.nfold,
             len(config.data.l3s.ranges),
-            len(config.data.validation)
+            len(config.data.train)
         ),
         dtype=object
     )
+    if do_val:
+        val_dss = np.empty(
+            (
+                config.data.nfold,
+                len(config.data.l3s.ranges),
+                len(config.data.validation)
+            ),
+            dtype=object
+        )
 ##### load raw data and prepare train/val datasets
-for irange,l3s_range in enumerate(config.data.l3s.ranges):
+for irange,l3s_range in enumerate(
+    config.data.l3s.ranges if config.data.reload else []
+):
     dt_array = pd.period_range(l3s_range.start,l3s_range.end,freq=l3s_range.freq)
     l3_fns = np.array(
         [d.strftime(config.data.l3s.path_pattern) for d in dt_array]
@@ -299,11 +307,7 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed_all(config.experiment.seed)
 
 vloaders = np.empty(val_dss.shape[1:],dtype=object)
-result_flds = [
-    'train_loss','smooth_loss','smooth_B_loss',
-    'epoch_time','sample_size','lr',
-    'grad_norm','nan_norm'
-]
+result_flds = config.saving.loss_df.result_flds
 
 loss_dfs = []
 for ifold in range(config.data.nfold):
@@ -326,6 +330,10 @@ for ifold in range(config.data.nfold):
             assert nland == cdl.data.shape[1]
             out_channels += nland-1
         cfg.model.spatial.out_channels = out_channels
+        if cfg.loss.correlation_loss.enabled and cfg.loss.correlation_loss.output_corr:
+            corr_flds = [f'corr_{i}_{j}' for i in range(1,out_channels) for j in range(i)]
+        else:
+            corr_flds = []
         model = FluxCombiner(
             spatial_kw=cfg.model.spatial,
             temporal_kw=cfg.model.temporal,
@@ -339,7 +347,7 @@ for ifold in range(config.data.nfold):
             index=epochs,
             data={
                 f'fold{ifold}_hp{ihp}_{k}':np.full(epochs.shape,np.nan) 
-                for k in result_flds
+                for k in result_flds+corr_flds
             }
         )
         if do_val:
@@ -399,32 +407,21 @@ for ifold in range(config.data.nfold):
                 dss=dss,batch_size=cfg.training.batch_size,
                 shuffle_level=cfg.training.shuffle_level
             )
-            if not cfg.loss.smoothness_loss.enabled:
-                smoothness_weight = 0
-                smoothness_B_weight = 0
-            elif cfg.loss.smoothness_loss.scheduler == 'cosine':
-                smoothness_weight = trainer.cosine_scheduler(
-                    epoch,cfg.loss.smoothness_loss.weight_milestone,
-                    output_ratio=False
+            smoothness_kw = cfg.loss.smoothness_loss
+            if smoothness_kw.enabled:
+                smoothness_kw.weight.value = smoothness_kw.weight.value or trainer.scheduler(
+                    which=smoothness_kw.weight.scheduler,epoch=epoch,
+                    milestone=smoothness_kw.weight.milestone,output_ratio=False
                 )
-                smoothness_B_weight = trainer.cosine_scheduler(
-                    epoch,cfg.loss.smoothness_loss.B_weight_milestone,
-                    output_ratio=False
+                smoothness_kw.B_weight.value = smoothness_kw.B_weight.value or trainer.scheduler(
+                    which=smoothness_kw.B_weight.scheduler,epoch=epoch,
+                    milestone=smoothness_kw.B_weight.milestone,output_ratio=False
                 )
-            elif cfg.loss.smoothness_loss.scheduler == 'linear':
-                smoothness_weight = trainer.linear_scheduler(
-                    epoch,cfg.loss.smoothness_loss.weight_milestone,
-                    output_ratio=False
-                )
-                smoothness_B_weight = trainer.linear_scheduler(
-                    epoch,cfg.loss.smoothness_loss.B_weight_milestone,
-                    output_ratio=False
-                )
-            else:
-                raise ValueError(
-                    '{} is not supported!'.format(
-                    cfg.loss.smoothness_loss.scheduler
-                    )
+            correlation_kw = cfg.loss.correlation_loss
+            if correlation_kw.enabled:
+                correlation_kw.weight.value = correlation_kw.weight.value or trainer.scheduler(
+                    which=correlation_kw.weight.scheduler,epoch=epoch,
+                    milestone=correlation_kw.weight.milestone,output_ratio=False
                 )
             result = trainer.train_epoch(
                 epoch=epoch,
@@ -432,16 +429,14 @@ for ifold in range(config.data.nfold):
                 xnames=cfg.model.xnames,
                 use_fit_mask=cfg.loss.use_fit_mask,
                 scale_random_error=True,
-                smoothness_weight=smoothness_weight,
-                smoothness_B_weight=smoothness_B_weight,
-                smoothness_scale_weights=cfg.loss.smoothness_loss.scale_weights,
-                smoothness_channel_weights=cfg.loss.smoothness_loss.channel_weights,
+                smoothness_kw=smoothness_kw,
+                correlation_kw=correlation_kw,
                 max_norm=cfg.training.gradient_clipping.max_norm,
                 clamp_max_sigma=cfg.training.target_clampping.max,
                 clamp_min_sigma=cfg.training.target_clampping.min,
                 verbose=cfg.experiment.interactive
             )
-            for k in result_flds:
+            for k in result_flds+corr_flds:
                 if k == 'lr':
                     loss_df[f'fold{ifold}_hp{ihp}_lr'].iloc[iepoch] = \
                     trainer.lr_scheduler.get_last_lr()[0]
@@ -465,7 +460,7 @@ for ifold in range(config.data.nfold):
                     logging.warning(f'inference takes {val_t:.1f}s')
             trainer.lr_scheduler.step()
             # save metrics every epoch if interactive
-            if cfg.experiment.interactive:
+            if cfg.experiment.interactive and cfg.saving.loss_df.save:
                 loss_df.to_csv(os.path.join(cfg.experiment.run_dir,'loss0.csv'))
             
             if cfg.saving.best_model.enabled:
@@ -498,24 +493,26 @@ for ifold in range(config.data.nfold):
                     ) 
         # end of epoch loop
         loss_dfs.append(loss_df)
-        if cfg.experiment.interactive:
+        if cfg.saving.loss_df.save:
             loss_df = pd.concat(loss_dfs,axis=1)
             loss_df.to_csv(os.path.join(cfg.experiment.run_dir,'loss.csv'))
         if cfg.saving.unet_out.enabled:
             infer = Inferencer(models=[trainer.model],device=device)
-            unet_out = infer.inference(test_ds,trim=tkw.trim)
+            predict,unet_out = infer.inference(
+                test_ds,xnames=cfg.model.xnames,trim=tkw.trim)
             for unet_c in cfg.saving.unet_out.plot_channels:
                 fig,ax = plt.subplots(1,1,figsize=(12,10),constrained_layout=True)
                 im = ax.imshow(
                     unet_out[0,:,unet_c].mean(axis=0),origin='lower')
                 fig.colorbar(im,shrink=0.35)
-                fig.savefig(
-                    os.path.join(
-                        cfg.experiment.run_dir,
-                        f'unet_out_{ifold}_{ihp}_{unet_c}.png'
-                    ),dpi=150,bbox_inches='tight'
-                )
-                plt.close()
+                if cfg.saving.unet_out.save_plot:
+                    fig.savefig(
+                        os.path.join(
+                            cfg.experiment.run_dir,
+                            f'unet_out_{ifold}_{ihp}_{unet_c}.png'
+                        ),dpi=150,bbox_inches='tight'
+                    )
+                    plt.close()
             if cfg.saving.unet_out.save_data:
                 pkl_fn = os.path.join(
                     cfg.experiment.run_dir,
@@ -531,5 +528,6 @@ for ifold in range(config.data.nfold):
             )
     # end of hp loop
 # end of fold loop
-loss_df = pd.concat(loss_dfs,axis=1)
-loss_df.to_csv(os.path.join(cfg.experiment.run_dir,'loss.csv'))
+if cfg.saving.loss_df.save:
+    loss_df = pd.concat(loss_dfs,axis=1)
+    loss_df.to_csv(os.path.join(cfg.experiment.run_dir,'loss.csv'))

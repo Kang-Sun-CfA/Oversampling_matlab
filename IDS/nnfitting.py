@@ -24,6 +24,7 @@ DEFAULT_CONFIG_DICT = {
         'interactive':False
     },
     'data':{
+        'reload':True,
         'l3s':{
             'path_pattern': '/projects/academic/kangsun/zolalaya/data/Cornbelt_NOx/'\
             's5p_cornbelt/%Y/%m/CORNBELT_S5P_NO2_%Y_%m_%d.nc',
@@ -96,8 +97,8 @@ DEFAULT_CONFIG_DICT = {
             }
         ],
         'test':{
-            'west':-104,'east':-80.5,'south':36,'north':46,'grid_size':0.1,
-            'start':'2020-1-1','end':'2025-12-31','freq':'1M',
+            'west':None,'east':None,'south':None,'north':None,'grid_size':None,
+            'start':None,'end':None,'freq':'1M',
             'crop_x':64,'crop_y':64,'stride_x':8,'stride_y':8,'trim':4
         }
     },
@@ -119,24 +120,45 @@ DEFAULT_CONFIG_DICT = {
         'use_fit_mask': True,
         'smoothness_loss':{
             'enabled':True,
-            'weight_milestone':[0,0,50,1.5e-2],
-            'B_weight_milestone':[0,0,50,0.3],
-            'scheduler':'linear',
+            'weight':{
+                'value':None,
+                'milestone':[0,0,50,1.5e-2],
+                'scheduler':'linear'
+            },
+            'B_weight':{
+                'value':None,
+                'milestone':[0,0,50,0.3],
+                'scheduler':'linear',
+            },
             'scale_weights': [1, 0.5, 0.5, 0.25],
             'channel_weights': [2,1]
+        },
+        'correlation_loss':{
+            'enabled':True,
+            'weight':{
+                'value':None,
+                'milestone':[0,0,50,0],
+                'scheduler':'linear'
+            },
+            'scheduler':'linear',
+            'channel_weights':None,
+            'use_double':True,
+            'output_corr':True
         }
     },
     'training':{
         'start_epoch':0,'end_epoch':60,
         'batch_size':256,'shuffle_level':'sample',
         'lr':{
-            'milestone':[0,1e-4,50,1e-4],'scheduler':'linear',
+            'value':None,
+            'milestone':[0,1e-4,50,1e-4],
+            'scheduler':'linear',
             'multipliers':{
                 'other':1,'temporal_film':0.4,'psf':20
             }
         },
         'weight_decay':{
-            'initial':1e-2,
+            'value':1e-2,
             'multipliers':{
                 'other':1,'temporal_film':0,'psf':0
             }
@@ -152,6 +174,14 @@ DEFAULT_CONFIG_DICT = {
         ]
     },
     'saving':{
+        'loss_df':{
+            'save':True,
+            'result_flds':[
+                'train_loss','smooth_loss','smooth_B_loss',
+                'epoch_time','sample_size','lr',
+                'grad_norm','nan_norm','cor_loss'
+            ]
+        },
         'best_model':{
             'enabled':False,
             'criteria':{
@@ -166,6 +196,7 @@ DEFAULT_CONFIG_DICT = {
         'unet_out':{
             'enabled':True,
             'plot_channels':[0],
+            'save_plot':False,
             'save_data':False
         }
     }
@@ -314,6 +345,21 @@ class CEConfig:
 
     def check(self):
         """Validate the configuration parameters and structure."""
+        for k in [
+            'loss.smoothness_loss.weight',
+            'loss.smoothness_loss.B_weight',
+            'loss.correlation_loss.weight'
+        ]:
+            kw = self.get_nested(k)
+            if kw.value is not None and kw.milestone is not None:
+                self.logger.warning(
+                    f'{k} receives competing information, either value or milestone may be overwritten'
+                )
+        if self._config.training.lr.milestone is None:
+            self.logger.warning(f'assuming a constant lr of {self._config.training.lr.value}')
+            self._config.training.lr.milestone = [
+                0,self._config.training.lr.value,50,self._config.training.lr.value
+            ]
         exp = self._config.experiment
         data = self._config.data
         hp_tuning = self._config.hp_tuning
@@ -808,7 +854,7 @@ class CEDataset(Dataset):
         
         out = dict(
                 spatial=torch.cat([xmesh,ymesh],dim=0),
-                temporal=temporal
+                temporal=temporal,grid_size=self.grid_size
             )
         if self.do_dummy:
             return out
@@ -817,8 +863,6 @@ class CEDataset(Dataset):
             i:i+self.crop_y,j:j+self.crop_x
         ]
         out['valid_mask'] = valid_mask.unsqueeze(0)
-        grid_size = torch.tensor(self.l3r[frame_idx].grid_size)
-        out['grid_size'] = grid_size
         for ivar,(name,scale) in enumerate(zip(self.var_names,self.var_scales)):
             out[name] = self.l3r[frame_idx][name][
                 i:i+self.crop_y,j:j+self.crop_x
@@ -833,7 +877,7 @@ class CEDataset(Dataset):
                         i:i+self.crop_y,j:j+self.crop_x
                     ]*scale
                     out['random_error'] = self.get_random_error(
-                        DD_xy,DD_rs,valid_mask,grid_size
+                        DD_xy,DD_rs,valid_mask,self.grid_size
                     )
                 else:
                     out['random_error'] = torch.tensor(1.)
@@ -1261,6 +1305,34 @@ class LaplacianLoss(nn.Module):
         return lap_mean_loss,lap_std_loss
 
 
+class CorrelationLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self,unet_out,cor_weights=None,use_double=True):
+        B, C, H, W = unet_out.shape
+        N = H*W
+        eps = 1e-8
+        if cor_weights is None:
+            cor_weights = torch.tril(torch.ones((C,C)),diagonal=-1) # only lower tri matters
+        
+        cor_weights = cor_weights.to(unet_out.device)
+        
+        X = unet_out.view(B,C,N)
+        X_centered = (X-X.mean(dim=2,keepdim=True))
+        if use_double:
+            X_centered = X_centered.double()
+         # Compute covariance matrices [B, C, C]
+        cov = torch.bmm(X_centered, X_centered.transpose(1, 2)) / N
+        # Compute standard deviations [B, C]
+        var = (X_centered ** 2).mean(dim=2)
+        std = torch.sqrt(var + eps)
+        # Compute correlation matrices [B, C, C]
+        corr = cov / (std.unsqueeze(2) @ std.unsqueeze(1) + eps)
+        cor_loss = (corr.abs()*cor_weights.expand(B,C,C)).sum(dim=(-2,-1)).mean()
+        return cor_loss, corr.mean(dim=0)
+
+
 class BatchShuffledSampler(Sampler):
     """
     A sampler that shuffles the order of batches but keeps samples within each batch together.
@@ -1332,7 +1404,7 @@ class CETrainer:
                     )
                 ]
             # weight decay for the group
-            pg_wd = wd_kw['initial']*wd_kw['multipliers'][pg_name]
+            pg_wd = wd_kw['value']*wd_kw['multipliers'][pg_name]
             param_groups.append(
                 dict(
                     params=params,weight_decay=pg_wd,
@@ -1340,18 +1412,10 @@ class CETrainer:
                 )
             )
         self.optimizer = torch.optim.AdamW(param_groups)
-        if lr_kw['scheduler'] == 'cosine':
-            lr_lambda = partial(
-                CETrainer.cosine_scheduler,
-                milestone=lr_kw['milestone'],output_ratio=True
-            )
-        elif lr_kw['scheduler'] == 'linear':
-            lr_lambda = partial(
-                CETrainer.linear_scheduler,
-                milestone=lr_kw['milestone'],output_ratio=True
-            )
-        else:
-            raise ValueError('{} is not supported!'.format(lr_kw['scheduler']))
+        lr_lambda = partial(
+            CETrainer.scheduler,which=lr_kw['scheduler'],
+            milestone=lr_kw['milestone'],output_ratio=True
+        )
         self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
             self.optimizer,lr_lambda=lr_lambda
         )
@@ -1364,9 +1428,22 @@ class CETrainer:
         self.scaler = torch.cuda.amp.GradScaler(
             enabled=(self.device.type=='cuda')
         )
-       
+    
     @staticmethod
-    def cosine_scheduler(epoch,milestone,output_ratio=True):
+    def scheduler(epoch=None,which='linear',milestone=None,output_ratio=None):
+        if which.lower() in ['cosine']:
+            return CETrainer.cosine_scheduler(
+                epoch=epoch,milestone=milestone,output_ratio=output_ratio
+            )
+        elif which.lower() in ['linear']:
+            return CETrainer.linear_scheduler(
+                epoch=epoch,milestone=milestone,output_ratio=output_ratio
+            )
+        else:
+            raise ValueError('{} is not supported as a scheduler!'.format(which))
+        
+    @staticmethod
+    def cosine_scheduler(epoch=None,milestone=None,output_ratio=True):
         if epoch <= milestone[0]:
             out = 1. if output_ratio else milestone[1]
         elif epoch > milestone[2]:
@@ -1382,7 +1459,7 @@ class CETrainer:
         return out
     
     @staticmethod
-    def linear_scheduler(epoch,milestone,output_ratio=True):
+    def linear_scheduler(epoch=None,milestone=None,output_ratio=True):
         if epoch <= milestone[0]:
             out = 1. if output_ratio else milestone[1]
         elif epoch > milestone[2]:
@@ -1462,7 +1539,8 @@ class CETrainer:
                 predict,unet_out = self.model(
                     spatial=batch['spatial'],
                     predictors=torch.cat([batch[xn] for xn in xnames],dim=1),
-                    temporal=batch['temporal']
+                    temporal=batch['temporal'],
+                    grid_size=batch['grid_size']
                 )
                 if scale_random_error:
                     error_scaler = batch['random_error'].view(-1,1,1,1)
@@ -1487,10 +1565,8 @@ class CETrainer:
         xnames=['column_amount','surface_altitude_DD','cdl'],
         use_fit_mask=False,
         scale_random_error=True,
-        smoothness_weight=1e-2,
-        smoothness_B_weight=0.8,
-        smoothness_scale_weights=[1,0.5,0.25],
-        smoothness_channel_weights=1.,
+        smoothness_kw=None,
+        correlation_kw=None,
         max_norm=1.,
         clamp_max_sigma=None,
         clamp_min_sigma=None,
@@ -1501,11 +1577,17 @@ class CETrainer:
         if clamp_min_sigma is not None:
             clamp_min_sigma = -np.abs(clamp_min_sigma)
         
-        if smoothness_weight is not None:
+        smoothness_kw = smoothness_kw or {'enabled':False}
+        correlation_kw = correlation_kw or {'enabled':False}
+        if smoothness_kw['enabled']:
             smoothness_loss_func = LaplacianLoss()
+        if correlation_kw['enabled']:
+            correlation_loss_func = CorrelationLoss()
         total_loss = 0
         total_smo_loss = 0
         total_smb_loss = 0
+        total_cor_loss = 0
+        corr_list = []
         start_time = time.time()
         num_batches = len(self.data_loader)
         norms = []
@@ -1518,7 +1600,8 @@ class CETrainer:
                 predict,unet_out = self.model(
                     spatial=batch['spatial'],
                     predictors=torch.cat([batch[xn] for xn in xnames],dim=1),
-                    temporal=batch['temporal']
+                    temporal=batch['temporal'],
+                    grid_size=batch['grid_size']
                 )
                 if scale_random_error:
                     error_scaler = batch['random_error'].view(-1,1,1,1)
@@ -1526,7 +1609,8 @@ class CETrainer:
                     error_scaler = 1.
                 predict = predict/error_scaler
                 target = batch[yname]/error_scaler
-                target = torch.clamp(target,min=clamp_min_sigma,max=clamp_max_sigma)
+                if clamp_min_sigma and clamp_max_sigma:
+                    target = torch.clamp(target,min=clamp_min_sigma,max=clamp_max_sigma)
                 if use_fit_mask:
                     mask = batch['valid_mask']*batch['fit_mask'] 
                 else:
@@ -1534,17 +1618,28 @@ class CETrainer:
                 loss = self.data_loss_func(
                     predict=predict,target=target,mask=mask
                 )
-                if smoothness_weight is not None:
+                if smoothness_kw['enabled']:
                     smoothness_loss,smoothness_B_loss = smoothness_loss_func(
                         unet_out,
-                        scale_weights=smoothness_scale_weights,
-                        channel_weights=smoothness_channel_weights
+                        scale_weights=smoothness_kw['scale_weights'],
+                        channel_weights=smoothness_kw['channel_weights']
                     )
-                    loss += smoothness_weight*smoothness_loss
-                    if smoothness_B_weight is not None:
-                        loss += smoothness_B_weight*smoothness_B_loss
+                    loss += smoothness_kw['weight']['value']*smoothness_loss
+                    loss += smoothness_kw['B_weight']['value']*smoothness_B_loss
                 else:
                     smoothness_loss,smoothness_B_loss = torch.tensor(0.),torch.tensor(0.)
+                
+                if correlation_kw['enabled']:
+                    correlation_loss,corr = correlation_loss_func(
+                        unet_out,
+                        use_double=correlation_kw['use_double'],
+                        cor_weights=correlation_kw['channel_weights']
+                    )
+                    loss += correlation_kw['weight']['value']*correlation_loss
+                    if correlation_kw['output_corr']:
+                        corr_list.append(corr.cpu().detach().numpy())
+                else:
+                    correlation_loss = torch.tensor(0.)
             
             if self.device.type == 'cuda':
                 self.scaler.scale(loss).backward()
@@ -1577,6 +1672,7 @@ class CETrainer:
             total_loss += loss.item()
             total_smo_loss += smoothness_loss.item()
             total_smb_loss += smoothness_B_loss.item()
+            total_cor_loss += correlation_loss.item()
             
         # Epoch summary
         epoch_time = time.time() - start_time
@@ -1587,11 +1683,18 @@ class CETrainer:
             train_loss=total_loss/num_batches,
             smooth_loss=total_smo_loss/num_batches,
             smooth_B_loss=total_smb_loss/num_batches,
+            cor_loss=total_cor_loss/num_batches,
             epoch_time=epoch_time,
             sample_size=len(self.data_loader.dataset),
             grad_norm=np.nanmean(norms),
             nan_norm=np.sum(np.isnan(norms))
         )
+        if correlation_kw['enabled']:
+            if correlation_kw['output_corr']:
+                corr = np.array(corr_list).mean(axis=0)# [C,C]
+                for i in range(1,corr.shape[0]):
+                    for j in range(0,i):
+                        result[f'corr_{i}_{j}'] = corr[i,j]
         return result
 
 
@@ -1620,7 +1723,9 @@ class Inferencer:
             model.load_state_dict(checkpoint['model_state_dict'], strict=True)
             model = model.to(self.device)
         
-    def inference(self,ds,trim=2):
+    def inference(
+        self,ds,xnames=['column_amount','surface_altitude_DD','cdl'],trim=2
+    ):
         '''perform inference on a dataset (ds)'''
         unet_out_channels = dict(
             dict(
@@ -1636,6 +1741,7 @@ class Inferencer:
         )
         # mosaicked unet output to frame dimension
         unet_out = np.zeros((len(self.models),nframe,unet_out_channels,frame_y,frame_x))
+        predict = np.zeros((len(self.models),nframe,1,frame_y,frame_x))
         
         for imodel,model in enumerate(self.models):
             model.eval()
@@ -1643,20 +1749,28 @@ class Inferencer:
                 # exactly one batch per frame
                 for iframe,batch in enumerate(loader):
                     B,C,H,W = batch['spatial'].shape
-                    batch['dummy_predictors'] = torch.zeros(
-                        B,unet_out_channels,H,W,dtype=torch.float32
-                    )
+                    if not all(xn in batch.keys() for xn in xnames):
+                        batch['predictors'] = torch.zeros(
+                            B,unet_out_channels,H,W,dtype=torch.float32
+                        )
+                    else:
+                        batch['predictors'] = torch.cat(
+                            [batch[xn] for xn in xnames],dim=1
+                        )
                     batch = self._to_device(batch)
-                    _,out = model(
+                    pred,out = model(
                         spatial=batch['spatial'],
-                        predictors=batch['dummy_predictors'],
-                        temporal=batch['temporal']
+                        predictors=batch['predictors'],
+                        temporal=batch['temporal'],
+                        grid_size=batch['grid_size']
                     )
                     # B, unet_out_channels, crop_y, crop_x
                     D_unet = np.zeros((unet_out_channels,frame_y,frame_x))
+                    D_pred = np.zeros((1,frame_y,frame_x))
                     for icrop in range(ncrop_per_frame):
                         # unet_out_channels, crop_y, crop_x
                         unet_out_crop = out[icrop].cpu().detach().numpy()
+                        predict_crop = pred[icrop].cpu().detach().numpy()
                         i, j = ds.selected_crops[iframe][icrop]
                         if trim > 0:
                             trim_up,trim_down = trim,trim
@@ -1673,6 +1787,10 @@ class Inferencer:
                                 :,trim_up:crop_y-trim_down,
                                 trim_left:crop_x-trim_right
                             ]
+                            predict_crop = predict_crop[
+                                :,trim_up:crop_y-trim_down,
+                                trim_left:crop_x-trim_right
+                            ]
                         unet_out[
                             imodel,iframe,:,
                             i+trim_up:i+crop_y-trim_down,
@@ -1682,5 +1800,15 @@ class Inferencer:
                             :,i+trim_up:i+crop_y-trim_down,
                             j+trim_left:j+crop_x-trim_right
                         ] += np.ones(unet_out_crop.shape)
+                        predict[
+                            imodel,iframe,:,
+                            i+trim_up:i+crop_y-trim_down,
+                            j+trim_left:j+crop_x-trim_right
+                        ] += predict_crop
+                        D_pred[
+                            :,i+trim_up:i+crop_y-trim_down,
+                            j+trim_left:j+crop_x-trim_right
+                        ] += np.ones(predict_crop.shape)
                     unet_out[imodel,iframe,] /= D_unet
-        return unet_out
+                    predict[imodel,iframe,] /= D_pred
+        return predict,unet_out
