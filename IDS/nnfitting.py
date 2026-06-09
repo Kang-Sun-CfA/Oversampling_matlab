@@ -70,7 +70,11 @@ DEFAULT_CONFIG_DICT = {
                 'randomize_start_xy':True,
                 'intervals':['91d','91d','91d'],
                 'offsets':['0d','30d','60d'],
-                'fraction_milestone':[0,1,100,1],'scheduler':'linear'
+                'fraction':{
+                    'value':1,
+                    'milestone':None,
+                    'scheduler':'linear'
+                }
             }
         ],
         'validation':[
@@ -98,7 +102,7 @@ DEFAULT_CONFIG_DICT = {
         ],
         'test':{
             'west':None,'east':None,'south':None,'north':None,'grid_size':None,
-            'start':None,'end':None,'freq':'1M',
+            'start':None,'end':None,'freq':'1M','do_dummy':False,
             'crop_x':64,'crop_y':64,'stride_x':8,'stride_y':8,'trim':4
         }
     },
@@ -131,16 +135,17 @@ DEFAULT_CONFIG_DICT = {
                 'scheduler':'linear',
             },
             'scale_weights': [1, 0.5, 0.5, 0.25],
-            'channel_weights': [2,1]
+            'channel_weights': [2,1],
+            'output_ssc':True
         },
         'correlation_loss':{
             'enabled':True,
+            'include_predictor':True,
             'weight':{
                 'value':None,
                 'milestone':[0,0,50,0],
                 'scheduler':'linear'
             },
-            'scheduler':'linear',
             'channel_weights':None,
             'use_double':True,
             'output_corr':True
@@ -179,7 +184,7 @@ DEFAULT_CONFIG_DICT = {
             'result_flds':[
                 'train_loss','smooth_loss','smooth_B_loss',
                 'epoch_time','sample_size','lr',
-                'grad_norm','nan_norm','cor_loss'
+                'grad_norm','nan_norm','zero_norm','cor_loss'
             ]
         },
         'best_model':{
@@ -1283,6 +1288,8 @@ class LaplacianLoss(nn.Module):
         
         lap_mean_loss = 0.
         lap_std_loss = 0.
+        # smoothness by scale and channel
+        lap_SC = np.zeros((len(scale_weights),C))
         for i, weight in enumerate(scale_weights):
             # Downsample unet output
             scaled = F.avg_pool2d(unet_out, kernel_size=2**i)
@@ -1294,7 +1301,9 @@ class LaplacianLoss(nn.Module):
                 scaled, self.gradient_kernel.expand(C,1,3,3), 
                 groups=C, padding=1)
             # [B,C] per scale
-            lap_BC = gradients.abs().mean(dim=[-2,-1])*channel_weights*weight
+            lap_BC0 = gradients.abs().mean(dim=[-2,-1])
+            lap_BC = lap_BC0*channel_weights*weight
+            lap_SC[i] = lap_BC0.cpu().detach().numpy().mean(axis=0)
             # std across B
             lap_B_std = lap_BC.mean(dim=-1).std()
             # mean laplacian per scale
@@ -1302,7 +1311,7 @@ class LaplacianLoss(nn.Module):
             lap_mean_loss += lap_mean
             lap_std_loss += lap_B_std
                         
-        return lap_mean_loss,lap_std_loss
+        return lap_mean_loss,lap_std_loss,lap_SC
 
 
 class CorrelationLoss(nn.Module):
@@ -1588,6 +1597,7 @@ class CETrainer:
         total_smb_loss = 0
         total_cor_loss = 0
         corr_list = []
+        ssc_list = []
         start_time = time.time()
         num_batches = len(self.data_loader)
         norms = []
@@ -1597,9 +1607,10 @@ class CETrainer:
             
             # Only use autocast on CUDA
             with torch.cuda.amp.autocast(enabled=(self.device.type=='cuda')):
+                predictor = torch.cat([batch[xn] for xn in xnames],dim=1)
                 predict,unet_out = self.model(
                     spatial=batch['spatial'],
-                    predictors=torch.cat([batch[xn] for xn in xnames],dim=1),
+                    predictors=predictor,
                     temporal=batch['temporal'],
                     grid_size=batch['grid_size']
                 )
@@ -1619,19 +1630,23 @@ class CETrainer:
                     predict=predict,target=target,mask=mask
                 )
                 if smoothness_kw['enabled']:
-                    smoothness_loss,smoothness_B_loss = smoothness_loss_func(
+                    smoothness_loss,smoothness_B_loss,smoothness_SC = smoothness_loss_func(
                         unet_out,
                         scale_weights=smoothness_kw['scale_weights'],
                         channel_weights=smoothness_kw['channel_weights']
                     )
                     loss += smoothness_kw['weight']['value']*smoothness_loss
                     loss += smoothness_kw['B_weight']['value']*smoothness_B_loss
+                    if smoothness_kw['output_ssc']:
+                        ssc_list.append(smoothness_SC)
                 else:
                     smoothness_loss,smoothness_B_loss = torch.tensor(0.),torch.tensor(0.)
                 
                 if correlation_kw['enabled']:
                     correlation_loss,corr = correlation_loss_func(
-                        unet_out,
+                        unet_out*predictor if correlation_kw[
+                            'include_predictor'
+                        ] else unet_out,
                         use_double=correlation_kw['use_double'],
                         cor_weights=correlation_kw['channel_weights']
                     )
@@ -1654,15 +1669,14 @@ class CETrainer:
                 ).item()
                 norms.append(total_norm)
                 self.logger.info(f"Step Gradient Norm: {total_norm:.4f}")
+                g0flag = False
                 for name, param in self.model.named_parameters():
                     if param.grad is None:
                         self.logger.warning(f"No gradient for {name}")
                     elif torch.all(param.grad == 0):
-                        self.logger.warning(f"Zero gradients for {name}")
-                        ntotal = batch['valid_mask'].numel()
-                        nfit = (batch['valid_mask']*batch['fit_mask']).sum()
-                        self.logger.warning(f'good pixels {nfit}')
-                        self.logger.warning(f'total {ntotal}')
+                        g0flag = True
+                if g0flag:
+                    self.logger.warning(f'epoch{epoch}, batch{batch_idx} has zero grad')
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
@@ -1687,7 +1701,8 @@ class CETrainer:
             epoch_time=epoch_time,
             sample_size=len(self.data_loader.dataset),
             grad_norm=np.nanmean(norms),
-            nan_norm=np.sum(np.isnan(norms))
+            nan_norm=np.sum(np.isnan(norms)),
+            zero_norm=np.sum(norms==0)
         )
         if correlation_kw['enabled']:
             if correlation_kw['output_corr']:
@@ -1695,6 +1710,12 @@ class CETrainer:
                 for i in range(1,corr.shape[0]):
                     for j in range(0,i):
                         result[f'corr_{i}_{j}'] = corr[i,j]
+        if smoothness_kw['enabled']:
+            if smoothness_kw['output_ssc']:
+                ssc = np.array(ssc_list).mean(axis=0)# [S,C]
+                for i in range(ssc.shape[0]):
+                    for j in range(ssc.shape[1]):
+                        result[f'ssc_{i}_{j}'] = ssc[i,j]
         return result
 
 
@@ -1742,7 +1763,7 @@ class Inferencer:
         # mosaicked unet output to frame dimension
         unet_out = np.zeros((len(self.models),nframe,unet_out_channels,frame_y,frame_x))
         predict = np.zeros((len(self.models),nframe,1,frame_y,frame_x))
-        
+        predictor = np.zeros((1,nframe,unet_out_channels,frame_y,frame_x))
         for imodel,model in enumerate(self.models):
             model.eval()
             with torch.no_grad():
@@ -1767,10 +1788,15 @@ class Inferencer:
                     # B, unet_out_channels, crop_y, crop_x
                     D_unet = np.zeros((unet_out_channels,frame_y,frame_x))
                     D_pred = np.zeros((1,frame_y,frame_x))
+                    if imodel == 0:
+                        D_xs = np.zeros((unet_out_channels,frame_y,frame_x))
                     for icrop in range(ncrop_per_frame):
                         # unet_out_channels, crop_y, crop_x
                         unet_out_crop = out[icrop].cpu().detach().numpy()
                         predict_crop = pred[icrop].cpu().detach().numpy()
+                        if imodel == 0:
+                            predictor_crop = batch[
+                                'predictors'][icrop].cpu().detach().numpy()
                         i, j = ds.selected_crops[iframe][icrop]
                         if trim > 0:
                             trim_up,trim_down = trim,trim
@@ -1791,6 +1817,11 @@ class Inferencer:
                                 :,trim_up:crop_y-trim_down,
                                 trim_left:crop_x-trim_right
                             ]
+                            if imodel == 0:
+                                predictor_crop = predictor_crop[
+                                    :,trim_up:crop_y-trim_down,
+                                    trim_left:crop_x-trim_right
+                                ]
                         unet_out[
                             imodel,iframe,:,
                             i+trim_up:i+crop_y-trim_down,
@@ -1809,6 +1840,18 @@ class Inferencer:
                             :,i+trim_up:i+crop_y-trim_down,
                             j+trim_left:j+crop_x-trim_right
                         ] += np.ones(predict_crop.shape)
+                        if imodel == 0:
+                            predictor[
+                                imodel,iframe,:,
+                                i+trim_up:i+crop_y-trim_down,
+                                j+trim_left:j+crop_x-trim_right
+                            ] += predictor_crop
+                            D_xs[
+                                :,i+trim_up:i+crop_y-trim_down,
+                                j+trim_left:j+crop_x-trim_right
+                            ] += np.ones(predictor_crop.shape)
                     unet_out[imodel,iframe,] /= D_unet
                     predict[imodel,iframe,] /= D_pred
-        return predict,unet_out
+                    if imodel == 0:
+                        predictor[imodel,iframe,] /= D_xs
+        return predict,unet_out,predictor

@@ -68,11 +68,12 @@ txgrid = arange_(twest,teast-tgrid_size/2,tgrid_size)+tgrid_size/2
 tygrid = arange_(tsouth,tnorth-tgrid_size/2,tgrid_size)+tgrid_size/2
 
 tdt_array = pd.period_range(tstart,tend,freq=tkw.freq)
-test_ds = CEDataset(xgrid=txgrid,ygrid=tygrid,dt_array=tdt_array)
-test_ds.random_crop(
-    crop_x=tkw.crop_x,crop_y=tkw.crop_y,stride_x=tkw.stride_x,stride_y=tkw.stride_y,
-    crop_fraction=1.,randomize_start_xy=False,do_group=False
-)
+if tkw.do_dummy:
+    test_ds = CEDataset(xgrid=txgrid,ygrid=tygrid,dt_array=tdt_array)
+    test_ds.random_crop(
+        crop_x=tkw.crop_x,crop_y=tkw.crop_y,stride_x=tkw.stride_x,stride_y=tkw.stride_y,
+        crop_fraction=1.,randomize_start_xy=False,do_group=False
+    )
 
 
 if config.data.bui.enabled and config.data.reload:
@@ -120,7 +121,7 @@ if config.data.nfold == 1 and config.data.val_fraction == 0:
     do_val = False
 else:
     do_val = True
-# arrays holding train/val datasets
+# arrays holding train/val/test datasets
 if config.data.reload:
     train_dss = np.empty(
         (
@@ -139,6 +140,8 @@ if config.data.reload:
             ),
             dtype=object
         )
+    if not tkw.do_dummy:
+        test_dss = np.empty((len(config.data.l3s.ranges)),dtype=object)
 ##### load raw data and prepare train/val datasets
 for irange,l3s_range in enumerate(
     config.data.l3s.ranges if config.data.reload else []
@@ -211,6 +214,43 @@ for irange,l3s_range in enumerate(
             cdl = cdl_dict[grid_size]
             assert np.array_equal(cdl.xgrid,l3s[0]['xgrid'])
             assert np.array_equal(cdl.ygrid,l3s[0]['ygrid'])
+        # get test data if not dummy
+        if not tkw.do_dummy and grid_size == tgrid_size:
+            test_dss[irange] = CEDataset(
+                l3_kw=dict(
+                    l3s=l3s.trim(
+                        west=twest,east=teast,
+                        south=tsouth,north=tnorth
+                    ),
+                    var_names=config.data.l3s.var_names,
+                    var_scales=config.data.l3s.var_scales,
+                    resample_rules=[tkw.freq],
+                    resample_offsets=['0d']
+                ),
+                bui_kw=dict(
+                    bui=bui.trim(
+                        west=twest,east=teast,
+                        south=tsouth,north=tnorth
+                    ),
+                    time_matching_method=config.data.bui.time_matching_method,
+                    max_emission=config.data.bui.max_threshold,
+                    scale=1e9,yield_inventory=config.data.bui.yield_inventory
+                ) if config.data.bui.enabled else None,
+                cdl_kw=dict(
+                    cdl=cdl.trim(
+                        west=twest,east=teast,
+                        south=tsouth,north=tnorth
+                    ),
+                    time_matching_method=config.data.cdl.time_matching_method,
+                ) if config.data.cdl.enabled else None,
+                base_year=2020,jitter_kw=None
+            )
+            # crop the test ds as it only needs to be done once
+            test_dss[irange].random_crop(
+                crop_x=tkw.crop_x,crop_y=tkw.crop_y,
+                stride_x=tkw.stride_x,stride_y=tkw.stride_y,
+                crop_fraction=1.,randomize_start_xy=False,do_group=False
+            )
         # loop over validation folds
         for ifold in range(config.data.nfold):
             # get training datasets
@@ -298,7 +338,9 @@ for irange,l3s_range in enumerate(
                 )
                 val_dss[ifold,irange,ival] = ds
 
-
+# combine test_dss
+if not tkw.do_dummy:
+    test_ds = ConcatDataset(test_dss)
 epochs = np.arange(config.training.start_epoch,config.training.end_epoch)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.manual_seed(config.experiment.seed)
@@ -330,6 +372,14 @@ for ifold in range(config.data.nfold):
             assert nland == cdl.data.shape[1]
             out_channels += nland-1
         cfg.model.spatial.out_channels = out_channels
+        if cfg.loss.smoothness_loss.enabled and cfg.loss.smoothness_loss.output_ssc:
+            ssc_flds = [
+                f'ssc_{i}_{j}' for i in range(
+                    len(cfg.loss.smoothness_loss.scale_weights)
+                ) for j in range(out_channels)
+            ]
+        else:
+            ssc_flds = []
         if cfg.loss.correlation_loss.enabled and cfg.loss.correlation_loss.output_corr:
             corr_flds = [f'corr_{i}_{j}' for i in range(1,out_channels) for j in range(i)]
         else:
@@ -347,7 +397,7 @@ for ifold in range(config.data.nfold):
             index=epochs,
             data={
                 f'fold{ifold}_hp{ihp}_{k}':np.full(epochs.shape,np.nan) 
-                for k in result_flds+corr_flds
+                for k in result_flds+corr_flds+ssc_flds
             }
         )
         if do_val:
@@ -371,22 +421,11 @@ for ifold in range(config.data.nfold):
         for iepoch,epoch in enumerate(epochs):
             dss = []
             for itrain in cfg.data.train_idxs:
-                if cfg.data.train[itrain].scheduler == 'cosine':
-                    crop_fraction = trainer.cosine_scheduler(
-                        epoch,cfg.data.train[itrain].fraction_milestone,
-                        output_ratio=False
-                    )
-                elif cfg.data.train[itrain].scheduler == 'linear':
-                    crop_fraction = trainer.linear_scheduler(
-                        epoch,cfg.data.train[itrain].fraction_milestone,
-                        output_ratio=False
-                    )
-                else:
-                    raise ValueError(
-                        '{} is not supported!'.format(
-                        cfg.data.train[itrain].scheduler
-                        )
-                    )
+                crop_fraction = cfg.data.train[itrain].fraction.value or trainer.scheduler(
+                    which=cfg.data.train[itrain].fraction.scheduler,
+                    milestone=cfg.data.train[itrain].fraction.milestone,
+                    epoch=epoch,output_ratio=False
+                )
                 for irange in range(train_dss.shape[1]):
                     ds = train_dss[ifold,irange,itrain]
                     ds.random_crop(
@@ -436,7 +475,7 @@ for ifold in range(config.data.nfold):
                 clamp_min_sigma=cfg.training.target_clampping.min,
                 verbose=cfg.experiment.interactive
             )
-            for k in result_flds+corr_flds:
+            for k in result_flds+corr_flds+ssc_flds:
                 if k == 'lr':
                     loss_df[f'fold{ifold}_hp{ihp}_lr'].iloc[iepoch] = \
                     trainer.lr_scheduler.get_last_lr()[0]
@@ -498,7 +537,7 @@ for ifold in range(config.data.nfold):
             loss_df.to_csv(os.path.join(cfg.experiment.run_dir,'loss.csv'))
         if cfg.saving.unet_out.enabled:
             infer = Inferencer(models=[trainer.model],device=device)
-            predict,unet_out = infer.inference(
+            predict,unet_out,predictor = infer.inference(
                 test_ds,xnames=cfg.model.xnames,trim=tkw.trim)
             for unet_c in cfg.saving.unet_out.plot_channels:
                 fig,ax = plt.subplots(1,1,figsize=(12,10),constrained_layout=True)
