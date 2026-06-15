@@ -274,7 +274,7 @@ class CEConfig:
         """Save the configuration to a YAML file."""
         path = abs_path or os.path.join(self._config.experiment.run_dir, rel_path)
         with open(path, 'w') as stream:
-            yaml.dump(self._config.to_dict(), stream, sort_keys=False)
+            yaml.dump(self._config.to_dict(),stream,sort_keys=False,default_flow_style=None)
         self.logger.info(f"Configuration saved to {path}")
 
     @classmethod
@@ -1324,6 +1324,8 @@ class CorrelationLoss(nn.Module):
         eps = 1e-8
         if cor_weights is None:
             cor_weights = torch.tril(torch.ones((C,C)),diagonal=-1) # only lower tri matters
+        else:
+            cor_weights = torch.tril(torch.tensor(cor_weights),diagonal=-1)
         
         cor_weights = cor_weights.to(unet_out.device)
         

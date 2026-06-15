@@ -341,6 +341,16 @@ for irange,l3s_range in enumerate(
 # combine test_dss
 if not tkw.do_dummy:
     test_ds = ConcatDataset(test_dss)
+    test_ds.nframe = np.sum([ds.nframe for ds in test_dss])
+    test_ds.selected_crops = [sc for ds in test_dss for sc in ds.selected_crops]
+    test_ds.l3r = [l3 for ds in test_dss for l3 in ds.l3r]
+    test_ds.df = pd.concat([ds.df for ds in test_dss])
+    for k in [
+        'ncrops_per_frame','crop_x','crop_y','frame_x','frame_y',
+        'latmesh','lonmesh','grid_size'
+    ]:
+        setattr(test_ds,k,getattr(test_dss[0],k))
+
 epochs = np.arange(config.training.start_epoch,config.training.end_epoch)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.manual_seed(config.experiment.seed)
@@ -385,12 +395,12 @@ for ifold in range(config.data.nfold):
         else:
             corr_flds = []
         model = FluxCombiner(
-            spatial_kw=cfg.model.spatial,
-            temporal_kw=cfg.model.temporal,
-            psf_kw=cfg.model.psf
+            spatial_kw=cfg.model.spatial.to_dict(),
+            temporal_kw=cfg.model.temporal.to_dict(),
+            psf_kw=cfg.model.psf.to_dict()
         )
         trainer = CETrainer(
-            model=model,lr_kw=cfg.training.lr,wd_kw=cfg.training.weight_decay,
+            model=model,lr_kw=cfg.training.lr.to_dict(),wd_kw=cfg.training.weight_decay.to_dict(),
             device=device
         )
         loss_df = pd.DataFrame(
@@ -539,6 +549,29 @@ for ifold in range(config.data.nfold):
             infer = Inferencer(models=[trainer.model],device=device)
             predict,unet_out,predictor = infer.inference(
                 test_ds,xnames=cfg.model.xnames,trim=tkw.trim)
+            dds = np.array(
+                [
+                    l3[cfg.model.yname].detach().numpy() 
+                    for l3 in test_ds.l3r
+                ]
+            )*cfg.data.l3s.var_scales[0]
+            dd_map = dds.mean(axis=0)
+            dd_ts = dds.mean(axis=(-1,-2))
+            predict_map = predict.mean(axis=(0,1,2))
+            predict_ts = predict.mean(axis=(0,2,3,4))
+            unet_out_map = unet_out.mean(axis=(0,1))
+            component_map = (unet_out*predictor).mean(axis=(0,1))
+            grid_size_in_m2 = np.cos(
+                np.deg2rad(test_ds.latmesh)
+            )*np.square(
+                test_ds.grid_size.detach().numpy()*111e3
+            )
+            emission_rate = (
+                (unet_out*predictor*grid_size_in_m2).sum(axis=(-1,-2))
+            ).mean(axis=0)
+            mean_flux = (
+                emission_rate/(predictor*grid_size_in_m2).sum(axis=(-1,-2))
+            ).mean(axis=0)
             for unet_c in cfg.saving.unet_out.plot_channels:
                 fig,ax = plt.subplots(1,1,figsize=(12,10),constrained_layout=True)
                 im = ax.imshow(
@@ -558,7 +591,18 @@ for ifold in range(config.data.nfold):
                     f'unet_out_{ifold}_{ihp}.pkl'
                 )
                 with open(pkl_fn, 'wb') as file:
-                    pickle.dump({'unet_out':unet_out},file)
+                    pickle.dump(
+                        {
+                            'predict_map':predict_map,
+                            'dd_map':dd_map,
+                            'predict_ts':predict_ts,
+                            'dd_ts':dd_ts,
+                            'unet_out_map':unet_out_map,
+                            'component_map':component_map,
+                            'emission_rate':emission_rate,
+                            'mean_flux':mean_flux
+                        },file
+                    )
         if cfg.saving.final_model.enabled:
             model_filename = f'final_model_fold{ifold}_hp{ihp}.pt'
             trainer.save_model(
