@@ -25,12 +25,30 @@ DEFAULT_CONFIG_DICT = {
     },
     'data':{
         'reload':True,
+        'wesnmost':{'westmost':-128,'eastmost':-65,'southmost':24,'northmost':50},
         'l3s':{
             'path_pattern': '/projects/academic/kangsun/zolalaya/data/Cornbelt_NOx/'\
             's5p_cornbelt/%Y/%m/CORNBELT_S5P_NO2_%Y_%m_%d.nc',
             'ranges':[{'start':'2020-01-01','end':'2025-12-31','freq':'1D'}],
             'var_names':['column_amount_DD','column_amount','surface_altitude_DD'],
             'var_scales':[1e9,-1e4,-1e6]# very important, vcd and wt need flipping
+        },
+        'pss':{
+            'enabled':False,
+            'csv':{
+                'enabled':False,
+                'path':'/projects/academic/kangsun/kangsun/IDS/v02/'\
+                'cornbelt_point_sources.csv'
+            },
+            'cems':{
+                'enabled':False,
+                'attributes_path_pattern':'/projects/academic/kangsun/data/CEMS/'\
+                'attributes/trimmed_%Y.csv',
+                'emissions_path_pattern':'/projects/academic/kangsun/data/CEMS/'\
+                'emissions/%Y/%m/%d/%Y%m%d.csv',
+                'n_facility_with_most_NOx':100,
+                'local_hours':[13]
+            }
         },
         'bui':{
             'enabled':True,
@@ -114,6 +132,10 @@ DEFAULT_CONFIG_DICT = {
         },
         'temporal':{
             'temporal_dim':3,'hidden_dim':128,'leaky_relu_rate':0.1,'modulate_decoder':False
+        },
+        'point':{
+            'enabled':False,'hidden_dim':128,'leaky_relu_rate':0.1,'n_layers':4,'dropout':0.1,
+            'pss_x':None,'pss_y':None# placeholders to be replaced by df from config.data.pss
         },
         'psf':{'enabled':False,'kernel_size':5},
         'yname':'column_amount_DD',
@@ -365,6 +387,9 @@ class CEConfig:
             self._config.training.lr.milestone = [
                 0,self._config.training.lr.value,50,self._config.training.lr.value
             ]
+        if not self._config.data.pss.enabled and self._config.model.point.enabled:
+            self.logger.warning('point mlp cannot be enabled without pss data!')
+            self._config.model.point.enabled = False
         exp = self._config.experiment
         data = self._config.data
         hp_tuning = self._config.hp_tuning
@@ -543,6 +568,14 @@ class CEDataset(Dataset):
         self.ymesh = torch.tensor(ymesh).float()
         self.lonmesh = lonmesh
         self.latmesh = latmesh
+        # grid inverse area, m-2 * 1e9 nmol/mol
+        self.gia = torch.tensor(
+            (
+                1e9 if not hasattr(self,'var_scales') else self.var_scales[0]
+            )/(
+                np.cos(np.deg2rad(latmesh))*np.square(grid_size*111e3)
+            ),dtype=torch.float32
+        )
         self.df = df
         # interfacing the bottom up inventory object
         if bui_kw is not None:
@@ -826,7 +859,7 @@ class CEDataset(Dataset):
             # index of crop, from each frame
             crop_idx = idx if frame_idx == 0 else idx-self.cumsum_ncrops[frame_idx-1]
             i, j = self.selected_crops[frame_idx][crop_idx]
-         # spatial feature as normalized lon/lat mesh
+        # spatial feature as normalized lon/lat mesh
         xmesh = self.xmesh[i:i+self.crop_y,j:j+self.crop_x].unsqueeze(0)
         ymesh = self.ymesh[i:i+self.crop_y,j:j+self.crop_x].unsqueeze(0)
         # temporal feature
@@ -886,6 +919,8 @@ class CEDataset(Dataset):
                     )
                 else:
                     out['random_error'] = torch.tensor(1.)
+        # pss outputs
+        out['gia'] = self.gia[i:i+self.crop_y,j:j+self.crop_x].unsqueeze(0)
         # bui outputs
         if 'bui_idxs' in df.keys():
             bui_idx = df['bui_idxs'].iloc[frame_idx]
@@ -1127,6 +1162,122 @@ class FeatureModulatedUNet(nn.Module):
         return self.final_conv(x)
 
 
+class PointSourceDistributor(nn.Module):
+    def __init__(self,pss_x,pss_y):
+        super().__init__()
+        self.n_sources = len(pss_x)
+        
+        # Store the actual source coordinates
+        self.register_buffer(
+            'all_source_coords', 
+            torch.cat(
+                [
+                    pss_x.unsqueeze(1),
+                    pss_y.unsqueeze(1)
+                ],dim=1
+            )
+        )  # [n_sources, 2]
+        
+    def forward(self,point_rates,spatial,gia):
+        '''
+        point_rates:
+            [B, n_sources], point source emission rates, 
+            output from PointSourceMLP,unit mol s-1
+        spatial:
+            [B,C=2 (lon,lat),H,W]
+        gia:
+            [B, 1, H, W], grid inverse area, returned from a dataset sample, 
+            unit m-2 nmol mol-1
+        returns:
+            [B, 1, H, W], emission from all point sources in the view
+        '''
+        B,C,H,W = gia.shape
+        
+        spatial_field = torch.zeros(B,1,H,W,device=point_rates.device)
+        
+        for b in range(B):
+            xmesh,ymesh = spatial[b]
+            xgs = torch.diff(xmesh[0,:]).median().abs()
+            ygs = torch.diff(ymesh[:,0]).median().abs()
+            xmin,xmax = xmesh.min(),xmesh.max()
+            ymin,ymax = ymesh.min(),ymesh.max()
+            
+            in_view_mask = (
+                (self.all_source_coords[:,0] >= xmin-xgs/2) & 
+                (self.all_source_coords[:,0] < xmax+xgs/2) &
+                (self.all_source_coords[:,1] >= ymin-ygs/2) & 
+                (self.all_source_coords[:,1] < ymax+ygs/2)
+            )
+            
+            sources_in_view = torch.where(in_view_mask)[0]
+            
+            if len(sources_in_view) > 0:
+                view_coords = self.all_source_coords[sources_in_view]
+                normalized_x = (view_coords[:,0] - xmin) / (xmax-xmin)
+                normalized_y = (view_coords[:,1] - ymin) / (ymax-ymin)
+                
+                pixel_x = (normalized_x * (W - 1)).round().long().clamp(0, W-1)
+                pixel_y = (normalized_y * (H - 1)).round().long().clamp(0, H-1)
+                
+                # Get emissions for sources in view, nmol m-2 s-1
+                emissions_in_view = point_rates[b,sources_in_view]*\
+                gia[b,0,pixel_y,pixel_x]
+                
+                # Scatter to spatial field
+                spatial_field[b, 0, pixel_y, pixel_x] += emissions_in_view
+        
+        return spatial_field
+
+
+class PointSourceMLP(nn.Module):
+    def __init__(
+        self,
+        n_sources,
+        temporal_dim,
+        hidden_dim=128,
+        n_layers=4,
+        leaky_relu_rate=0.1,
+        dropout=0.1
+    ):
+        super().__init__()
+        self.n_sources = n_sources
+        
+        self.input_proj = nn.Linear(temporal_dim,hidden_dim)
+        
+        self.blocks = nn.ModuleList()
+        for _ in range(n_layers):
+            block = nn.Sequential(
+                nn.Linear(hidden_dim,hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.LeakyReLU(leaky_relu_rate),
+                nn.Dropout(dropout)
+            )
+            self.blocks.append(block)
+        
+        # Final layer with source-specific bias
+        self.output_proj = nn.Linear(hidden_dim, n_sources)
+        self.output_activation = nn.Softplus()
+    
+    def forward(self,temporal):
+        '''
+        temporal: 
+            [B, temporal_dim]
+        returns: 
+            [B, n_sources], emission rates for all sources
+        '''
+        x = self.input_proj(temporal)
+        
+        for block in self.blocks:
+            residual = x
+            x = block(x)
+            x = x + residual
+        
+        out = self.output_proj(x)
+        out = self.output_activation(out)
+        
+        return out
+
+
 class SuperGaussianPSF(nn.Module):
     def __init__(self, kernel_size=5):
         super().__init__()
@@ -1216,13 +1367,28 @@ class FluxCombiner(nn.Module):
     '''
     final function to sum up everything with optional learnable kernel
     '''
-    def __init__(self,spatial_kw,temporal_kw,psf_kw=None):
+    def __init__(self,spatial_kw,temporal_kw,psf_kw=None,point_kw=None):
         super().__init__()
         psf_kw = psf_kw or {'enabled':False}
+        point_kw = point_kw or {'enabled':False}
+        temporal_dim = temporal_kw['temporal_dim']
         self.unet = FeatureModulatedUNet(temporal_kw=temporal_kw,**spatial_kw)
         self.do_psf = psf_kw['enabled']
         if self.do_psf:
             self.psf = SuperGaussianPSF(kernel_size=psf_kw['kernel_size'])
+        self.do_point = point_kw['enabled']
+        if self.do_point:
+            self.point_mlp = PointSourceMLP(
+                n_sources=len(point_kw['pss_x']),
+                temporal_dim=temporal_dim,
+                hidden_dim=point_kw['hidden_dim'],
+                n_layers=point_kw['n_layers'],
+                leaky_relu_rate=point_kw['leaky_relu_rate'],
+                dropout=point_kw['dropout']
+            )
+            self.point_distributor = PointSourceDistributor(
+                point_kw['pss_x'],point_kw['pss_y']
+            )
     
     def forward(self,spatial,predictors,temporal,grid_size=None,gia=None):
         '''
@@ -1236,16 +1402,24 @@ class FluxCombiner(nn.Module):
         grid_size:
             B, grid size, needed for psf
         gia:
-            B,H,W, grid inverse area, needed for point sources
+            B,1,H,W, grid inverse area, needed for point sources
         '''
         unet_out = self.unet(x=spatial,temporal=temporal)
+        out = dict(unet_out=unet_out)
         area_flux = (unet_out*predictors).sum(dim=1,keepdim=True)
-        # to be implemented: point flux
-        all_flux = area_flux
+        # point flux
+        if self.do_point:
+            point_rate = self.point_mlp(temporal)
+            point_flux = self.point_distributor(point_rate,spatial,gia)
+            all_flux = area_flux+point_flux
+            out['point_rate'] = point_rate
+            out['point_flux'] = point_flux
+        else:
+            all_flux = area_flux
         if self.do_psf:
             all_flux = self.psf(x=all_flux,grid_size=grid_size)
-        
-        return all_flux,unet_out
+        out['all_flux'] = all_flux
+        return out
 
 
 class MaskedLoss(nn.Module):
@@ -1547,17 +1721,18 @@ class CETrainer:
         with torch.no_grad():
             for batch in val_loader:
                 batch = self._to_device(batch)
-                predict,unet_out = self.model(
+                out = self.model(
                     spatial=batch['spatial'],
                     predictors=torch.cat([batch[xn] for xn in xnames],dim=1),
                     temporal=batch['temporal'],
-                    grid_size=batch['grid_size']
+                    grid_size=batch['grid_size'],
+                    gia=batch['gia']
                 )
                 if scale_random_error:
                     error_scaler = batch['random_error'].view(-1,1,1,1)
                 else:
                     error_scaler = 1.
-                predict = predict/error_scaler
+                predict = out['all_flux']/error_scaler
                 target = batch[yname]/error_scaler
                 if use_fit_mask:
                     mask = batch['valid_mask']*batch['fit_mask'] 
@@ -1610,17 +1785,18 @@ class CETrainer:
             # Only use autocast on CUDA
             with torch.cuda.amp.autocast(enabled=(self.device.type=='cuda')):
                 predictor = torch.cat([batch[xn] for xn in xnames],dim=1)
-                predict,unet_out = self.model(
+                out = self.model(
                     spatial=batch['spatial'],
                     predictors=predictor,
                     temporal=batch['temporal'],
-                    grid_size=batch['grid_size']
+                    grid_size=batch['grid_size'],
+                    gia=batch['gia']
                 )
                 if scale_random_error:
                     error_scaler = batch['random_error'].view(-1,1,1,1)
                 else:
                     error_scaler = 1.
-                predict = predict/error_scaler
+                predict = out['all_flux']/error_scaler
                 target = batch[yname]/error_scaler
                 if clamp_min_sigma and clamp_max_sigma:
                     target = torch.clamp(target,min=clamp_min_sigma,max=clamp_max_sigma)
@@ -1633,7 +1809,7 @@ class CETrainer:
                 )
                 if smoothness_kw['enabled']:
                     smoothness_loss,smoothness_B_loss,smoothness_SC = smoothness_loss_func(
-                        unet_out,
+                        out['unet_out'],
                         scale_weights=smoothness_kw['scale_weights'],
                         channel_weights=smoothness_kw['channel_weights']
                     )
@@ -1646,9 +1822,9 @@ class CETrainer:
                 
                 if correlation_kw['enabled']:
                     correlation_loss,corr = correlation_loss_func(
-                        unet_out*predictor if correlation_kw[
+                        out['unet_out']*predictor if correlation_kw[
                             'include_predictor'
-                        ] else unet_out,
+                        ] else out['unet_out'],
                         use_double=correlation_kw['use_double'],
                         cor_weights=correlation_kw['channel_weights']
                     )
@@ -1755,6 +1931,15 @@ class Inferencer:
                 self.models[0].named_children()
             ).get('unet').named_children()
         ).get('final_conv')[0].out_channels
+        if 'point_mlp' in dict(self.models[0].named_children()).keys():
+            do_point = True
+            nsource = dict(
+                dict(
+                    self.models[0].named_children()
+                ).get('point_mlp').named_children()
+            ).get('output_proj').out_features
+        else:
+            do_point = False
         nframe = ds.nframe
         ncrop_per_frame = int(ds.ncrops_per_frame[0])
         crop_x,crop_y,frame_x,frame_y=ds.crop_x,ds.crop_y,ds.frame_x,ds.frame_y
@@ -1763,9 +1948,14 @@ class Inferencer:
             ds,batch_size=ncrop_per_frame,shuffle=False,drop_last=True
         )
         # mosaicked unet output to frame dimension
-        unet_out = np.zeros((len(self.models),nframe,unet_out_channels,frame_y,frame_x))
+        unet_out_all = np.zeros((len(self.models),nframe,unet_out_channels,frame_y,frame_x))
         predict = np.zeros((len(self.models),nframe,1,frame_y,frame_x))
         predictor = np.zeros((1,nframe,unet_out_channels,frame_y,frame_x))
+        if do_point:
+            point_flux_all = np.zeros((len(self.models),nframe,1,frame_y,frame_x))
+            point_rates = np.zeros((len(self.models),nframe,nsource))
+        else:
+            point_flux_all,point_rates = None,None
         for imodel,model in enumerate(self.models):
             model.eval()
             with torch.no_grad():
@@ -1781,12 +1971,18 @@ class Inferencer:
                             [batch[xn] for xn in xnames],dim=1
                         )
                     batch = self._to_device(batch)
-                    pred,out = model(
+                    out = model(
                         spatial=batch['spatial'],
                         predictors=batch['predictors'],
                         temporal=batch['temporal'],
-                        grid_size=batch['grid_size']
+                        grid_size=batch['grid_size'],
+                        gia=batch['gia']
                     )
+                    pred = out['all_flux']
+                    unet_out = out['unet_out']
+                    if do_point:
+                        point_flux = out['point_flux']
+                        point_rates[imodel,iframe,:] = out['point_rate'][0].cpu().detach().numpy()# [nsource]
                     # B, unet_out_channels, crop_y, crop_x
                     D_unet = np.zeros((unet_out_channels,frame_y,frame_x))
                     D_pred = np.zeros((1,frame_y,frame_x))
@@ -1794,8 +1990,10 @@ class Inferencer:
                         D_xs = np.zeros((unet_out_channels,frame_y,frame_x))
                     for icrop in range(ncrop_per_frame):
                         # unet_out_channels, crop_y, crop_x
-                        unet_out_crop = out[icrop].cpu().detach().numpy()
+                        unet_out_crop = unet_out[icrop].cpu().detach().numpy()
                         predict_crop = pred[icrop].cpu().detach().numpy()
+                        if do_point:
+                            point_flux_crop = point_flux[icrop].cpu().detach().numpy()
                         if imodel == 0:
                             predictor_crop = batch[
                                 'predictors'][icrop].cpu().detach().numpy()
@@ -1819,12 +2017,17 @@ class Inferencer:
                                 :,trim_up:crop_y-trim_down,
                                 trim_left:crop_x-trim_right
                             ]
+                            if do_point:
+                                point_flux_crop = point_flux_crop[
+                                    :,trim_up:crop_y-trim_down,
+                                    trim_left:crop_x-trim_right
+                                ]
                             if imodel == 0:
                                 predictor_crop = predictor_crop[
                                     :,trim_up:crop_y-trim_down,
                                     trim_left:crop_x-trim_right
                                 ]
-                        unet_out[
+                        unet_out_all[
                             imodel,iframe,:,
                             i+trim_up:i+crop_y-trim_down,
                             j+trim_left:j+crop_x-trim_right
@@ -1842,6 +2045,12 @@ class Inferencer:
                             :,i+trim_up:i+crop_y-trim_down,
                             j+trim_left:j+crop_x-trim_right
                         ] += np.ones(predict_crop.shape)
+                        if do_point:
+                            point_flux_all[
+                                imodel,iframe,:,
+                                i+trim_up:i+crop_y-trim_down,
+                                j+trim_left:j+crop_x-trim_right
+                            ] += point_flux_crop
                         if imodel == 0:
                             predictor[
                                 imodel,iframe,:,
@@ -1852,8 +2061,10 @@ class Inferencer:
                                 :,i+trim_up:i+crop_y-trim_down,
                                 j+trim_left:j+crop_x-trim_right
                             ] += np.ones(predictor_crop.shape)
-                    unet_out[imodel,iframe,] /= D_unet
+                    unet_out_all[imodel,iframe,] /= D_unet
                     predict[imodel,iframe,] /= D_pred
+                    if do_point:
+                        point_flux_all[imodel,iframe,] /= D_pred
                     if imodel == 0:
                         predictor[imodel,iframe,] /= D_xs
-        return predict,unet_out,predictor
+        return predict,unet_out_all,predictor,point_flux_all,point_rates

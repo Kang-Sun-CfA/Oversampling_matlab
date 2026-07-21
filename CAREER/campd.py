@@ -872,7 +872,7 @@ class CEMS():
         self.logger.info("Status code: "+str(response.status_code))
         # converting the content from json format to a data frame
         resjson = response.content.decode('utf8').replace("'", '"')
-        data = json.loads(resjson)
+        data = json.loads(resjson)['items']#['items'] added 20260720
         s = json.dumps(data, indent=4)
         jsonread = pd.read_json(s)
         pddf = pd.DataFrame(jsonread)

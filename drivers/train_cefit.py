@@ -69,12 +69,48 @@ tygrid = arange_(tsouth,tnorth-tgrid_size/2,tgrid_size)+tgrid_size/2
 
 tdt_array = pd.period_range(tstart,tend,freq=tkw.freq)
 if tkw.do_dummy:
-    test_ds = CEDataset(xgrid=txgrid,ygrid=tygrid,dt_array=tdt_array)
+    test_ds = CEDataset(
+        xgrid=txgrid,ygrid=tygrid,dt_array=tdt_array,**config.data.wesnmost.to_dict()
+    )
     test_ds.random_crop(
         crop_x=tkw.crop_x,crop_y=tkw.crop_y,stride_x=tkw.stride_x,stride_y=tkw.stride_y,
         crop_fraction=1.,randomize_start_xy=False,do_group=False
     )
 
+if config.data.pss.enabled:
+    if config.data.pss.csv.enabled:
+        pss_df = pd.read_csv(config.data.pss.csv.path,index_col=0)
+    elif config.data.pss.cems.enabled and config.data.reload:
+        cems_kw = config.data.pss.cems.to_dict()
+        from CAREER.campd import CEMS
+        cems = CEMS(
+            start_dt=pd.Timestamp(config.data.l3s.ranges[0].start),
+            end_dt=pd.Timestamp(config.data.l3s.ranges[-1].end),
+            west=west,east=east,south=south,north=north,
+            attributes_path_pattern=cems_kw['attributes_path_pattern'],
+            emissions_path_pattern=cems_kw['emissions_path_pattern']
+        )
+        cems.subset_facilities(
+            n_facility_with_most_NOx=cems_kw['n_facility_with_most_NOx']
+        )
+        cems.get_facilities_emission_rate(
+            local_hours=cems_kw['local_hours']
+        )
+        pss_df = cems.fadf
+    pss_lat = torch.tensor(pss_df['latitude'].to_numpy(),dtype=torch.float32)
+    pss_lon = torch.tensor(pss_df['longitude'].to_numpy(),dtype=torch.float32)
+    pss_x = (
+        pss_lon-config.data.wesnmost.westmost
+    )/(
+        config.data.wesnmost.eastmost-config.data.wesnmost.westmost
+    )
+    pss_y = (
+        pss_lat-config.data.wesnmost.southmost
+    )/(
+        config.data.wesnmost.northmost-config.data.wesnmost.southmost
+    )
+    config.model.point.pss_x = pss_x
+    config.model.point.pss_y = pss_y
 
 if config.data.bui.enabled and config.data.reload:
     bui = BUI(
@@ -243,7 +279,7 @@ for irange,l3s_range in enumerate(
                     ),
                     time_matching_method=config.data.cdl.time_matching_method,
                 ) if config.data.cdl.enabled else None,
-                base_year=2020,jitter_kw=None
+                base_year=2020,jitter_kw=None,**config.data.wesnmost.to_dict()
             )
             # crop the test ds as it only needs to be done once
             test_dss[irange].random_crop(
@@ -290,7 +326,7 @@ for irange,l3s_range in enumerate(
                         time_matching_method=config.data.cdl.time_matching_method,
                     ) if config.data.bui.enabled else None,
                     initial_random_state=random_state_unit*random_state_count,
-                    base_year=2020,jitter_kw=None
+                    base_year=2020,jitter_kw=None,**config.data.wesnmost.to_dict()
                 )
                 ds.set_jitter(True,jitter_kw={'p_jitter':1.})
                 random_state_count += 1
@@ -328,7 +364,7 @@ for irange,l3s_range in enumerate(
                         ),
                         time_matching_method=config.data.cdl.time_matching_method,
                     ) if config.data.cdl.enabled else None,
-                    base_year=2020,jitter_kw=None
+                    base_year=2020,jitter_kw=None,**config.data.wesnmost.to_dict()
                 )
                 # crop the val ds as it only needs to be done once
                 ds.random_crop(
@@ -397,7 +433,8 @@ for ifold in range(config.data.nfold):
         model = FluxCombiner(
             spatial_kw=cfg.model.spatial.to_dict(),
             temporal_kw=cfg.model.temporal.to_dict(),
-            psf_kw=cfg.model.psf.to_dict()
+            psf_kw=cfg.model.psf.to_dict(),
+            point_kw=cfg.model.point.to_dict()
         )
         trainer = CETrainer(
             model=model,lr_kw=cfg.training.lr.to_dict(),wd_kw=cfg.training.weight_decay.to_dict(),
@@ -547,7 +584,7 @@ for ifold in range(config.data.nfold):
             loss_df.to_csv(os.path.join(cfg.experiment.run_dir,'loss.csv'))
         if cfg.saving.unet_out.enabled:
             infer = Inferencer(models=[trainer.model],device=device)
-            predict,unet_out,predictor = infer.inference(
+            predict,unet_out,predictor,point_flux,point_rates = infer.inference(
                 test_ds,xnames=cfg.model.xnames,trim=tkw.trim)
             dds = np.array(
                 [

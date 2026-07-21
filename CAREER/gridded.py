@@ -208,7 +208,9 @@ class CDL:
             xgrid,ygrid = l3['xgrid'],l3['ygrid']
         self.xgrid,self.ygrid = xgrid,ygrid
         self.df = pd.DataFrame(
-            index=pd.DatetimeIndex([pd.Timestamp(y,1,1) for y in years]).to_period(),
+            index=pd.DatetimeIndex(
+                [pd.Timestamp(y,1,1) for y in years],freq='AS-JAN'
+            ).to_period(),
             data=range(len(years))
         )
         codes = self.lcc_df['Code']
