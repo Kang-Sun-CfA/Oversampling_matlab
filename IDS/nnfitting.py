@@ -17,7 +17,7 @@ from functools import partial
 
 DEFAULT_CONFIG_DICT = {
     'experiment':{
-        'run_id':'cv0',
+        'run_id':'test',
         'run_dir': '/projects/academic/kangsun/kangsun/IDS/v04/cv0',
         'mkdir':True,
         'seed': 42,
@@ -171,6 +171,14 @@ DEFAULT_CONFIG_DICT = {
             'channel_weights':None,
             'use_double':True,
             'output_corr':True
+        },
+        'point_l1_loss':{
+            'enabled':True,
+            'weight':{
+                'value':None,
+                'milestone':[0,0,50,0],
+                'scheduler':'linear'
+            }
         }
     },
     'training':{
@@ -205,7 +213,7 @@ DEFAULT_CONFIG_DICT = {
             'save':True,
             'result_flds':[
                 'train_loss','smooth_loss','smooth_B_loss',
-                'epoch_time','sample_size','lr',
+                'epoch_time','sample_size','lr','point_l1_loss',
                 'grad_norm','nan_norm','zero_norm','cor_loss'
             ]
         },
@@ -1753,6 +1761,7 @@ class CETrainer:
         scale_random_error=True,
         smoothness_kw=None,
         correlation_kw=None,
+        point_l1_kw=None,
         max_norm=1.,
         clamp_max_sigma=None,
         clamp_min_sigma=None,
@@ -1765,6 +1774,7 @@ class CETrainer:
         
         smoothness_kw = smoothness_kw or {'enabled':False}
         correlation_kw = correlation_kw or {'enabled':False}
+        point_l1_kw = point_l1_kw or {'enabled':False}
         if smoothness_kw['enabled']:
             smoothness_loss_func = LaplacianLoss()
         if correlation_kw['enabled']:
@@ -1773,6 +1783,7 @@ class CETrainer:
         total_smo_loss = 0
         total_smb_loss = 0
         total_cor_loss = 0
+        total_pl1_loss = 0
         corr_list = []
         ssc_list = []
         start_time = time.time()
@@ -1807,6 +1818,13 @@ class CETrainer:
                 loss = self.data_loss_func(
                     predict=predict,target=target,mask=mask
                 )
+                # penalize the mean absolute value of all point rates
+                if point_l1_kw['enabled'] and 'point_rate' in out.keys():
+                    point_l1_loss = out['point_rate'].abs().mean()
+                    loss += point_l1_kw['weight']['value']*point_l1_loss
+                else:
+                    point_l1_loss = torch.tensor(0.)
+                
                 if smoothness_kw['enabled']:
                     smoothness_loss,smoothness_B_loss,smoothness_SC = smoothness_loss_func(
                         out['unet_out'],
@@ -1865,6 +1883,7 @@ class CETrainer:
             total_smo_loss += smoothness_loss.item()
             total_smb_loss += smoothness_B_loss.item()
             total_cor_loss += correlation_loss.item()
+            total_pl1_loss += point_l1_loss.item()
             
         # Epoch summary
         epoch_time = time.time() - start_time
@@ -1876,6 +1895,7 @@ class CETrainer:
             smooth_loss=total_smo_loss/num_batches,
             smooth_B_loss=total_smb_loss/num_batches,
             cor_loss=total_cor_loss/num_batches,
+            point_l1_loss=total_pl1_loss/num_batches,
             epoch_time=epoch_time,
             sample_size=len(self.data_loader.dataset),
             grad_norm=np.nanmean(norms),

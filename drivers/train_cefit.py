@@ -36,8 +36,6 @@ from IDS.nnfitting import CEConfig, CEDataset, CETrainer, FluxCombiner, Inferenc
 if len(sys.argv) > 1:
     config = CEConfig.from_yaml(path=config_path)
 
-cfgs = config.get_hp_combinations() if config.hp_tuning.enabled else [config]
-
 # prepare inclusive grid size and wesn to load datasets
 grid_sizes = np.unique(
     [
@@ -398,6 +396,8 @@ vloaders = np.empty(val_dss.shape[1:],dtype=object)
 result_flds = config.saving.loss_df.result_flds
 
 loss_dfs = []
+cfgs = config.get_hp_combinations() if config.hp_tuning.enabled else [config]
+
 for ifold in range(config.data.nfold):
     # separate loader for each vds in this fold, irange dim concatenated
     if do_val:
@@ -430,6 +430,11 @@ for ifold in range(config.data.nfold):
             corr_flds = [f'corr_{i}_{j}' for i in range(1,out_channels) for j in range(i)]
         else:
             corr_flds = []
+        if cfg.model.point.enabled and cfg.data.pss.cems.enabled:
+            cems_flds = [f'cems_cor_{idx}' for idx in pss_df.index]
+            cems_flds += ['cems_cor_all']
+        else:
+            cems_flds = []
         model = FluxCombiner(
             spatial_kw=cfg.model.spatial.to_dict(),
             temporal_kw=cfg.model.temporal.to_dict(),
@@ -444,7 +449,7 @@ for ifold in range(config.data.nfold):
             index=epochs,
             data={
                 f'fold{ifold}_hp{ihp}_{k}':np.full(epochs.shape,np.nan) 
-                for k in result_flds+corr_flds+ssc_flds
+                for k in result_flds+corr_flds+ssc_flds+cems_flds
             }
         )
         if do_val:
@@ -493,21 +498,27 @@ for ifold in range(config.data.nfold):
                 dss=dss,batch_size=cfg.training.batch_size,
                 shuffle_level=cfg.training.shuffle_level
             )
-            smoothness_kw = cfg.loss.smoothness_loss
-            if smoothness_kw.enabled:
-                smoothness_kw.weight.value = smoothness_kw.weight.value or trainer.scheduler(
-                    which=smoothness_kw.weight.scheduler,epoch=epoch,
-                    milestone=smoothness_kw.weight.milestone,output_ratio=False
+            smoothness_kw = cfg.loss.smoothness_loss.to_dict()
+            if smoothness_kw['enabled']:
+                smoothness_kw['weight']['value'] = smoothness_kw['weight']['value'] or trainer.scheduler(
+                    which=smoothness_kw['weight']['scheduler'],epoch=epoch,
+                    milestone=smoothness_kw['weight']['milestone'],output_ratio=False
                 )
-                smoothness_kw.B_weight.value = smoothness_kw.B_weight.value or trainer.scheduler(
-                    which=smoothness_kw.B_weight.scheduler,epoch=epoch,
-                    milestone=smoothness_kw.B_weight.milestone,output_ratio=False
+                smoothness_kw['B_weight']['value'] = smoothness_kw['B_weight']['value'] or trainer.scheduler(
+                    which=smoothness_kw['B_weight']['scheduler'],epoch=epoch,
+                    milestone=smoothness_kw['B_weight']['milestone'],output_ratio=False
                 )
-            correlation_kw = cfg.loss.correlation_loss
-            if correlation_kw.enabled:
-                correlation_kw.weight.value = correlation_kw.weight.value or trainer.scheduler(
-                    which=correlation_kw.weight.scheduler,epoch=epoch,
-                    milestone=correlation_kw.weight.milestone,output_ratio=False
+            correlation_kw = cfg.loss.correlation_loss.to_dict()
+            if correlation_kw['enabled']:
+                correlation_kw['weight']['value'] = correlation_kw['weight']['value'] or trainer.scheduler(
+                    which=correlation_kw['weight']['scheduler'],epoch=epoch,
+                    milestone=correlation_kw['weight']['milestone'],output_ratio=False
+                )
+            point_l1_kw = cfg.loss.point_l1_loss.to_dict()
+            if point_l1_kw['enabled']:
+                point_l1_kw['weight']['value'] = point_l1_kw['weight']['value'] or trainer.scheduler(
+                    which=point_l1_kw['weight']['scheduler'],epoch=epoch,
+                    milestone=point_l1_kw['weight']['milestone'],output_ratio=False
                 )
             result = trainer.train_epoch(
                 epoch=epoch,
@@ -517,6 +528,7 @@ for ifold in range(config.data.nfold):
                 scale_random_error=True,
                 smoothness_kw=smoothness_kw,
                 correlation_kw=correlation_kw,
+                point_l1_kw=point_l1_kw,
                 max_norm=cfg.training.gradient_clipping.max_norm,
                 clamp_max_sigma=cfg.training.target_clampping.max,
                 clamp_min_sigma=cfg.training.target_clampping.min,
@@ -528,7 +540,52 @@ for ifold in range(config.data.nfold):
                     trainer.lr_scheduler.get_last_lr()[0]
                 else:
                     loss_df[f'fold{ifold}_hp{ihp}_{k}'].iloc[iepoch] = result[k]
-            
+            # evaluate point mlp performance with cems
+            if cfg.model.point.enabled and cfg.data.pss.cems.enabled:
+                ds = test_dss[0]
+                temporal = torch.tensor(
+                    pd.concat(
+                        [
+                            ds.df['fractional_year']-ds.base_year,
+                            ds.df['fy_sin'],ds.df['fy_cos']
+                        ],axis=1
+                    ).to_numpy(),dtype=torch.float32
+                ).to(device)
+                trainer.model.eval()
+                with torch.no_grad():
+                    epoch_point_rates = trainer.model.point_mlp(temporal).cpu().detach().numpy()
+                # point sources emission rate df, [nframe,nsource], predicted by current model
+                psser_df = pd.DataFrame(
+                    index=ds.df.index,
+                    data={
+                        idx:epoch_point_rates[:,i] 
+                        for i,idx in enumerate(pss_df.index)
+                    }
+                )
+                pser_cors = np.zeros(len(pss_df.index))
+                pser_dfs = []
+                for i,fid in enumerate(pss_df.index):
+                    pser_df = cems.return_PointSource(
+                        fid
+                    ).emission_df.rolling(
+                        '31d'
+                    ).mean().resample(
+                        ds.df.index.freq
+                    ).mean().to_period().merge(
+                        psser_df[[fid]],left_index=True,right_index=True
+                    ).rename(columns={fid:'learned'})
+                    pser_cors[i] = pser_df[['NOx (mol/s)','learned']].corr().iloc[0,1]
+                    pser_dfs.append(pser_df)
+                pser_df = pd.concat(pser_dfs)
+                loss_df[f'fold{ifold}_hp{ihp}_cems_cor_all'].iloc[
+                    iepoch
+                ] = pser_df[['NOx (mol/s)','learned']].corr().iloc[0,1]
+                pss_df['cor'] = pser_cors
+                for idx in pss_df.index:
+                    loss_df[f'fold{ifold}_hp{ihp}_cems_cor_{idx}'].iloc[
+                        iepoch
+                    ] = pss_df.loc[idx].cor
+                
             if do_val:
                 if cfg.experiment.interactive:
                     val_t0 = time.time()
@@ -609,16 +666,60 @@ for ifold in range(config.data.nfold):
             mean_flux = (
                 emission_rate/(predictor*grid_size_in_m2).sum(axis=(-1,-2))
             ).mean(axis=0)
-            for unet_c in cfg.saving.unet_out.plot_channels:
-                fig,ax = plt.subplots(1,1,figsize=(12,10),constrained_layout=True)
-                im = ax.imshow(
-                    unet_out[0,:,unet_c].mean(axis=0),origin='lower')
-                fig.colorbar(im,shrink=0.35)
-                if cfg.saving.unet_out.save_plot:
+            emission_rate *= 0.014*1e-9
+            if cfg.saving.unet_out.save_plot:
+                ts = ds.df.index.start_time+pd.Timedelta(days=15)
+                fig,ax = plt.subplots(1,1,figsize=(13,6),constrained_layout=True)
+                ax.plot(ts,emission_rate[:,2:5])
+                fig.savefig(
+                    os.path.join(
+                        cfg.experiment.run_dir,
+                        f'er_{ifold}_{ihp}.png'
+                    ),dpi=150,bbox_inches='tight'
+                )
+                plt.close('all')
+                fig,ax = plt.subplots(1,1,figsize=(13,6),constrained_layout=True)
+                ax.plot(ts,emission_rate[:,5:])
+                fig.savefig(
+                    os.path.join(
+                        cfg.experiment.run_dir,
+                        f'erd_{ifold}_{ihp}.png'
+                    ),dpi=150,bbox_inches='tight'
+                )
+                plt.close('all')
+                fig,ax = plt.subplots(1,1,figsize=(13,6),constrained_layout=True)
+                ax.plot(ts,emission_rate[:,0],label='Sink')
+                ax.plot(ts,emission_rate[:,1],label='Topography')
+                ax.plot(ts,emission_rate[:,2:].sum(axis=1),'k',label='Source')
+                ax.plot(ts,-emission_rate[:,2:].sum(axis=1),ls='--',color='grey',label=r'Source$\times{(-1)}$')
+                ax.legend(bbox_to_anchor=(1.0, 1), loc='upper left')
+                fig.savefig(
+                    os.path.join(
+                        cfg.experiment.run_dir,
+                        f'ts_{ifold}_{ihp}.png'
+                    ),dpi=150,bbox_inches='tight'
+                )
+                plt.close('all')
+                for unet_c in cfg.saving.unet_out.plot_channels:
+                    fig,ax = plt.subplots(1,1,figsize=(12,10),constrained_layout=True)
+                    im = ax.imshow(
+                        unet_out_map[unet_c],origin='lower')
+                    fig.colorbar(im,shrink=0.35)
                     fig.savefig(
                         os.path.join(
                             cfg.experiment.run_dir,
                             f'unet_out_{ifold}_{ihp}_{unet_c}.png'
+                        ),dpi=150,bbox_inches='tight'
+                    )
+                    plt.close()
+                    fig,ax = plt.subplots(1,1,figsize=(12,10),constrained_layout=True)
+                    im = ax.imshow(
+                        component_map[unet_c],origin='lower')
+                    fig.colorbar(im,shrink=0.35)
+                    fig.savefig(
+                        os.path.join(
+                            cfg.experiment.run_dir,
+                            f'component_{ifold}_{ihp}_{unet_c}.png'
                         ),dpi=150,bbox_inches='tight'
                     )
                     plt.close()
