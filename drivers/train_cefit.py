@@ -568,7 +568,7 @@ for ifold in range(config.data.nfold):
                     pser_df = cems.return_PointSource(
                         fid
                     ).emission_df.rolling(
-                        '31d'
+                        '35d',center=True
                     ).mean().resample(
                         ds.df.index.freq
                     ).mean().to_period().merge(
