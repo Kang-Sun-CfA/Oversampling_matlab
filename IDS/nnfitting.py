@@ -34,19 +34,19 @@ DEFAULT_CONFIG_DICT = {
             'var_scales':[1e9,-1e4,-1e6]# very important, vcd and wt need flipping
         },
         'pss':{
-            'enabled':False,
+            'enabled':True,
             'csv':{
                 'enabled':False,
                 'path':'/projects/academic/kangsun/kangsun/IDS/v02/'\
                 'cornbelt_point_sources.csv'
             },
             'cems':{
-                'enabled':False,
+                'enabled':True,
                 'attributes_path_pattern':'/projects/academic/kangsun/data/CEMS/'\
                 'attributes/trimmed_%Y.csv',
                 'emissions_path_pattern':'/projects/academic/kangsun/data/CEMS/'\
                 'emissions/%Y/%m/%d/%Y%m%d.csv',
-                'n_facility_with_most_NOx':100,
+                'n_facility_with_most_NOx':50,
                 'local_hours':[13]
             }
         },
@@ -70,10 +70,9 @@ DEFAULT_CONFIG_DICT = {
             'lcc_path':'/projects/academic/kangsun/data/GIS_data/CDL/fractions/lcc.csv',
             'years':[2020,2021,2022,2023,2024,2025],
             'name_codes':[
-                ['corn',[1]],['soybean',[5]],
+                ['corn',[1]],['soybean',[5]],['wheat',[22,23,24]],
                 ['dev_o',[121]],['dev_l',[122]],
-                ['dev_m',[123]],['dev_h',[124]],
-                ['wetland',[190,195]],['forest',[141,143,142]]
+                ['dev_m',[123]],['dev_h',[124]]
             ],
             'time_matching_method':'year'
         },
@@ -134,16 +133,16 @@ DEFAULT_CONFIG_DICT = {
             'temporal_dim':3,'hidden_dim':128,'leaky_relu_rate':0.1,'modulate_decoder':False
         },
         'point':{
-            'enabled':False,'hidden_dim':128,'leaky_relu_rate':0.1,'n_layers':4,'dropout':0.1,
+            'enabled':True,'hidden_dim':128,'leaky_relu_rate':0.1,'n_layers':4,'dropout':0.1,
             'pss_x':None,'pss_y':None# placeholders to be replaced by df from config.data.pss
         },
-        'psf':{'enabled':False,'kernel_size':5},
+        'psf':{'enabled':False,'kernel_size':5,'unet_skip_channels':[0,1]},
         'yname':'column_amount_DD',
-        'xnames':['column_amount','surface_altitude_DD']
+        'xnames':['column_amount','surface_altitude_DD','cdl']
     },
     'loss':{
         'main_loss': 'L1Loss',
-        'use_fit_mask': True,
+        'use_fit_mask': False,
         'smoothness_loss':{
             'enabled':True,
             'weight':{
@@ -186,10 +185,10 @@ DEFAULT_CONFIG_DICT = {
         'batch_size':256,'shuffle_level':'sample',
         'lr':{
             'value':None,
-            'milestone':[0,1e-4,50,1e-4],
+            'milestone':[0,5e-4,50,5e-4],
             'scheduler':'linear',
             'multipliers':{
-                'other':1,'temporal_film':0.4,'psf':20
+                'other':1,'temporal_film':5,'psf':20
             }
         },
         'weight_decay':{
@@ -199,7 +198,7 @@ DEFAULT_CONFIG_DICT = {
             }
         },
         'gradient_clipping': {'max_norm': 1.0},
-        'target_clampping':{'min':None,'max':3.}
+        'target_clampping':{'min':None,'max':None}
     },
     'hp_tuning':{
         'enabled':False,
@@ -1384,6 +1383,7 @@ class FluxCombiner(nn.Module):
         self.do_psf = psf_kw['enabled']
         if self.do_psf:
             self.psf = SuperGaussianPSF(kernel_size=psf_kw['kernel_size'])
+            self.unet_skip_channels = psf_kw['unet_skip_channels']
         self.do_point = point_kw['enabled']
         if self.do_point:
             self.point_mlp = PointSourceMLP(
@@ -1414,19 +1414,28 @@ class FluxCombiner(nn.Module):
         '''
         unet_out = self.unet(x=spatial,temporal=temporal)
         out = dict(unet_out=unet_out)
-        area_flux = (unet_out*predictors).sum(dim=1,keepdim=True)
-        # point flux
+        C = unet_out.shape[1]
+        # flux from area sources
+        flux = (unet_out*predictors)[
+            :,[c for c in range(C) if c not in self.unet_skip_channels],:,:
+        ].sum(dim=1,keepdim=True)
+        # add point source flux
         if self.do_point:
             point_rate = self.point_mlp(temporal)
             point_flux = self.point_distributor(point_rate,spatial,gia)
-            all_flux = area_flux+point_flux
+            flux += point_flux 
             out['point_rate'] = point_rate
             out['point_flux'] = point_flux
-        else:
-            all_flux = area_flux
+        # psf applied only on area/point flux
         if self.do_psf:
-            all_flux = self.psf(x=all_flux,grid_size=grid_size)
-        out['all_flux'] = all_flux
+            flux = self.psf(x=flux,grid_size=grid_size)
+        # add chem and topo terms
+        if len(self.unet_skip_channels) > 0:
+            out['all_flux'] = flux+(unet_out*predictors)[
+                :,self.unet_skip_channels,:,:
+            ].sum(dim=1,keepdim=True)
+        else:
+            out['all_flux'] = flux
         return out
 
 
