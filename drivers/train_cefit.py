@@ -94,7 +94,7 @@ if config.data.pss.enabled:
         cems.get_facilities_emission_rate(
             local_hours=cems_kw['local_hours']
         )
-        pss_df = cems.fadf
+        pss_df = cems.fadf.loc[~cems.fadf.index.isin(cems_kw['fid_blacklist'])]
     pss_lat = torch.tensor(pss_df['latitude'].to_numpy(),dtype=torch.float32)
     pss_lon = torch.tensor(pss_df['longitude'].to_numpy(),dtype=torch.float32)
     pss_x = (
@@ -568,7 +568,7 @@ for ifold in range(config.data.nfold):
                     pser_df = cems.return_PointSource(
                         fid
                     ).emission_df.rolling(
-                        '35d',center=True
+                        cfg.data.pss.cems.rolling_window,center=True
                     ).mean().resample(
                         ds.df.index.freq
                     ).mean().to_period().merge(
@@ -577,6 +577,13 @@ for ifold in range(config.data.nfold):
                     pser_cors[i] = pser_df[['NOx (mol/s)','learned']].corr().iloc[0,1]
                     pser_dfs.append(pser_df)
                 pser_df = pd.concat(pser_dfs)
+                if cfg.saving.point.save_pser_df and iepoch == len(epochs)-1:
+                    pser_df.to_pickle(
+                        os.path.join(
+                            config.experiment.run_dir,
+                            f'pser_df_fold{ifold}_hp{ihp}.pkl'
+                        )
+                    )
                 loss_df[f'fold{ifold}_hp{ihp}_cems_cor_all'].iloc[
                     iepoch
                 ] = pser_df[['NOx (mol/s)','learned']].corr().iloc[0,1]

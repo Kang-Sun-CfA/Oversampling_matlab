@@ -47,7 +47,9 @@ DEFAULT_CONFIG_DICT = {
                 'emissions_path_pattern':'/projects/academic/kangsun/data/CEMS/'\
                 'emissions/%Y/%m/%d/%Y%m%d.csv',
                 'n_facility_with_most_NOx':50,
-                'local_hours':[13]
+                'fid_blacklist':[2876,1167],
+                'local_hours':[13],
+                'rolling_window':'90d'
             }
         },
         'bui':{
@@ -215,6 +217,9 @@ DEFAULT_CONFIG_DICT = {
                 'epoch_time','sample_size','lr','point_l1_loss',
                 'grad_norm','nan_norm','zero_norm','cor_loss'
             ]
+        },
+        'point':{
+            'save_pser_df':True
         },
         'best_model':{
             'enabled':False,
