@@ -1,10 +1,11 @@
 import logging
+import pyproj
 try:
-    import rasterio, pyproj
+    import rasterio
 except Exception as e:
     logging.warning(e)
-    logging.warning('CDL.get_fractions does not work without these packages')
-from netCDF4 import Dataset
+    logging.warning('CDL.get_fractions does not work without rasterio')
+from netCDF4 import Dataset, num2date
 import numpy as np
 import pandas as pd
 import datetime as dt
@@ -687,6 +688,155 @@ class BUI():
                         ifn*12:(ifn+1)*12,ifield,:,:
                     ] = image
         self.add_stats_to_df(raw=True,name=None,stats='mean')
+    
+    def read_GRA2PES_NOx(self, base_dir, grid_size=0.02, xgrid=None, ygrid=None):
+        '''NOAA GRA2PES monthly NOx, mol m-2 s-1, regridded to a regular lon-lat grid'''
+        self.fields = np.array(['NOX'])
+        if xgrid is None or ygrid is None:
+            self.raw_xgrid = np.arange(self.west, self.east + grid_size/2, grid_size)
+            self.raw_ygrid = np.arange(self.south, self.north + grid_size/2, grid_size)
+        else:
+            self.raw_xgrid = np.asarray(xgrid)
+            self.raw_ygrid = np.asarray(ygrid)
+            grid_size = float(np.round(np.abs(np.median(np.diff(self.raw_xgrid))), 6))
+        self.raw_grid_size = grid_size
+        self.raw_xgrid_size = self.raw_ygrid_size = grid_size
+        xmesh, ymesh = np.meshgrid(self.raw_xgrid, self.raw_ygrid)
+        self.raw_grid_size_in_m2 = np.cos(np.deg2rad(ymesh))*np.square(grid_size*111e3)
+        self.raw_data = np.zeros(
+            (len(self.df.index), len(self.fields), len(self.raw_ygrid), len(self.raw_xgrid)),
+            dtype=np.float32
+        )
+        transformer = None
+        for imon, mon in enumerate(self.df.index):
+            year, month = mon.year, mon.month
+            yyyymm = f'{year}{month:02d}'
+            month_dir = os.path.join(base_dir, str(year), f'{month:02d}')
+            day_mean = {}
+            for day_type in ['weekdy', 'satdy', 'sundy']:
+                nox_list = []
+                for halfday in ['00to11Z', '12to23Z']:
+                    fn = os.path.join(
+                        month_dir,
+                        f'GRA2PESv2.0beta_total_{yyyymm}_{day_type}_{halfday}.nc'
+                    )
+                    with Dataset(fn, 'r') as nc:
+                        if transformer is None:
+                            x_native = np.asarray(nc['x'][:])
+                            y_native = np.asarray(nc['y'][:])
+                            crs_native = pyproj.CRS.from_cf(
+                                {a: nc['lambert_conformal_conic'].getncattr(a)
+                                 for a in nc['lambert_conformal_conic'].ncattrs()}
+                            )
+                            transformer = pyproj.Transformer.from_crs(
+                                'EPSG:4326', crs_native, always_xy=True
+                            )
+                            xt, yt = transformer.transform(xmesh, ymesh)
+                            dx = np.abs(np.nanmedian(np.diff(x_native)))
+                            dy = np.abs(np.nanmedian(np.diff(y_native)))
+                            xmask = (x_native >= np.nanmin(xt) - dx) & (x_native <= np.nanmax(xt) + dx)
+                            ymask = (y_native >= np.nanmin(yt) - dy) & (y_native <= np.nanmax(yt) + dy)
+                            xi = np.where(xmask)[0]
+                            yi = np.where(ymask)[0]
+                            x_subset = x_native[xi]
+                            y_subset = y_native[yi]
+                            target_points = np.column_stack((yt.ravel(), xt.ravel()))
+                        nox = nc['NOX'][:, :, yi, xi]
+                        if hasattr(nox, 'filled'):
+                            nox = nox.filled(np.nan)
+                        nox = np.nansum(nox, axis=1)  # sum emission levels
+                        nox_list.append(nox/1e6/3600)  # mol km-2 hr-1 to mol m-2 s-1
+                nox = np.concatenate(nox_list, axis=0)
+                day_native = np.nanmean(nox, axis=0)
+                f = RegularGridInterpolator(
+                    (y_subset, x_subset), day_native,
+                    bounds_error=False, fill_value=np.nan
+                )
+                day_mean[day_type] = f(target_points).reshape(xmesh.shape)
+            days = pd.date_range(f'{year}-{month:02d}-01', periods=mon.days_in_month, freq='1d')
+            self.raw_data[imon, 0] = (
+                day_mean['weekdy']*np.sum(days.weekday < 5)
+                + day_mean['satdy']*np.sum(days.weekday == 5)
+                + day_mean['sundy']*np.sum(days.weekday == 6)
+            ) / mon.days_in_month
+            print(f'Loaded {yyyymm}')
+        self.add_stats_to_df(raw=True, name=None, stats='mean')
+
+    def read_JPL_NOx(self, jpl_dir, fields=['anth', 'bio', 'soil', 'tot'],
+                     unit='mol/m2/s', grid_size=None, xgrid=None, ygrid=None):
+        '''JPL TROPESS monthly NOx emissions (kg N m-2 s-1 converted to mol N)'''
+        self.fields = np.array(fields)
+        file_dict = {}
+        for field in fields:
+            pattern = os.path.join(jpl_dir, f'TROPESS_reanalysis_mon_emi_nox_{field}_*.nc')
+            file_dict[field] = sorted(glob.glob(pattern))
+            if len(file_dict[field]) == 0:
+                raise FileNotFoundError(f'No JPL files found for {field}')
+        with Dataset(file_dict[fields[0]][0], 'r') as nc:
+            lon = nc['lon'][:].filled(np.nan)
+            lat = nc['lat'][:].filled(np.nan)
+            lon = (lon + 180) % 360 - 180
+            xorder = np.argsort(lon)
+            yorder = np.argsort(lat)
+            lon = lon[xorder]
+            lat = lat[yorder]
+        regrid = (grid_size is not None) or (xgrid is not None)
+        if not regrid:
+            xmask = (lon >= self.west) & (lon <= self.east)
+            ymask = (lat >= self.south) & (lat <= self.north)
+            self.raw_xgrid = lon[xmask]
+            self.raw_ygrid = lat[ymask]
+            self.raw_xgrid_size = np.abs(np.nanmedian(np.diff(self.raw_xgrid)))
+            self.raw_ygrid_size = np.abs(np.nanmedian(np.diff(self.raw_ygrid)))
+            self.raw_grid_size = (self.raw_xgrid_size + self.raw_ygrid_size)/2
+        else:
+            if xgrid is not None and ygrid is not None:
+                self.raw_xgrid = np.asarray(xgrid)
+                self.raw_ygrid = np.asarray(ygrid)
+                grid_size = float(np.round(np.abs(np.median(np.diff(self.raw_xgrid))), 6))
+            else:
+                self.raw_xgrid = np.arange(self.west, self.east + grid_size/2, grid_size)
+                self.raw_ygrid = np.arange(self.south, self.north + grid_size/2, grid_size)
+            self.raw_grid_size = grid_size
+            self.raw_xgrid_size = self.raw_ygrid_size = grid_size
+        xmesh, ymesh = np.meshgrid(self.raw_xgrid, self.raw_ygrid)
+        self.raw_grid_size_in_m2 = np.cos(np.deg2rad(ymesh))*np.square(self.raw_grid_size*111e3)
+        self.raw_data = np.full(
+            (len(self.df.index), len(fields), len(self.raw_ygrid), len(self.raw_xgrid)),
+            np.nan, dtype=np.float32
+        )
+        target_points = np.column_stack((ymesh.ravel(), xmesh.ravel()))
+        for ifield, field in enumerate(fields):
+            for filename in file_dict[field]:
+                with Dataset(filename, 'r') as nc:
+                    nox = nc['nox'][:]
+                    if hasattr(nox, 'filled'):
+                        nox = nox.filled(np.nan)
+                    nox = np.where(nox < -9e8, np.nan, nox)
+                    nox = nox[:, yorder, :][:, :, xorder]
+                    if unit == 'mol/m2/s':
+                        nox = nox/0.014
+                    elif unit == 'nmol/m2/s':
+                        nox = nox/0.014*1e9
+                    time_var = nc['time']
+                    dates = num2date(
+                        time_var[:], units=time_var.units,
+                        calendar=getattr(time_var, 'calendar', 'standard')
+                    )
+                    mons = pd.PeriodIndex([f'{d.year}-{d.month:02d}' for d in dates], freq='M')
+                    for i, mon in enumerate(mons):
+                        if mon not in self.df.index:
+                            continue
+                        itime = self.df.index.get_loc(mon)
+                        if not regrid:
+                            self.raw_data[itime, ifield] = nox[i][np.ix_(ymask, xmask)]
+                        else:
+                            f = RegularGridInterpolator(
+                                (lat, lon), nox[i], bounds_error=False, fill_value=np.nan
+                            )
+                            self.raw_data[itime, ifield] = f(target_points).reshape(xmesh.shape)
+            print(f'Loaded JPL {field}')
+        self.add_stats_to_df(raw=True, name=None, stats='mean')
     
     def blur(self,gaussian_sigma,raw=True):
         data_name = 'raw_data' if raw else 'data'
