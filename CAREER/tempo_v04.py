@@ -643,15 +643,6 @@ class TEMPO():
         if attach_l2:
             self.l2s = l2s
 
-def _dim_size(nc,name,axis):
-    """dimension size; V04 files keep dimensions in groups, so fall back to the latitude shape"""
-    if name in nc.dimensions:
-        return nc.dimensions[name].size
-    for g in nc.groups.values():
-        if name in g.dimensions:
-            return g.dimensions[name].size
-    return nc['/geolocation/latitude'].shape[axis]
-
 class TEMPOL2(dict):
     def __init__(self,year,month,day,scan_num,l2_dir_pattern,
                  west=None,east=None,south=None,north=None):
@@ -724,11 +715,11 @@ class TEMPOL2(dict):
                             self.logger.info(f'{l2_path} does not intersect with wesn bounds')
                             granule_mask[il2] = False
                     granule_numbers[il2] = nc.granule_num
-                    along_tracks[il2] = _dim_size(nc,'mirror_step',0)
+                    along_tracks[il2] = nc.dimensions['mirror_step'].size
                     if il2 == 0:
-                        xtrack = _dim_size(nc,'xtrack',1)
+                        xtrack = nc.dimensions['xtrack'].size
                     else:
-                        if xtrack != _dim_size(nc,'xtrack',1):
+                        if xtrack != nc.dimensions['xtrack'].size:
                             self.logger.error('inconsistent xtrack dimension!')
             except Exception as e:
                 self.logger.warning(f'{l2_path} gives error!')
@@ -789,7 +780,7 @@ class TEMPOL2(dict):
                     dt.datetime.strptime(nc.time_coverage_start,'%Y-%m-%dT%H:%M:%SZ'))
                 dn_utc1 = datetime2datenum(
                     dt.datetime.strptime(nc.time_coverage_end,'%Y-%m-%dT%H:%M:%SZ'))
-                nmirror_step = _dim_size(nc,'mirror_step',0)
+                nmirror_step = nc.dimensions['mirror_step'].size
                 self['time'][
                     start_alongtrack_idx:start_alongtrack_idx+along_tracks[igranule]
                 ] = np.linspace(
