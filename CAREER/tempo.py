@@ -273,6 +273,10 @@ class TEMPO():
             if true, enable l2->4 using the TEMPOL2 class. otherwise l3->4 by popy.py
         fadf:
             facility attributes dataframe from campd. save facility-specific l4 files
+        gradient_kw['do_total']:
+            if true, also calculate DD of column_amount_total (needs vertical_column_total in data_fields)
+        gradient_kw['do_sum']:
+            if true, also calculate column_amount_sum (troposphere + stratosphere vertical columns, times f) and its DD
         '''
         if l2_path_pattern is None and l2_dir_pattern is not None:
             l2_path_pattern = l2_dir_pattern
@@ -290,8 +294,12 @@ class TEMPO():
         
         do_l4 = False
         do_f = False
+        do_total = False
+        do_sum = False
         if gradient_kw is not None:
             do_l4 = True
+            do_total = gradient_kw.get('do_total',False)
+            do_sum = gradient_kw.get('do_sum',False)
             if 'interp_geoscf_kw' in gradient_kw.keys():
                 from CAREER.level2 import GeosCfSampler
                 gcsampler = GeosCfSampler(base_dir=gradient_kw['interp_geoscf_kw']['base_dir'])
@@ -354,6 +362,12 @@ class TEMPO():
                 oversampling_list += ['column_amount_DIV','column_amount_DIV_xy','column_amount_DIV_rs']
             if do_f:
                 oversampling_list += ['f']
+            if do_total:
+                oversampling_list += ['column_amount_total','wind_column_total','wind_column_total_xy',
+                                      'wind_column_total_rs','wind_topo_total']
+            if do_sum:
+                oversampling_list += ['column_amount_sum','wind_column_sum','wind_column_sum_xy',
+                                      'wind_column_sum_rs','wind_topo_sum']
         for date in dates:
             # DDA on tempo grid
             if use_TEMPOL2:
@@ -378,14 +392,18 @@ class TEMPO():
                             date.strftime('%Y%m%d'),scan_num))
                         continue
                     tl2.load_l2(max_ecf=max_ecf,max_crf=max_crf,maxsza=maxsza,
-                                data_fields=data_fields,data_fields_l2g=data_fields_l2g)
+                                data_fields=data_fields,data_fields_l2g=data_fields_l2g,load_total=do_total,load_sum=do_sum)
                     if do_l4:
                         tl2.get_theta()
                         tl2.interp_met(**gradient_kw['interp_met_kw'])
                         if do_f:
                             tl2 = gcsampler.interpolate_NOxNO2_ratio(tl2,**gckw)
+                            if do_total:
+                                tl2['column_amount_total'] = tl2['column_amount_total']*tl2['f']
+                            if do_sum:
+                                tl2['column_amount_sum'] = tl2['column_amount_sum']*tl2['f']
 #                             self.logger.warning(tl2.keys())
-                        tl2.get_DD(fields=['column_amount'],
+                        tl2.get_DD(fields=['column_amount']+(['column_amount_total'] if do_total else [])+(['column_amount_sum'] if do_sum else []),
                                    east_wind_field=gradient_kw['x_wind_field'],
                                    north_wind_field=gradient_kw['y_wind_field'],
                                    do_DIV=do_DIV
@@ -712,7 +730,7 @@ class TEMPOL2(dict):
         self.along_tracks = along_tracks[granule_mask]
         self.xtrack = xtrack
     
-    def load_l2(self,data_fields=None,data_fields_l2g=None,max_ecf=0.2,max_crf=np.inf,maxsza=None):
+    def load_l2(self,data_fields=None,data_fields_l2g=None,max_ecf=0.2,max_crf=np.inf,maxsza=None,load_total=False,load_sum=False):
         along_tracks = self.along_tracks
         l2_list = self.l2_list
         if data_fields is None:
@@ -730,6 +748,12 @@ class TEMPOL2(dict):
             data_fields_l2g = ['eff_cloud_fraction','amf_cloud_fraction','latc','lonc',
                                'surface_pressure','terrain_height',
                                'latr','lonr','sza','qa','column_amount']
+            if load_total:
+                data_fields = data_fields+['/support_data/vertical_column_total']
+                data_fields_l2g = data_fields_l2g+['column_amount_total']
+            if load_sum:
+                data_fields = data_fields+['/product/vertical_column_stratosphere']
+                data_fields_l2g = data_fields_l2g+['column_amount_strat']
         
         for short_name in data_fields_l2g:
             if short_name in ['lonr','latr']:
@@ -781,6 +805,15 @@ class TEMPOL2(dict):
             mask = mask & (self['sza']<=maxsza)
         self['column_amount'][~mask] = np.nan
         self['column_amount'] /= 6.02214e19     
+        if 'column_amount_total' in self.keys():
+            tot = self['column_amount_total']
+            tot[~(mask & (tot>-1e19) & (tot<1e19))] = np.nan
+            self['column_amount_total'] = tot/6.02214e19
+        if 'column_amount_strat' in self.keys():
+            strat = self['column_amount_strat']
+            strat[~(mask & (strat>-1e19) & (strat<1e19))] = np.nan
+            # troposphere + stratosphere, same pixel mask and unit as column_amount
+            self['column_amount_sum'] = self['column_amount']+strat/6.02214e19
         self['UTC_matlab_datenum'] = np.broadcast_to(self['time'][:,np.newaxis],self['latc'].shape)
         self['across_track_position'] = np.broadcast_to(np.arange(1.,self.xtrack+1,dtype=int
                                                                  )[np.newaxis,:],
@@ -1025,6 +1058,14 @@ class TEMPOL2(dict):
         ~np.isnan(self['column_amount']) 
         if 'column_amount_DD' in self.keys():
             mask = mask & ~np.isnan(self['column_amount_DD'])
+        if 'column_amount_total' in self.keys():
+            mask = mask & ~np.isnan(self['column_amount_total'])
+        if 'column_amount_sum' in self.keys():
+            mask = mask & ~np.isnan(self['column_amount_sum'])
+        if 'column_amount_sum_DD' in self.keys():
+            mask = mask & ~np.isnan(self['column_amount_sum_DD'])
+        if 'column_amount_total_DD' in self.keys():
+            mask = mask & ~np.isnan(self['column_amount_total_DD'])
         
         l2g_data = {k:self[k][mask] for k in ['eff_cloud_fraction','latc','lonc',
                                                'surface_pressure','terrain_height',
@@ -1047,7 +1088,19 @@ class TEMPOL2(dict):
             l2g_data['wind_topo_xy'] = l2g_data['column_amount']*self['terrain_height_DD_xy'][mask]
         if 'terrain_height_DD_rs' in self.keys():
             l2g_data['wind_topo_rs'] = l2g_data['column_amount']*self['terrain_height_DD_rs'][mask]
+        if 'column_amount_total' in self.keys() and 'terrain_height_DD' in self.keys():
+            l2g_data['wind_topo_total'] = self['column_amount_total'][mask]*self['terrain_height_DD'][mask]
+        if 'column_amount_sum' in self.keys() and 'terrain_height_DD' in self.keys():
+            l2g_data['wind_topo_sum'] = self['column_amount_sum'][mask]*self['terrain_height_DD'][mask]
         wind_column_mapping = {
+            'column_amount_total':'column_amount_total',
+            'column_amount_total_DD':'wind_column_total',
+            'column_amount_total_DD_xy':'wind_column_total_xy',
+            'column_amount_total_DD_rs':'wind_column_total_rs',
+            'column_amount_sum':'column_amount_sum',
+            'column_amount_sum_DD':'wind_column_sum',
+            'column_amount_sum_DD_xy':'wind_column_sum_xy',
+            'column_amount_sum_DD_rs':'wind_column_sum_rs',
             'column_amount_DD_xy':'wind_column_xy',
             'column_amount_DD_rs':'wind_column_rs',
             'column_amount_DD':'wind_column',
