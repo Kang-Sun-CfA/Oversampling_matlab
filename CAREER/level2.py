@@ -8,7 +8,7 @@ import datetime as dt
 import pandas as pd
 import logging
 from scipy.io import loadmat
-import os,sys,glob
+import os,sys,glob,time
 import matplotlib.pyplot as plt
 from matplotlib.collections import PolyCollection
 import cartopy.crs as ccrs
@@ -195,7 +195,7 @@ class L2ToL4():
                 # iasi, starting at upper left, going clockwise
                 # first to third defines x, second to fourth defines y
                 ifov_idxs = [[0,1,2,3]]
-            if isinstance(data,CrISL2):
+            elif isinstance(data,CrISL2):
                 # cris
                 ifov_idxs = [[8,7,4,5],[7,6,3,4],[4,3,0,1],[5,4,1,2]]
             else:
@@ -886,7 +886,11 @@ class IASIL2(dict):
         self.logger = logging.getLogger(__name__)
         if not os.path.exists(ellipse_lut_path):
             self.logger.warning(f'{ellipse_lut_path} not found. try download')
-            os.system('wget https://github.com/Kang-Sun-CfA/PU_KS_share/raw/refs/heads/master/daysss.mat')
+            
+    # [CHANGED] added '-O {ellipse_lut_path}'. Plain wget saved daysss.mat in the
+    # current directory, so loadmat(ellipse_lut_path) failed whenever
+    # ellipse_lut_path pointed somewhere else
+            os.system(f'wget -O {ellipse_lut_path} https://github.com/Kang-Sun-CfA/PU_KS_share/raw/refs/heads/master/daysss.mat')
         pixel_lut = loadmat(ellipse_lut_path)
         # the following are functions - interpolating major/minor axis and rotation of ellipse
         # at given latitude and pixel number
@@ -900,6 +904,98 @@ class IASIL2(dict):
         # constant, 4 ifov per ifor for iasi
         self.NIFOV_PER_IFOR = 4
         
+    ''' [ADDED] wait_for_server: the IPSL THREDDS server goes down at times. 
+        This blocks and re-checks every 'interval' seconds until it answers, so
+        download_l2 can resume instead of crashing or skipping dates'''
+        
+    @staticmethod
+    def wait_for_server(server_url='https://thredds-su.ipsl.fr/thredds/catalog.html',
+                        interval=300, max_wait=None):
+        '''
+        block until the server answers.
+        interval: seconds between checks (default 5 min)
+        max_wait: give up after this many seconds (None = wait forever)
+        return: True when the server is back, False if max_wait is reached
+        '''
+        import requests
+        t_start = time.time()
+        while True:
+            stamp = time.strftime('%Y-%m-%d %H:%M:%S')
+            try:
+                requests.head(server_url, timeout=(30, 60))
+                print(f'{stamp} server is answering', flush=True)
+                return True
+            except requests.exceptions.RequestException:
+                waited = time.time() - t_start
+                if max_wait is not None and waited >= max_wait:
+                    print(f'{stamp} server still down after {waited/3600:.1f} h, giving up', flush=True)
+                    return False
+                print(f'{stamp} server not reachable, waiting {interval} s '
+                      f'(waited {waited/60:.0f} min so far)', flush=True)
+                time.sleep(interval)
+    
+    # [ADDED] download_l2: downloads IASI NH3R-ERA5 L2 daily files from the IPSL
+    # THREDDS server into a %Y/%m folder (same idea as CrISL2.download_l2).
+    # Writes to a .part file and renames only when complete, so a broken
+    # download never replaces a good local file. 404 -> skip the date;
+    # network error -> wait_for_server, then retry the same file
+    @staticmethod
+    def download_l2(
+        dts, l2_dir_pattern, which_metop='C',
+        url_pattern='https://thredds-su.ipsl.fr/thredds/fileServer/IASI/L2/NH3R-ERA5/METOP-{metop}/%Y/%m/IASI_METOP{metop}_L2_NH3_%Y%m%d_ULB-LATMOS_V4.0.0R.nc',
+        overwrite=True, connect_timeout=30, read_timeout=600, chunk_size=2**20,
+        wait_interval=300, max_wait=None
+    ):
+        '''
+        download IASI NH3R-ERA5 L2 files from the IPSL THREDDS server, analogous to CrISL2.download_l2
+        dts: dates to download
+        l2_dir_pattern: strftime pattern of the local folder, e.g. '.../IASI/IASIcNH3/L2/%Y/%m/'
+        which_metop: 'A', 'B', or 'C'
+        url_pattern: {metop} -> A/B/C, then strftime fills the date
+        overwrite: True = always download and replace the local file
+        wait_interval: if the server does not answer, check again every this many seconds
+        max_wait: stop waiting after this many seconds (None = wait forever)
+        behavior:
+            file not on server (404)       -> skip this date
+            server not reachable / error   -> wait until the server answers, retry the SAME file
+            download complete              -> replace local file, go to next date
+        return: list of local paths that exist after the call
+        '''
+        import requests
+        logger = logging.getLogger(__name__)
+        out_paths = []
+        for dt_ in pd.to_datetime(dts):
+            url = dt_.strftime(url_pattern.format(metop=which_metop.upper()))
+            l2_dir = dt_.strftime(l2_dir_pattern)
+            local_path = os.path.join(l2_dir, os.path.basename(url))
+            if os.path.exists(local_path) and not overwrite:
+                out_paths.append(local_path)
+                continue
+            os.makedirs(l2_dir, exist_ok=True)
+            tmp_path = local_path + '.part'
+            while True:
+                try:
+                    with requests.get(url, stream=True, timeout=(connect_timeout, read_timeout)) as r:
+                        if r.status_code == 404:
+                            logger.warning(f'no Metop-{which_metop} file on server for {dt_:%Y-%m-%d}')
+                            break                                   # skip this date
+                        r.raise_for_status()
+                        with open(tmp_path, 'wb') as f:
+                            for chunk in r.iter_content(chunk_size=chunk_size):
+                                f.write(chunk)
+                    # replace the old file only when the new one is complete
+                    os.replace(tmp_path, local_path)
+                    out_paths.append(local_path)
+                    break                                           # done -> next date
+                except requests.exceptions.RequestException as e:
+                    logger.warning(f'{dt_:%Y-%m-%d} download failed: {e}')
+                    if not IASIL2.wait_for_server(interval=wait_interval, max_wait=max_wait):
+                        break                                       # gave up waiting
+                    time.sleep(60)                                  # short pause, then retry the same file
+        return out_paths
+ 
+    
+        
     def load_l2(
         self,l2_path_pattern,data_fields=None,am_filter=True,land_filter=True,
         pre_filter=True,post_filter=True
@@ -907,7 +1003,7 @@ class IASIL2(dict):
         '''
         l2_path_pattern:
             pattern of l2 data path, e.g., 
-            '/projects/academic/kangsun/data/IASIcNH3/IASI_METOPC_L2_NH3_%Y%m%d_ULB-LATMOS_V4.0.0R.nc'
+            '/projects/academic/kangsun/data/IASI/IASIcNH3/L2/%Y/%m/*%Y%m%d*.nc'
         data_fields:
             fields to read from l2 netcdf, defaults to a list code below
         am/land/pre/post_filter:
@@ -933,8 +1029,13 @@ class IASIL2(dict):
         ncd = {}
         with Dataset(l2_path) as nc:
             nsounding = nc.dimensions['time'].size
+            
+            # [CHANGED] was: ncd[n] = nc[n][:].filled(np.nan)
+            # nc[n][:] is a plain ndarray (no .filled) when a variable has no masked
+            # values, and integer arrays cannot hold NaN. Casting to float and using
+            # np.ma.filled works in both cases
             for n in data_fields:
-                ncd[n] = nc[n][:].filled(np.nan)
+                ncd[n] = np.ma.filled(nc[n][:].astype(float), np.nan)
             with np.errstate(divide='ignore',invalid='ignore'):
                 # calculate the ifor number, should be 30 per scanline
                 ncd['ifor_number'] = (ncd['pixel_number']-1)//NIFOV_PER_IFOR+1
@@ -971,12 +1072,26 @@ class IASIL2(dict):
                     (ncd['scanline_number'] == scanline) & \
                     (ncd['ifor_number'] == ifor)
                     if ifor_mask.sum() == NIFOV_PER_IFOR:
-                        ifor_idxs.append(all_idxs[ifor_mask])
+                        # [CHANGED] was: ifor_idxs.append(all_idxs[ifor_mask])
+                        # that kept the 4 FOVs in file order, which is not guaranteed to be
+                        # ifov 1,2,3,4. _get_DD_oval uses ifov_idxs=[[0,1,2,3]] (row 0->2 = x,
+                        # row 1->3 = y), so the rows must be sorted by ifov_number or the
+                        # directional derivatives use the wrong pixel pairs
+                        idx = all_idxs[ifor_mask]
+                        # fixed row order: row k is ifov k+1, as assumed by L2ToL4._get_DD_oval
+                        ifor_idxs.append(idx[np.argsort(ncd['ifov_number'][idx])])
                     # end of ifor loop per scanline
                 ifors_per_orbit.append(ifors_per_scanline)
                 # end of scanline loop per orbit
             ifors.append(ifors_per_orbit)
             # end of loop over orbits
+        # [ADDED] empty-day check: if no complete 4-FOV IFOR is in the box (e.g. no
+        # overpass, all PM, or edge-only pixels), np.array([]).T is empty and the
+        # field loop / lookup-table interpolation below would fail. Warn and return
+        if len(ifor_idxs) == 0:
+            self.logger.warning('no complete ifors in the box for {}'.format(
+                self.date.strftime('%Y%m%d')))
+            return
         ifor_idxs = np.array(ifor_idxs).T
         for field in data_fields+['ifor_number']:
             if field == 'longitude':
@@ -1003,6 +1118,82 @@ class IASIL2(dict):
         if post_filter:
             self['column_amount'][self['postfilter']!=1] = np.nan
         self['column_amount'][self['column_amount'] > 1e36] = np.nan # fill value is 9.97e36
+    
+    #ADDED
+    def save_l2g(self,l2g_path_pattern=None,path=None,delete_existing=True):
+        '''save the [NIFOV_PER_IFOR, NIFOR] arrays from load_l2 to a netcdf l2g file
+        l2g_path_pattern:
+            strftime pattern, e.g.,
+            '/projects/academic/kangsun/data/IASI/IASIcNH3/L2g/%Y/%m/CONUS_%Y_%m_%d.nc'
+        path:
+            explicit file path, supersedes l2g_path_pattern
+        delete_existing:
+            overwrite if the file exists; otherwise skip
+        '''
+        if 'latc' not in self.keys() or self['latc'].size == 0:
+            self.logger.warning('nothing to save for {}'.format(self.date.strftime('%Y%m%d')))
+            return
+        path = path or self.date.strftime(l2g_path_pattern)
+        os.makedirs(os.path.split(path)[0],exist_ok=True)
+        if os.path.exists(path):
+            if delete_existing:
+                os.remove(path)
+            else:
+                self.logger.warning(f'{path} exists, skipping')
+                return
+        shape = self['latc'].shape
+        with Dataset(path,'w',format='NETCDF4') as nc:
+            nc.createDimension('NIFOV_PER_IFOR',shape[0])
+            nc.createDimension('NIFOR',shape[1])
+            nc.setncattr('date',self.date.strftime('%Y-%m-%d'))
+            nc.setncattr('west',self.west);nc.setncattr('east',self.east)
+            nc.setncattr('south',self.south);nc.setncattr('north',self.north)
+            for k,v in self.items():
+                v = np.asarray(v,dtype=np.float64)
+                if v.shape != shape:
+                    self.logger.warning(f'{k} has shape {v.shape}, not saved')
+                    continue
+                var = nc.createVariable(k,'f8',('NIFOV_PER_IFOR','NIFOR'),zlib=True,complevel=4)
+                var[:] = v
+    
+    #ADDED
+    def load_l2g(self,l2g_path_pattern=None,path=None,
+                 land_filter=True,pre_filter=True,post_filter=True,max_cloud_coverage=None):
+        '''load l2g saved by save_l2g, subset to the box in __init__, and apply quality filters
+        land/pre/post_filter:
+            set column_amount to nan where LS_mask/prefilter/postfilter != 1
+        max_cloud_coverage:
+            if given, set column_amount to nan where cloud_coverage exceeds it
+        '''
+        path = path or self.date.strftime(l2g_path_pattern)
+        if not os.path.exists(path):
+            self.logger.warning(f'{path} does not exist')
+            return
+        self.clear()
+        with Dataset(path,'r') as nc:
+            for varname in nc.variables:
+                self[varname] = np.ma.filled(nc[varname][:],np.nan)
+        # keep whole ifors with at least one ifov in the box, so the 2x2 geometry stays intact
+        in_box = (self['lonc'] >= self.west) & (self['lonc'] <= self.east) &\
+        (self['latc'] >= self.south) & (self['latc'] <= self.north)
+        keep = np.any(in_box,axis=0)
+        for k in self.keys():
+            self[k] = self[k][:,keep]
+        # quality filters only remove the column, not the geometry
+        bad = np.zeros(self['latc'].shape,dtype=bool)
+        if land_filter:
+            bad |= self['LS_mask'] != 1
+        if pre_filter:
+            bad |= self['prefilter'] != 1
+        if post_filter:
+            bad |= self['postfilter'] != 1
+        if max_cloud_coverage is not None:
+            bad |= self['cloud_coverage'] > max_cloud_coverage
+        for k in ['column_amount','nh3_total_column_random_uncertainty',
+                  'nh3_total_column_systematic_uncertainty']:
+            if k in self.keys():
+                self[k][bad] = np.nan
+ 
     
     def plot(
         self,data=None,ax=None,figsize=None,if_latlon=False,npoints=20,
