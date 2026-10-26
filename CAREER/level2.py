@@ -887,9 +887,6 @@ class IASIL2(dict):
         if not os.path.exists(ellipse_lut_path):
             self.logger.warning(f'{ellipse_lut_path} not found. try download')
             
-    # [CHANGED] added '-O {ellipse_lut_path}'. Plain wget saved daysss.mat in the
-    # current directory, so loadmat(ellipse_lut_path) failed whenever
-    # ellipse_lut_path pointed somewhere else
             os.system(f'wget -O {ellipse_lut_path} https://github.com/Kang-Sun-CfA/PU_KS_share/raw/refs/heads/master/daysss.mat')
         pixel_lut = loadmat(ellipse_lut_path)
         # the following are functions - interpolating major/minor axis and rotation of ellipse
@@ -934,11 +931,6 @@ class IASIL2(dict):
                       f'(waited {waited/60:.0f} min so far)', flush=True)
                 time.sleep(interval)
     
-    # [ADDED] download_l2: downloads IASI NH3R-ERA5 L2 daily files from the IPSL
-    # THREDDS server into a %Y/%m folder (same idea as CrISL2.download_l2).
-    # Writes to a .part file and renames only when complete, so a broken
-    # download never replaces a good local file. 404 -> skip the date;
-    # network error -> wait_for_server, then retry the same file
     @staticmethod
     def download_l2(
         dts, l2_dir_pattern, which_metop='C',
@@ -949,7 +941,9 @@ class IASIL2(dict):
         '''
         download IASI NH3R-ERA5 L2 files from the IPSL THREDDS server, analogous to CrISL2.download_l2
         dts: dates to download
-        l2_dir_pattern: strftime pattern of the local folder, e.g. '.../IASI/IASIcNH3/L2/%Y/%m/'
+        l2_dir_pattern: strftime pattern of the local folder, e.g.
+            '/projects/academic/kangsun/data/IASINH3/L2/{metop}/%Y/%m/'
+            {metop} is filled with the lowercase satellite letter (a/b/c)
         which_metop: 'A', 'B', or 'C'
         url_pattern: {metop} -> A/B/C, then strftime fills the date
         overwrite: True = always download and replace the local file
@@ -966,7 +960,7 @@ class IASIL2(dict):
         out_paths = []
         for dt_ in pd.to_datetime(dts):
             url = dt_.strftime(url_pattern.format(metop=which_metop.upper()))
-            l2_dir = dt_.strftime(l2_dir_pattern)
+            l2_dir = dt_.strftime(l2_dir_pattern.format(metop=which_metop.lower()))
             local_path = os.path.join(l2_dir, os.path.basename(url))
             if os.path.exists(local_path) and not overwrite:
                 out_paths.append(local_path)
@@ -1003,7 +997,7 @@ class IASIL2(dict):
         '''
         l2_path_pattern:
             pattern of l2 data path, e.g., 
-            '/projects/academic/kangsun/data/IASI/IASIcNH3/L2/%Y/%m/*%Y%m%d*.nc'
+            '/projects/academic/kangsun/data/IASINH3/L2/c/%Y/%m/*%Y%m%d*.nc'
         data_fields:
             fields to read from l2 netcdf, defaults to a list code below
         am/land/pre/post_filter:
@@ -1030,10 +1024,6 @@ class IASIL2(dict):
         with Dataset(l2_path) as nc:
             nsounding = nc.dimensions['time'].size
             
-            # [CHANGED] was: ncd[n] = nc[n][:].filled(np.nan)
-            # nc[n][:] is a plain ndarray (no .filled) when a variable has no masked
-            # values, and integer arrays cannot hold NaN. Casting to float and using
-            # np.ma.filled works in both cases
             for n in data_fields:
                 ncd[n] = np.ma.filled(nc[n][:].astype(float), np.nan)
             with np.errstate(divide='ignore',invalid='ignore'):
@@ -1072,22 +1062,13 @@ class IASIL2(dict):
                     (ncd['scanline_number'] == scanline) & \
                     (ncd['ifor_number'] == ifor)
                     if ifor_mask.sum() == NIFOV_PER_IFOR:
-                        # [CHANGED] was: ifor_idxs.append(all_idxs[ifor_mask])
-                        # that kept the 4 FOVs in file order, which is not guaranteed to be
-                        # ifov 1,2,3,4. _get_DD_oval uses ifov_idxs=[[0,1,2,3]] (row 0->2 = x,
-                        # row 1->3 = y), so the rows must be sorted by ifov_number or the
-                        # directional derivatives use the wrong pixel pairs
-                        idx = all_idxs[ifor_mask]
-                        # fixed row order: row k is ifov k+1, as assumed by L2ToL4._get_DD_oval
-                        ifor_idxs.append(idx[np.argsort(ncd['ifov_number'][idx])])
+                        assert np.array_equal(ncd['ifov_number'][ifor_mask],[1,2,3,4])
+                        ifor_idxs.append(all_idxs[ifor_mask])
                     # end of ifor loop per scanline
                 ifors_per_orbit.append(ifors_per_scanline)
                 # end of scanline loop per orbit
             ifors.append(ifors_per_orbit)
             # end of loop over orbits
-        # [ADDED] empty-day check: if no complete 4-FOV IFOR is in the box (e.g. no
-        # overpass, all PM, or edge-only pixels), np.array([]).T is empty and the
-        # field loop / lookup-table interpolation below would fail. Warn and return
         if len(ifor_idxs) == 0:
             self.logger.warning('no complete ifors in the box for {}'.format(
                 self.date.strftime('%Y%m%d')))
@@ -1119,12 +1100,12 @@ class IASIL2(dict):
             self['column_amount'][self['postfilter']!=1] = np.nan
         self['column_amount'][self['column_amount'] > 1e36] = np.nan # fill value is 9.97e36
     
-    #ADDED
+    
     def save_l2g(self,l2g_path_pattern=None,path=None,delete_existing=True):
         '''save the [NIFOV_PER_IFOR, NIFOR] arrays from load_l2 to a netcdf l2g file
         l2g_path_pattern:
             strftime pattern, e.g.,
-            '/projects/academic/kangsun/data/IASI/IASIcNH3/L2g/%Y/%m/CONUS_%Y_%m_%d.nc'
+            '/projects/academic/kangsun/data/IASINH3/L2g/c/%Y/%m/CONUS_%Y_%m_%d.nc'
         path:
             explicit file path, supersedes l2g_path_pattern
         delete_existing:
@@ -1156,7 +1137,7 @@ class IASIL2(dict):
                 var = nc.createVariable(k,'f8',('NIFOV_PER_IFOR','NIFOR'),zlib=True,complevel=4)
                 var[:] = v
     
-    #ADDED
+   
     def load_l2g(self,l2g_path_pattern=None,path=None,
                  land_filter=True,pre_filter=True,post_filter=True,max_cloud_coverage=None):
         '''load l2g saved by save_l2g, subset to the box in __init__, and apply quality filters
