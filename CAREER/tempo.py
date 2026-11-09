@@ -120,7 +120,7 @@ class TEMPO():
             if provided, will not load the scans. should be a list of file paths
         '''
         if fields_name is None:
-            fields_name = ['wind_column','wind_topo',
+            fields_name = ['column_amount_DD','terrain_height_DD',
                            'column_amount','local_hour','terrain_height']
         if tendency is not None:
             do_tendency = True
@@ -195,9 +195,9 @@ class TEMPO():
         if do_tendency:
             self.l3s.get_storage(field='column_amount',tendency=tendency)
             # ok to get DD' here, but better to add storage after loading the l3s for more flexibility
-            # e.g., the storage can be added to wind_column_xy/rs, or wind_column_topo/chem
+            # e.g., the storage can be added to column_amount_DD_xy/rs, or to the topography/chemistry-corrected DD
             self.l3s.add_storage(vcd_field='column_amount',
-                                 emission_field='wind_column',tendency=tendency,
+                                 emission_field='column_amount_DD',tendency=tendency,
                                  mode='nanmean',nan_tendency_as_zero=True)
                 
         if do_local_hour:
@@ -241,6 +241,20 @@ class TEMPO():
                     l3['num_samples'] = num.copy()
         self.l3_lhs = l3_lhs
     
+    def _read_exclude_scans(self,exclude_scans):
+        '''return a set of (YYYYMMDD, scan_num) to skip, from a csv path or dataframe'''
+        if exclude_scans is None:
+            return None
+        if isinstance(exclude_scans,pd.DataFrame):
+            df = exclude_scans
+        else:
+            df = pd.read_csv(exclude_scans)
+        if 'date' in df.columns:
+            dstr = pd.to_datetime(df['date']).dt.strftime('%Y%m%d')
+        else:
+            dstr = pd.to_datetime(df[['year','month','day']]).dt.strftime('%Y%m%d')
+        return set(zip(dstr,df['scan'].astype(int)))
+
     def regrid_from_l2(self,l2_path_pattern=None,l2_dir_pattern=None,
                        data_fields=None,data_fields_l2g=None,
                        attach_l3=False,attach_l2=False,
@@ -250,7 +264,7 @@ class TEMPO():
                        maxsza=75,maxcf=None,max_ecf=0.2,max_crf=np.inf,
                        ncores=0,block_length=300,
                        l3_ncattr_dict=None,l4_ncattr_dict=None,
-                       use_TEMPOL2=True,fadf=None):
+                       use_TEMPOL2=True,fadf=None,exclude_scans=None):
         '''regrid tempo l2 data to l3/l4
         l2_path/dir_pattern:
             patterns of l2 directories, e.g., %Y/%m/%d/. file names will be inferred
@@ -267,12 +281,16 @@ class TEMPO():
         gradient_kw:
             args to l4. l4 only enabled with gradient_kw provided
         l3/4_save_fields:
-            data fields to save in l3/4 files
+            data fields to save in l3/4 files. default l4 fields assume use_TEMPOL2=True
+            (use_TEMPOL2=False gives popy's wind_column/wind_topo names, pass them explicitly)
         for cloud fraction, prefer effective cloud fraction (max_ecf)
         use_TEMPOL2:
             if true, enable l2->4 using the TEMPOL2 class. otherwise l3->4 by popy.py
         fadf:
             facility attributes dataframe from campd. save facility-specific l4 files
+        exclude_scans:
+            csv path (or dataframe) with columns year, month, day, scan (or date, scan). these scans are
+            skipped before regridding. only date and scan are used, so the file is portable
         gradient_kw['do_total']:
             if true, also calculate DD of column_amount_total (needs vertical_column_total in data_fields)
         gradient_kw['do_sum']:
@@ -309,7 +327,8 @@ class TEMPO():
         l3_save_fields = l3_save_fields or ['column_amount']
         l4_save_fields = l4_save_fields or \
         ['column_amount','local_hour','terrain_height',\
-         'wind_topo','wind_topo_xy','wind_topo_rs','wind_column','wind_column_xy','wind_column_rs']
+         'terrain_height_DD','terrain_height_DD_xy','terrain_height_DD_rs',
+         'column_amount_DD','column_amount_DD_xy','column_amount_DD_rs']
         
         if l3_path_pattern is not None:
             l3_ncattr_dict = l3_ncattr_dict or {
@@ -338,6 +357,7 @@ class TEMPO():
                 
         dates = pd.date_range(self.start_dt,self.end_dt,freq='1D')
         wesn_dict = dict(west=self.west,east=self.east,south=self.south,north=self.north)
+        exclude = self._read_exclude_scans(exclude_scans)
         
         if attach_l3:
             l3s = []
@@ -352,8 +372,8 @@ class TEMPO():
         
         oversampling_list = ['terrain_height','column_amount','local_hour']
         if do_l4 and use_TEMPOL2:
-            oversampling_list += ['wind_column','wind_column_xy','wind_column_rs',
-                                  'wind_topo','wind_topo_xy','wind_topo_rs']
+            oversampling_list += ['column_amount_DD','column_amount_DD_xy','column_amount_DD_rs',
+                                  'terrain_height_DD','terrain_height_DD_xy','terrain_height_DD_rs']
             if 'do_DIV' in gradient_kw.keys():
                 do_DIV = gradient_kw['do_DIV']
             else:
@@ -363,11 +383,11 @@ class TEMPO():
             if do_f:
                 oversampling_list += ['f']
             if do_total:
-                oversampling_list += ['column_amount_total','wind_column_total','wind_column_total_xy',
-                                      'wind_column_total_rs','wind_topo_total']
+                oversampling_list += ['column_amount_total','column_amount_total_DD','column_amount_total_DD_xy',
+                                      'column_amount_total_DD_rs','terrain_height_DD_total']
             if do_sum:
-                oversampling_list += ['column_amount_sum','wind_column_sum','wind_column_sum_xy',
-                                      'wind_column_sum_rs','wind_topo_sum']
+                oversampling_list += ['column_amount_sum','column_amount_sum_DD','column_amount_sum_DD_xy',
+                                      'column_amount_sum_DD_rs','terrain_height_DD_sum']
         for date in dates:
             # DDA on tempo grid
             if use_TEMPOL2:
@@ -384,6 +404,16 @@ class TEMPO():
                     day_flist = glob.glob(date.strftime(os.path.join(l2_dir_pattern,'*')))
                 # read scan num from file names - not the most robust solution
                 scan_nums = np.sort(np.unique([int(os.path.split(f)[-1][35:38]) for f in day_flist]))
+                if exclude is not None:
+                    datestr = date.strftime('%Y%m%d')
+                    kept = [sn for sn in scan_nums if (datestr,int(sn)) not in exclude]
+                    if len(kept) < len(scan_nums):
+                        self.logger.warning('{} excluding scans {}'.format(
+                            datestr,[int(sn) for sn in scan_nums if (datestr,int(sn)) in exclude]))
+                    scan_nums = kept
+                    if len(scan_nums) == 0:
+                        self.logger.info(datestr+' has no l2 scans left after exclusion, skipping')
+                        continue
                 for scan_num in scan_nums:
                     tl2 = TEMPOL2(year=date.year,month=date.month,day=date.day,scan_num=scan_num,
                                   l2_dir_pattern=l2_dir_pattern,**wesn_dict)
@@ -542,6 +572,13 @@ class TEMPO():
                     next_date.timetuple()[0:3]+(2,0,0))}
                 # level 2 files of the same day
                 day_flist = glob.glob(date.strftime(l2_path_pattern))
+                if exclude is not None:
+                    datestr = date.strftime('%Y%m%d')
+                    day_flist = [f for f in day_flist
+                                 if (datestr,int(os.path.split(f)[-1][35:38])) not in exclude]
+                    if len(day_flist) == 0:
+                        self.logger.info(datestr+' has no l2 files left after exclusion, skipping')
+                        continue
 
                 # create tempo popy instance for the day
                 tempo_l2_daily = popy(instrum='TEMPO',
@@ -1082,40 +1119,32 @@ class TEMPOL2(dict):
                                            self['lonr'][:,:,1][mask],
                                            self['lonr'][:,:,0][mask],
                                            self['lonr'][:,:,3][mask]))
+        # terrain_height_DD fields contain column_amount multiplied by the terrain_height_DD
         if 'terrain_height_DD' in self.keys():
-            l2g_data['wind_topo'] = l2g_data['column_amount']*self['terrain_height_DD'][mask]
+            l2g_data['terrain_height_DD'] = l2g_data['column_amount']*self['terrain_height_DD'][mask]
         if 'terrain_height_DD_xy' in self.keys():
-            l2g_data['wind_topo_xy'] = l2g_data['column_amount']*self['terrain_height_DD_xy'][mask]
+            l2g_data['terrain_height_DD_xy'] = l2g_data['column_amount']*self['terrain_height_DD_xy'][mask]
         if 'terrain_height_DD_rs' in self.keys():
-            l2g_data['wind_topo_rs'] = l2g_data['column_amount']*self['terrain_height_DD_rs'][mask]
+            l2g_data['terrain_height_DD_rs'] = l2g_data['column_amount']*self['terrain_height_DD_rs'][mask]
         if 'column_amount_total' in self.keys() and 'terrain_height_DD' in self.keys():
-            l2g_data['wind_topo_total'] = self['column_amount_total'][mask]*self['terrain_height_DD'][mask]
+            l2g_data['terrain_height_DD_total'] = self['column_amount_total'][mask]*self['terrain_height_DD'][mask]
         if 'column_amount_sum' in self.keys() and 'terrain_height_DD' in self.keys():
-            l2g_data['wind_topo_sum'] = self['column_amount_sum'][mask]*self['terrain_height_DD'][mask]
-        wind_column_mapping = {
-            'column_amount_total':'column_amount_total',
-            'column_amount_total_DD':'wind_column_total',
-            'column_amount_total_DD_xy':'wind_column_total_xy',
-            'column_amount_total_DD_rs':'wind_column_total_rs',
-            'column_amount_sum':'column_amount_sum',
-            'column_amount_sum_DD':'wind_column_sum',
-            'column_amount_sum_DD_xy':'wind_column_sum_xy',
-            'column_amount_sum_DD_rs':'wind_column_sum_rs',
-            'column_amount_DD_xy':'wind_column_xy',
-            'column_amount_DD_rs':'wind_column_rs',
-            'column_amount_DD':'wind_column',
-            'udotx':'udotx',
-            'wind_stripe':'wind_stripe',
-            'column_amount_DIV_xy':'column_amount_DIV_xy',
-            'column_amount_DIV_rs':'column_amount_DIV_rs',
-            'column_amount_DIV':'column_amount_DIV',
-            'f':'f'
-        }
-        for k,v in wind_column_mapping.items():
+            l2g_data['terrain_height_DD_sum'] = self['column_amount_sum'][mask]*self['terrain_height_DD'][mask]
+        fields = [
+            'column_amount_total',
+            'column_amount_total_DD','column_amount_total_DD_xy','column_amount_total_DD_rs',
+            'column_amount_sum',
+            'column_amount_sum_DD','column_amount_sum_DD_xy','column_amount_sum_DD_rs',
+            'column_amount_DD','column_amount_DD_xy','column_amount_DD_rs',
+            'udotx','wind_stripe',
+            'column_amount_DIV','column_amount_DIV_xy','column_amount_DIV_rs',
+            'f'
+        ]
+        for k in fields:
             if k not in self.keys():
                 self.logger.info(f'{k} not in TEMPOL2!')
                 continue
-            l2g_data[v] = self[k][mask]
+            l2g_data[k] = self[k][mask]
         
         additional_mapping = additional_mapping or {}
         for k,v in additional_mapping.items():
@@ -1297,4 +1326,3 @@ class TEMPOL2(dict):
             ax.quiver(basis_o1.ravel(),basis_o2.ravel(),
                       grad_e.ravel(),grad_n.ravel(),scale=scale,width=width,color=color,**grad_rs_kw)
         return dict(fig=fig,ax=ax,cb=cb,clon=clon,clat=clat)
-    
