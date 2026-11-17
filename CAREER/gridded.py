@@ -1,0 +1,1174 @@
+import logging
+import pyproj
+try:
+    import rasterio
+except Exception as e:
+    logging.warning(e)
+    logging.warning('CDL.get_fractions does not work without rasterio')
+from netCDF4 import Dataset, num2date
+import numpy as np
+import pandas as pd
+import datetime as dt
+import time
+from scipy.interpolate import RegularGridInterpolator
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+import sys,os,glob
+from popy import Level3_Data, F_center2edge, Level3_List
+from scipy.ndimage import gaussian_filter
+from shapely.geometry import Polygon
+
+# code hosting classes for gridded, raster like datasets that interact with popy data
+class CDL:
+    '''class to handle crop data layer (cdl) data'''
+    def __init__(self,lcc_path=None,lcc_df=None):
+        self.logger = logging.getLogger(__name__)
+        if lcc_df is None:
+            if lcc_path is None:
+                self.logger.warning('no lcc provided, trying download')
+                url = "https://www.nass.usda.gov/Research_and_Science/Cropland/docs/cdl_legend_colors.html"
+                html_tables = pd.read_html(url)
+                lcc_df = html_tables[0].drop(columns=['Color'])
+            else:
+                lcc_df = pd.read_csv(lcc_path,index_col=0)
+        self.lcc_df = lcc_df
+    
+    def trim(self,west,east,south,north):
+        '''trim the cdl same way as Level3_Data.trim, assuming grids are aligned'''
+        xmask = (self.xgrid >= west) & (self.xgrid <= east)
+        ymask = (self.ygrid >= south) & (self.ygrid <= north)
+        new_cdl = CDL(lcc_df=self.lcc_df)
+        new_cdl.df = self.df.copy()
+        new_cdl.xgrid,new_cdl.ygrid = self.xgrid[xmask],self.ygrid[ymask]
+        if hasattr(self,'cdl_name_codes'):
+            new_cdl.cdl_name_codes = self.cdl_name_codes.copy()
+        ijmesh = np.ix_(ymask,xmask)
+        ii = ijmesh[0]
+        jj = ijmesh[1]
+        new_cdl.data = self.data[:,:,ii,jj]
+        return new_cdl
+    
+    def combine(self,cdl_name_codes=None):
+        '''combine 133 cdl categories, returning a new cdl with a less C dimension'''
+        if cdl_name_codes is None:
+            cdl_name_codes = [
+                ('corn',[1]),
+                ('soybean',[5]),
+                ('dev_o',[121]),
+                ('dev_l',[122]),
+                ('dev_m',[123]),
+                ('dev_h',[124]),
+                ('wetland',[190,195]),
+                ('forest',[141,143,142])
+            ]
+        new_shape = list(self.data.shape)
+        new_shape[1] = len(cdl_name_codes)+1
+        new_data = np.zeros(new_shape,dtype=np.float32)
+        lcc_df = []
+        for i,name_code in enumerate(cdl_name_codes):
+            new_data[:,i] = self.data[:,self.lcc_df['Code'].isin(name_code[1])].sum(axis=1)
+            local_df = self.lcc_df.loc[self.lcc_df['Code'] == name_code[1][0]].copy()
+            local_df['Class_Name'] = name_code[0]
+            lcc_df.append(local_df)
+        new_data[:,-1] = 1-new_data[:,:-1].sum(axis=1)
+        assert all(new_data.ravel()>=0) and all(new_data.ravel()<=1)
+        lcc_df = pd.concat(lcc_df)
+        local_df[
+            ['Code','Class_Name','ESRI_Red','ESRI_Green','ESRI_Blue','ColorHex']
+        ] = [0,'other',255,255,255,'#FFFFFF']
+        lcc_df = pd.concat([lcc_df,local_df]).reset_index(drop=True)
+        new_cdl = CDL(lcc_df=lcc_df)
+        new_cdl.df = self.df.copy()
+        new_cdl.xgrid,new_cdl.ygrid,new_cdl.data = self.xgrid,self.ygrid,new_data
+        new_cdl.cdl_name_codes = cdl_name_codes
+        return new_cdl
+        
+    def read_nc(self,filenames,years):
+        assert len(filenames) == len(years)
+        self.df = pd.DataFrame(
+            index=pd.DatetimeIndex([pd.Timestamp(y,1,1) for y in years]).to_period(
+                freq='1Y'),
+            data=range(len(years))
+        )
+        for iyear,(filename,year) in enumerate(zip(filenames,years)):
+            with Dataset(filename,'r') as nc:
+                assert year == nc.variables['year'][:].squeeze()
+                if iyear == 0:
+                    self.xgrid = nc.variables['lon'][:].filled(np.nan)
+                    self.ygrid = nc.variables['lat'][:].filled(np.nan)
+                    data = nc.variables['data'][:].filled(np.nan)
+                    self.data = np.zeros(
+                        (len(years),)+data.shape[1:],dtype=np.float32
+                    )
+                self.data[iyear] = data
+    
+    def save_nc(self,filenames,years):
+        for iyear,(filename,year) in enumerate(zip(filenames,years)):
+            with Dataset(filename,'w',format='NETCDF4') as nc:
+                nc.createDimension('B',1)
+                nc.createDimension('C',self.data.shape[1])
+                nc.createDimension('H',self.data.shape[2])
+                nc.createDimension('W',self.data.shape[3])
+                var = nc.createVariable('data',np.float32,('B','C','H','W'))
+                var[:] = self.data[iyear]
+                var = nc.createVariable('lat',np.float32,('H'))
+                var[:] = self.ygrid
+                var = nc.createVariable('lon',np.float32,('W'))
+                var[:] = self.xgrid
+                var = nc.createVariable('year',np.float32,('B'))
+                var[:] = year
+    
+    def get_year_fractions(self,filename,codes,xgrid,ygrid,block_length):
+        nrows,ncols = len(ygrid),len(xgrid)
+        # open tif file
+        land_cover = rasterio.open(filename)
+        cdl_crs = land_cover.crs
+        wgs84 = pyproj.CRS('EPSG:4326')
+        cdl_proj = pyproj.CRS(cdl_crs)
+        # transformer from wgs84 to cdl' projection
+        transformer = pyproj.Transformer.from_crs(wgs84,cdl_proj,always_xy=True)
+        # loop over blocks
+        iblock = 0
+        block_fractions = []
+        nblock_row = len(range(0,nrows,block_length))
+        nblock_col = len(range(0,ncols,block_length))
+        nblock = nblock_row*nblock_col
+        self.logger.info(f'divide l3 grid to {nblock} blocks')
+        for i_start in range(0,nrows,block_length):
+            for j_start in range(0,ncols,block_length):
+                iblock+=1
+                i_end = min(i_start + block_length, nrows)
+                j_end = min(j_start + block_length, ncols)
+                ygrid_block = ygrid[i_start:i_end]
+                xgrid_block = xgrid[j_start:j_end]
+                # l3 grid corners to cdl's crs
+                xmeshr_cdl,ymeshr_cdl = transformer.transform(
+                    *np.meshgrid(
+                    *F_center2edge(xgrid_block,ygrid_block)))
+                min_x = max(land_cover.bounds.left,np.min(xmeshr_cdl))
+                max_x = min(land_cover.bounds.right,np.max(xmeshr_cdl))
+                min_y = max(land_cover.bounds.bottom,np.min(ymeshr_cdl))
+                max_y = min(land_cover.bounds.top,np.max(ymeshr_cdl))
+
+                window = land_cover.window(min_x,min_y,max_x,max_y
+                                        ).round_offsets().round_shape()
+                window_transform = land_cover.window_transform(window)
+                img_data = land_cover.read(1,window=window,fill_value=0)
+                self.logger.info('CDL block {} has shape {}x{}'.format(
+                    iblock,img_data.shape[0],img_data.shape[1]))
+                
+                fractions = np.zeros(
+                    (len(codes),len(ygrid_block),len(xgrid_block)),dtype=np.float32
+                )
+                for i in range(len(ygrid_block)):
+                    for j in range(len(xgrid_block)):
+                        x_min = xmeshr_cdl[i,j]
+                        x_max = xmeshr_cdl[i,j+1]
+                        y_min = ymeshr_cdl[i+1,j]
+                        y_max = ymeshr_cdl[i,j]
+
+                        # Convert bounds to pixel coordinates
+                        col_min, row_max = ~window_transform * (x_min, y_max)
+                        col_max, row_min = ~window_transform * (x_max, y_min)
+
+                        # Round to get integer pixel indices
+                        col_min = int(np.floor(col_min))
+                        col_max = int(np.ceil(col_max))
+                        row_min = int(np.floor(row_min))
+                        row_max = int(np.ceil(row_max))
+
+                        # Clip to the actual data window
+                        col_min = max(0, col_min)
+                        col_max = min(img_data.shape[1], col_max)
+                        row_min = max(0, row_min)
+                        row_max = min(img_data.shape[0], row_max)
+
+                        patch = img_data[row_min:row_max,col_min:col_max]
+
+                        counts = np.bincount(patch.ravel(),
+                                             minlength=codes.max()+1
+                                            )
+                        total_pixels = patch.size
+                        if total_pixels > 0:
+                            fractions[:,i,j] = counts[codes]/total_pixels
+                block_fractions.append(fractions)
+        
+        land_cover.close()
+        # assemble fractions from blocks to one piece
+        all_fractions = np.block(
+            [block_fractions[i:i+nblock_col] for i in range(0,nblock,nblock_col)]
+        )
+        return all_fractions
+    
+    def get_fractions(
+        self,filenames,years,l3=None,xgrid=None,ygrid=None,block_length=None
+    ):
+        assert len(filenames) == len(years)
+        if l3 is not None:
+            xgrid,ygrid = l3['xgrid'],l3['ygrid']
+        self.xgrid,self.ygrid = xgrid,ygrid
+        self.df = pd.DataFrame(
+            index=pd.DatetimeIndex(
+                [pd.Timestamp(y,1,1) for y in years],freq='AS-JAN'
+            ).to_period(),
+            data=range(len(years))
+        )
+        codes = self.lcc_df['Code']
+        self.data = np.zeros(
+            (len(years),len(codes),len(ygrid),len(xgrid)),dtype=np.float32
+        )
+        block_length = block_length or max(nrows,ncols)
+        for iyear,(filename,year) in enumerate(zip(filenames,years)):
+            self.data[iyear] = self.get_year_fractions(
+                filename,codes,xgrid,ygrid,block_length
+            )
+
+
+class CDL_old:
+    '''class to handle crop data layer (cdl) data'''
+    def __init__(self,filename,land_cover_codes_csv=None,shape_file=None):
+        self.logger = logging.getLogger(__name__)
+        self.filename = filename
+        if land_cover_codes_csv:
+            self.lcc_df = pd.read_csv(land_cover_codes_csv)
+        else:
+            self.lcc_df = None
+        if shape_file:
+            self.shape_file = shape_file
+    
+    def get_fractions(self,l3=None,xgrid=None,ygrid=None,block_length=None,if_mask=True):
+        '''get fractions of land types on a l3 grid
+        l3:
+            a popy Level3_Data object
+        x/ygrid:
+            if l3 is not provided, use as lon/lat grids
+        result attached to self:
+            fractions:
+                3D array, len(ygrid),len(xgrid),len(unique_code)
+            df:
+                dataframe listing codes in the domain, the average fraction
+                of each code, and land cover name of each code (if lcc_df is there)
+        '''
+        if l3 is not None:
+            xgrid,ygrid = l3['xgrid'],l3['ygrid']
+        
+        if not hasattr(self,'shape_file') and if_mask:
+            self.logger.warning('no shape file provided in the beginning, no masking')
+            if_mask = False
+        
+        if if_mask:
+            mask = self.mask(l3=l3,shape_file=self.shape_file)
+        
+        nrows,ncols = len(ygrid),len(xgrid)
+        block_length = block_length or max(nrows,ncols)
+        # open tif file
+        land_cover = rasterio.open(self.filename)
+        cdl_crs = land_cover.crs
+        wgs84 = pyproj.CRS('EPSG:4326')
+        cdl_proj = pyproj.CRS(cdl_crs)
+        # transformer from wgs84 to cdl' projection
+        transformer = pyproj.Transformer.from_crs(wgs84,cdl_proj,always_xy=True)
+        # loop over blocks
+        iblock = 0
+        block_codes = []
+        block_fractions = []
+        nblock_row = len(range(0,nrows,block_length))
+        nblock_col = len(range(0,ncols,block_length))
+        nblock = nblock_row*nblock_col
+        self.logger.info(f'divide l3 grid to {nblock} blocks')
+        for i_start in range(0,nrows,block_length):
+            for j_start in range(0,ncols,block_length):
+                iblock+=1
+                i_end = min(i_start + block_length, nrows)
+                j_end = min(j_start + block_length, ncols)
+                ygrid_block = ygrid[i_start:i_end]
+                xgrid_block = xgrid[j_start:j_end]
+                # l3 grid corners to cdl's crs
+                xmeshr_cdl,ymeshr_cdl = transformer.transform(
+                    *np.meshgrid(
+                    *F_center2edge(xgrid_block,ygrid_block)))
+                min_x = max(land_cover.bounds.left,np.min(xmeshr_cdl))
+                max_x = min(land_cover.bounds.right,np.max(xmeshr_cdl))
+                min_y = max(land_cover.bounds.bottom,np.min(ymeshr_cdl))
+                max_y = min(land_cover.bounds.top,np.max(ymeshr_cdl))
+
+                window = land_cover.window(min_x,min_y,max_x,max_y
+                                        ).round_offsets().round_shape()
+                window_transform = land_cover.window_transform(window)
+                img_data = land_cover.read(1,window=window,fill_value=0)
+                self.logger.info('CDL block {} has shape {}x{}'.format(
+                    iblock,img_data.shape[0],img_data.shape[1]))
+                
+                unique_codes = np.sort(np.unique(img_data))
+                fractions = np.zeros((len(ygrid_block),len(xgrid_block),len(unique_codes)),
+                                     dtype=np.float32)
+                for i in range(len(ygrid_block)):
+                    for j in range(len(xgrid_block)):
+                        # to make sure fractions are calculated only within the mask (shapefile)
+                        if if_mask:                        
+                            i_global = i_start + i
+                            j_global = j_start + j
+                            if i_global >= mask.shape[0] or j_global >= mask.shape[1]:
+                                continue
+                            if not mask[i_global, j_global]:
+                                continue
+
+                        x_min = xmeshr_cdl[i,j]
+                        x_max = xmeshr_cdl[i,j+1]
+                        y_min = ymeshr_cdl[i+1,j]
+                        y_max = ymeshr_cdl[i,j]
+
+                        # Convert bounds to pixel coordinates
+                        col_min, row_max = ~window_transform * (x_min, y_max)
+                        col_max, row_min = ~window_transform * (x_max, y_min)
+
+                        # Round to get integer pixel indices
+                        col_min = int(np.floor(col_min))
+                        col_max = int(np.ceil(col_max))
+                        row_min = int(np.floor(row_min))
+                        row_max = int(np.ceil(row_max))
+
+                        # Clip to the actual data window
+                        col_min = max(0, col_min)
+                        col_max = min(img_data.shape[1], col_max)
+                        row_min = max(0, row_min)
+                        row_max = min(img_data.shape[0], row_max)
+
+                        patch = img_data[row_min:row_max,col_min:col_max]
+
+                        counts = np.bincount(patch.ravel(),
+                                             minlength=unique_codes.max()+1
+                                            )
+                        total_pixels = patch.size
+                        if total_pixels > 0:
+                            fractions[i,j,:] = counts[unique_codes]/total_pixels
+                block_codes.append(unique_codes)
+                block_fractions.append(fractions)
+        
+        land_cover.close()
+        if iblock != nblock:
+            self.logger.error(f'iblock {iblock} does not equal nblock {nblock}!')
+        if iblock == 1:
+            df = pd.DataFrame(
+                dict(
+                    Code=unique_codes,
+                    mean_frac=fractions.mean(axis=(0,1))))
+            if self.lcc_df is not None:
+                df = df.merge(self.lcc_df,on='Code')
+            self.fractions = fractions
+            self.df = df
+            self.xgrid,self.ygrid = xgrid,ygrid
+            return
+        # assemble fractions from blocks to one piece
+        all_codes = np.sort(np.unique(np.concatenate(block_codes)))
+        blocks = []
+        for codes,fractions in zip(block_codes,block_fractions):
+            block = np.zeros(fractions.shape[:2]+(len(all_codes),),dtype=np.float32)
+            index = np.searchsorted(all_codes,codes)
+            block[:,:,index] = fractions
+            # transpose land index to the first for np.block later
+            blocks.append(block.transpose([2,0,1]))
+        all_fractions = np.block([blocks[i:i+nblock_col] for i in range(0,nblock,nblock_col)]
+                                ).transpose([1,2,0]) # transpose back
+        
+        self.fractions = all_fractions
+        df = pd.DataFrame(
+            dict(
+                Code=all_codes,
+                mean_frac=all_fractions.mean(axis=(0,1))))
+        if self.lcc_df is not None:
+            df = df.merge(self.lcc_df,on='Code')
+        
+        self.df = df
+        self.xgrid,self.ygrid = xgrid,ygrid
+        return
+    
+    def mask(self,l3=None,shape_file=None): # to mask a shape file
+        if l3 is not None:
+            xgrid,ygrid = l3['xgrid'],l3['ygrid']
+        lon, lat = np.meshgrid(xgrid, ygrid)
+        shp = gpd.read_file(shape_file)
+        # Rasterize polygons onto the grid
+        res_lon = np.diff(xgrid)[0]
+        res_lat = np.diff(ygrid)[0]
+        west = xgrid[0] - res_lon / 2
+        north = ygrid[0] + res_lat / 2
+        transform = from_origin(west, north, res_lon, -res_lat)
+        mask = geometry_mask([mapping(geom) for geom in shp.geometry],
+                             out_shape=lon.shape,
+                             transform=transform,
+                             invert=True)
+        return mask
+    
+    def select(self,code=None,land_type=None):
+        if land_type == 'dominant':
+            indices = np.argmax(self.fractions, axis=-1)
+            dominant = self.df['Code'].values[indices]
+            return dominant
+        if code is None:
+            if not any(self.df['Type'].isin([land_type])):
+                self.logger.error(f'{land_type} not available!')
+                return
+            code = self.df['Code'][self.df['Type']==land_type].squeeze()
+        else:
+            if not any(self.df['Code'].isin([code])):
+                self.logger.error(f'{code} not available!')
+                return
+        data = self.fractions[...,self.df['Code']==code].squeeze()
+        return data
+    
+    def plot(self,
+        code=None,land_type=None,
+        ax=None,scale='linear',**kwargs
+            ):
+        
+        data = self.select(code,land_type)
+        if data is None:return
+        
+        if ax is None:
+            fig,ax = plt.subplots(1,1,figsize=(10,5),subplot_kw={"projection": ccrs.PlateCarree()})
+        else:
+            fig = plt.gcf()
+        
+        if scale == 'log':
+            from matplotlib.colors import LogNorm
+            if 'vmin' in kwargs:
+                inputNorm = LogNorm(vmin=kwargs['vmin'],vmax=kwargs['vmax'])
+                kwargs.pop('vmin');
+                kwargs.pop('vmax');
+            else:
+                inputNorm = LogNorm()
+            pc = ax.pcolormesh(*F_center2edge(self.xgrid,self.ygrid),data,norm=inputNorm,
+                                         **kwargs)
+        else:
+            pc = ax.pcolormesh(*F_center2edge(self.xgrid,self.ygrid),data,**kwargs)
+        ax.coastlines(resolution='50m', color='black', linewidth=1)
+        ax.add_feature(cfeature.STATES.with_scale('50m'), facecolor='None',
+                       edgecolor='black', linewidth=1)
+        if land_type is not None:
+            ax.set_title(land_type)
+        cb = fig.colorbar(pc,ax=ax)
+        figout = {'fig':fig,'pc':pc,'ax':ax,'cb':cb}
+        return figout
+    
+    def save_nc(self,l3_filename,
+                fields_name=None,
+                fields_rename=None,
+                fields_comment=None,
+                fields_unit=None,
+                ncattr_dict=None):    
+        fields_name = fields_name or []
+        if fields_rename is None:
+            fields_rename = fields_name.copy()
+        if fields_comment is None:
+            fields_comment = ['' for i in range(len(fields_name))]
+        if fields_unit is None:
+            fields_unit = ['' for i in range(len(fields_name))]
+        if 'xgrid' not in fields_name:
+            fields_name.append('xgrid')
+            fields_rename.append('xgrid')
+            fields_comment.append('horizontal grid')
+            fields_unit.append('degree')
+        if 'ygrid' not in fields_name:
+            fields_name.append('ygrid')
+            fields_rename.append('ygrid')
+            fields_comment.append('vertical grid')
+            fields_unit.append('degree')
+        lonmesh,latmesh = np.meshgrid(self.xgrid,self.ygrid)
+        self.lonmesh = lonmesh
+        self.latmesh = latmesh
+        if 'lonmesh' not in fields_name:
+            fields_name.append('lonmesh')
+            fields_rename.append('lonmesh')
+            fields_comment.append('longitude mesh')
+            fields_unit.append('degree_east')
+        if 'latmesh' not in fields_name:
+            fields_name.append('latmesh')
+            fields_rename.append('latmesh')
+            fields_comment.append('latitude mesh')
+            fields_unit.append('degree_north')
+        if 'fractions' not in fields_name:
+            fields_name.append('fractions')
+            fields_rename.append('fractions')
+            fields_comment.append('land cover fractions in each satellite l3 grid cell')
+            fields_unit.append('')
+        if 'Code' not in fields_name:
+            fields_name.append('Code')
+            fields_rename.append('code')
+            fields_comment.append('directory for land cover codes')
+            fields_unit.append('')
+        if 'Type' not in fields_name:
+            fields_name.append('Type')
+            fields_rename.append('type')
+            fields_comment.append('directory for land cover types')
+            fields_unit.append('')
+        if 'mean_frac' not in fields_name:
+            fields_name.append('mean_frac')
+            fields_rename.append('mean_frac')
+            fields_comment.append('averaged land cover fractions in the spatial domain')
+            fields_unit.append('')
+        nc = Dataset(l3_filename,mode='w',format='NETCDF4',clobber=True)
+        if not ncattr_dict:
+            ncattr_dict = {'description':'Land Cover Fractions based on CDL Data',
+                           'institution':'University at Buffalo',
+                           'contact':'Kang Sun, kangsun@buffalo.edu'}
+        if 'history' not in ncattr_dict.keys():
+            ncattr_dict['history'] = 'Created '+dt.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')#local time
+        nc.setncatts(ncattr_dict)
+        nc.createDimension('ygrid',self.fractions.shape[0])
+        nc.createDimension('xgrid',self.fractions.shape[1])
+        nc.createDimension('land_cover', self.fractions.shape[2])
+        for (i,fn) in enumerate(fields_name):
+            if fn in ['xgrid']:
+                vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('xgrid'))
+            elif fn in ['ygrid']:
+                vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('ygrid'))
+            elif fn in ['lonmesh','latmesh']:
+                vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('ygrid','xgrid'))              
+            elif fn in ['fractions']:
+                vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('ygrid','xgrid','land_cover'))
+            elif fn in ['Type']:
+                vid = nc.createVariable(fields_rename[i],str,dimensions=('land_cover',))
+            elif fn in ['Code']:
+                vid = nc.createVariable(fields_rename[i],np.int32,dimensions=('land_cover'))
+            elif fn in ['mean_frac']:
+                vid = nc.createVariable(fields_rename[i],np.float32,dimensions=('land_cover'))
+            # use standard_name to inform lat/lon vs x/y
+            if fn == 'xgrid':
+                vid.standard_name = 'projection_x_coordinate'
+            elif fn == 'ygrid':
+                vid.standard_name = 'projection_y_coordinate'
+            elif fn == 'lonmesh':
+                vid.standard_name = 'longitude'
+            elif fn == 'latmesh':
+                vid.standard_name = 'latitude'
+            vid.comment = fields_comment[i]
+            vid.units = fields_unit[i]
+            if fn in ['xgrid', 'ygrid', 'lonmesh', 'latmesh', 'fractions']:
+                vid[:] = np.ma.masked_invalid(np.float32(getattr(self, fn)))
+            elif fn in ['Type']:
+                vid[:] = self.df[fn].values.astype(str)
+            elif fn in ['Code']:
+                vid[:] = np.ma.masked_invalid(np.int32(getattr(self.df, fn)))
+            elif fn in ['mean_frac']:
+                vid[:] = np.ma.masked_invalid(np.float32(getattr(self.df, fn)))      
+        nc.close()
+        
+    def read_nc(self,l3_filename,
+                fields_name=None):
+        fields_name = fields_name or []
+        if 'xgrid' not in fields_name:
+            fields_name.append('xgrid')
+        if 'ygrid' not in fields_name:
+            fields_name.append('ygrid')
+        if 'lonmesh' not in fields_name:
+            fields_name.append('lonmesh')
+        if 'latmesh' not in fields_name:
+            fields_name.append('latmesh')
+        if 'fractions' not in fields_name:
+            fields_name.append('fractions')
+        if 'code' not in fields_name:
+            fields_name.append('code')
+        if 'type' not in fields_name:
+            fields_name.append('type')
+        if 'mean_frac' not in fields_name:
+            fields_name.append('mean_frac')           
+        nc = Dataset(l3_filename,'r')
+        for (i,varname) in enumerate(fields_name):
+            # the variable names are inconsistent with Level3_Data in CF-compatible nc files
+            nc_varname = varname
+            if varname == 'xgrid':
+                if 'projection_x_coordinate' in nc.variables.keys():
+                    nc_varname = 'projection_x_coordinate'
+            if varname == 'ygrid':
+                if 'projection_y_coordinate' in nc.variables.keys():
+                    nc_varname = 'projection_y_coordinate'
+            if varname == 'lonmesh':
+                if 'longitude' in nc.variables.keys():
+                    nc_varname = 'longitude'
+            if varname == 'latmesh':
+                if 'latitude' in nc.variables.keys():
+                    nc_varname = 'latitude'
+            try:
+                setattr(self, varname, nc[nc_varname][:].filled(np.nan))
+            except:
+                self.logger.debug('{} cannot be filled by nan or is not a masked array'.format(nc_varname))
+                setattr(self, varname, np.array(nc[nc_varname][:]))
+        nc.close()
+        return self
+
+
+class BUI():
+    '''Bottom-Up Inventory
+    important attributes:
+    (raw_)data: time x channel x lat (y) x lon (x)
+    df: index should be series of time
+    '''
+    def __init__(
+        self,dt_array,name='inventory',west=-130,east=-63,south=23,north=52
+    ):
+        self.logger = logging.getLogger(__name__)
+        self.name = name
+        self.west = west
+        self.east = east
+        self.south = south
+        self.north = north
+        if not isinstance(dt_array,pd.PeriodIndex):
+            self.logger.warning('converting dt_array to PeriodIndex')
+            try:
+                self.dt_array = pd.PeriodIndex(dt_array)
+            except Exception as e:
+                self.dt_array = dt_array
+                self.logger.warning(e)
+        else:
+            self.dt_array = dt_array
+        self.df = pd.DataFrame(
+            index=self.dt_array,
+            data=dict(count=range(len(dt_array)))
+        )
+    
+    def trim(self,west,east,south,north):
+        '''trim the bui same way as Level3_Data.trim, assuming grids are aligned'''
+        xmask = (self.xgrid >= west) & (self.xgrid <= east)
+        ymask = (self.ygrid >= south) & (self.ygrid <= north)
+        new_bui = BUI(dt_array=self.dt_array,west=west,east=east,south=south,north=north)
+        new_bui.xgrid,new_bui.ygrid = self.xgrid[xmask],self.ygrid[ymask]
+        ijmesh = np.ix_(ymask,xmask)
+        ii = ijmesh[0]
+        jj = ijmesh[1]
+        new_bui.data = self.data[:,:,ii,jj]
+        return new_bui
+    
+    def read_CAMS_NOx(self,fn_pattern,fields=['sum'],gaussian_sigma=None):
+        fns = []
+        for yr in self.df.index.start_time.year.unique().sort_values():
+            fns.append(pd.Timestamp(year=yr,month=1,day=1).strftime(fn_pattern))
+        self.fns = fns
+        self.fields = np.array(fields)
+        for ifn,fn in enumerate(fns):
+            with Dataset(fn,'r') as nc:
+                if ifn == 0:
+                    xgrid = nc['lon'][:].data
+                    ygrid = nc['lat'][:].data
+                    xgrid_size = np.abs(np.nanmedian(np.diff(xgrid)))
+                    ygrid_size = np.abs(np.nanmedian(np.diff(ygrid)))
+                    self.raw_xgrid_size = xgrid_size
+                    self.raw_ygrid_size = ygrid_size
+                    if not np.isclose(xgrid_size,ygrid_size,rtol=1e-03):
+                        self.logger.warning(
+                            f'x grid size {xgrid_size} does not equal to y grid size {ygrid_size}'
+                        )
+                    self.raw_grid_size = (xgrid_size+ygrid_size)/2
+                    xmask = (xgrid >= self.west) & (xgrid <= self.east)
+                    ymask = (ygrid >= self.south) & (ygrid <= self.north)
+                    xidx = np.arange(len(xmask),dtype=int)[xmask]
+                    yidx = np.arange(len(ymask),dtype=int)[ymask]
+                    self.raw_xgrid = xgrid[xmask]
+                    self.raw_ygrid = ygrid[ymask]
+                    xmesh,ymesh = np.meshgrid(self.raw_xgrid,self.raw_ygrid)
+                    self.raw_data = np.zeros(
+                        (len(self.df.index),
+                         len(fields),
+                         len(self.raw_ygrid),
+                         len(self.raw_xgrid))
+                    )
+                    self.raw_grid_size_in_m2 = np.cos(
+                        np.deg2rad(ymesh))*np.square(self.raw_grid_size*111e3)
+                for ifield,field in enumerate(fields):
+                    image = nc[field][:,yidx,xidx].filled(np.nan)/0.030 #kgNO to mol
+                    if gaussian_sigma:
+                        image = np.array(
+                            [
+                                gaussian_filter(img,sigma=gaussian_sigma,mode='reflect')
+                                for img in image
+                            ]
+                        )
+                    self.raw_data[
+                        ifn*12:(ifn+1)*12,ifield,:,:
+                    ] = image
+        self.add_stats_to_df(raw=True,name=None,stats='mean')
+    
+    def read_GRA2PES_NOx(self, base_dir, grid_size=0.02, xgrid=None, ygrid=None):
+        '''NOAA GRA2PES monthly NOx, mol m-2 s-1, regridded to a regular lon-lat grid'''
+        self.fields = np.array(['NOX'])
+        if xgrid is None or ygrid is None:
+            self.raw_xgrid = np.arange(self.west, self.east + grid_size/2, grid_size)
+            self.raw_ygrid = np.arange(self.south, self.north + grid_size/2, grid_size)
+        else:
+            self.raw_xgrid = np.asarray(xgrid)
+            self.raw_ygrid = np.asarray(ygrid)
+            grid_size = float(np.round(np.abs(np.median(np.diff(self.raw_xgrid))), 6))
+        self.raw_grid_size = grid_size
+        self.raw_xgrid_size = self.raw_ygrid_size = grid_size
+        xmesh, ymesh = np.meshgrid(self.raw_xgrid, self.raw_ygrid)
+        self.raw_grid_size_in_m2 = np.cos(np.deg2rad(ymesh))*np.square(grid_size*111e3)
+        self.raw_data = np.zeros(
+            (len(self.df.index), len(self.fields), len(self.raw_ygrid), len(self.raw_xgrid)),
+            dtype=np.float32
+        )
+        transformer = None
+        for imon, mon in enumerate(self.df.index):
+            year, month = mon.year, mon.month
+            yyyymm = f'{year}{month:02d}'
+            month_dir = os.path.join(base_dir, str(year), f'{month:02d}')
+            day_mean = {}
+            for day_type in ['weekdy', 'satdy', 'sundy']:
+                nox_list = []
+                for halfday in ['00to11Z', '12to23Z']:
+                    fn = os.path.join(
+                        month_dir,
+                        f'GRA2PESv2.0beta_total_{yyyymm}_{day_type}_{halfday}.nc'
+                    )
+                    with Dataset(fn, 'r') as nc:
+                        if transformer is None:
+                            x_native = np.asarray(nc['x'][:])
+                            y_native = np.asarray(nc['y'][:])
+                            crs_native = pyproj.CRS.from_cf(
+                                {a: nc['lambert_conformal_conic'].getncattr(a)
+                                 for a in nc['lambert_conformal_conic'].ncattrs()}
+                            )
+                            transformer = pyproj.Transformer.from_crs(
+                                'EPSG:4326', crs_native, always_xy=True
+                            )
+                            xt, yt = transformer.transform(xmesh, ymesh)
+                            dx = np.abs(np.nanmedian(np.diff(x_native)))
+                            dy = np.abs(np.nanmedian(np.diff(y_native)))
+                            xmask = (x_native >= np.nanmin(xt) - dx) & (x_native <= np.nanmax(xt) + dx)
+                            ymask = (y_native >= np.nanmin(yt) - dy) & (y_native <= np.nanmax(yt) + dy)
+                            xi = np.where(xmask)[0]
+                            yi = np.where(ymask)[0]
+                            x_subset = x_native[xi]
+                            y_subset = y_native[yi]
+                            target_points = np.column_stack((yt.ravel(), xt.ravel()))
+                        nox = nc['NOX'][:, :, yi, xi]
+                        if hasattr(nox, 'filled'):
+                            nox = nox.filled(np.nan)
+                        nox = np.nansum(nox, axis=1)  # sum emission levels
+                        nox_list.append(nox/1e6/3600)  # mol km-2 hr-1 to mol m-2 s-1
+                nox = np.concatenate(nox_list, axis=0)
+                day_native = np.nanmean(nox, axis=0)
+                f = RegularGridInterpolator(
+                    (y_subset, x_subset), day_native,
+                    bounds_error=False, fill_value=np.nan
+                )
+                day_mean[day_type] = f(target_points).reshape(xmesh.shape)
+            days = pd.date_range(f'{year}-{month:02d}-01', periods=mon.days_in_month, freq='1d')
+            self.raw_data[imon, 0] = (
+                day_mean['weekdy']*np.sum(days.weekday < 5)
+                + day_mean['satdy']*np.sum(days.weekday == 5)
+                + day_mean['sundy']*np.sum(days.weekday == 6)
+            ) / mon.days_in_month
+            print(f'Loaded {yyyymm}')
+        self.add_stats_to_df(raw=True, name=None, stats='mean')
+
+    def read_JPL_NOx(self, jpl_dir, fields=['anth', 'bio', 'soil', 'tot'],
+                     unit='mol/m2/s', grid_size=None, xgrid=None, ygrid=None):
+        '''JPL TROPESS monthly NOx emissions (kg N m-2 s-1 converted to mol N)'''
+        self.fields = np.array(fields)
+        file_dict = {}
+        for field in fields:
+            pattern = os.path.join(jpl_dir, f'TROPESS_reanalysis_mon_emi_nox_{field}_*.nc')
+            file_dict[field] = sorted(glob.glob(pattern))
+            if len(file_dict[field]) == 0:
+                raise FileNotFoundError(f'No JPL files found for {field}')
+        with Dataset(file_dict[fields[0]][0], 'r') as nc:
+            lon = nc['lon'][:].filled(np.nan)
+            lat = nc['lat'][:].filled(np.nan)
+            lon = (lon + 180) % 360 - 180
+            xorder = np.argsort(lon)
+            yorder = np.argsort(lat)
+            lon = lon[xorder]
+            lat = lat[yorder]
+        regrid = (grid_size is not None) or (xgrid is not None)
+        if not regrid:
+            xmask = (lon >= self.west) & (lon <= self.east)
+            ymask = (lat >= self.south) & (lat <= self.north)
+            self.raw_xgrid = lon[xmask]
+            self.raw_ygrid = lat[ymask]
+            self.raw_xgrid_size = np.abs(np.nanmedian(np.diff(self.raw_xgrid)))
+            self.raw_ygrid_size = np.abs(np.nanmedian(np.diff(self.raw_ygrid)))
+            self.raw_grid_size = (self.raw_xgrid_size + self.raw_ygrid_size)/2
+        else:
+            if xgrid is not None and ygrid is not None:
+                self.raw_xgrid = np.asarray(xgrid)
+                self.raw_ygrid = np.asarray(ygrid)
+                grid_size = float(np.round(np.abs(np.median(np.diff(self.raw_xgrid))), 6))
+            else:
+                self.raw_xgrid = np.arange(self.west, self.east + grid_size/2, grid_size)
+                self.raw_ygrid = np.arange(self.south, self.north + grid_size/2, grid_size)
+            self.raw_grid_size = grid_size
+            self.raw_xgrid_size = self.raw_ygrid_size = grid_size
+        xmesh, ymesh = np.meshgrid(self.raw_xgrid, self.raw_ygrid)
+        self.raw_grid_size_in_m2 = np.cos(np.deg2rad(ymesh))*np.square(self.raw_grid_size*111e3)
+        self.raw_data = np.full(
+            (len(self.df.index), len(fields), len(self.raw_ygrid), len(self.raw_xgrid)),
+            np.nan, dtype=np.float32
+        )
+        target_points = np.column_stack((ymesh.ravel(), xmesh.ravel()))
+        for ifield, field in enumerate(fields):
+            for filename in file_dict[field]:
+                with Dataset(filename, 'r') as nc:
+                    nox = nc['nox'][:]
+                    if hasattr(nox, 'filled'):
+                        nox = nox.filled(np.nan)
+                    nox = np.where(nox < -9e8, np.nan, nox)
+                    nox = nox[:, yorder, :][:, :, xorder]
+                    if unit == 'mol/m2/s':
+                        nox = nox/0.014
+                    elif unit == 'nmol/m2/s':
+                        nox = nox/0.014*1e9
+                    time_var = nc['time']
+                    dates = num2date(
+                        time_var[:], units=time_var.units,
+                        calendar=getattr(time_var, 'calendar', 'standard')
+                    )
+                    mons = pd.PeriodIndex([f'{d.year}-{d.month:02d}' for d in dates], freq='M')
+                    for i, mon in enumerate(mons):
+                        if mon not in self.df.index:
+                            continue
+                        itime = self.df.index.get_loc(mon)
+                        if not regrid:
+                            self.raw_data[itime, ifield] = nox[i][np.ix_(ymask, xmask)]
+                        else:
+                            f = RegularGridInterpolator(
+                                (lat, lon), nox[i], bounds_error=False, fill_value=np.nan
+                            )
+                            self.raw_data[itime, ifield] = f(target_points).reshape(xmesh.shape)
+            print(f'Loaded JPL {field}')
+        self.add_stats_to_df(raw=True, name=None, stats='mean')
+    
+    def blur(self,gaussian_sigma,raw=True):
+        data_name = 'raw_data' if raw else 'data'
+        for itime in range(self.raw_data.shape[0]):
+            for ichannel in range(self.raw_data.shape[1]):
+                getattr(self,data_name)[itime,ichannel] = \
+                gaussian_filter(
+                    getattr(self,data_name)[itime,ichannel],
+                    sigma=gaussian_sigma,mode='reflect'
+                )
+                
+    def regrid_to_l3(self,l3=None,xgrid=None,ygrid=None,method='interpolate'):        
+        if xgrid is None:
+            xgrid = l3['xgrid']
+        if ygrid is None:
+            ygrid = l3['ygrid']
+        self.xgrid,self.ygrid = xgrid,ygrid
+        xgrid_size = np.abs(np.nanmedian(np.diff(xgrid)))
+        ygrid_size = np.abs(np.nanmedian(np.diff(ygrid)))
+        self.xgrid_size = xgrid_size
+        self.ygrid_size = ygrid_size
+        
+        if np.array_equal(xgrid,self.raw_xgrid) and np.array_equal(ygrid,self.raw_ygrid):
+            self.logger.warning('easy, grids are the same')
+            self.data = self.raw_data
+            return
+        self.data = np.zeros(
+            (
+                self.raw_data.shape[0],
+                self.raw_data.shape[1],
+                len(ygrid),len(xgrid)
+            )
+        )
+        if method in ['interpolate','interpolation']:
+            ymesh,xmesh = np.meshgrid(ygrid,xgrid)
+            for itime in range(self.raw_data.shape[0]):
+                for ichannel in range(self.raw_data.shape[1]):
+                    f = RegularGridInterpolator(
+                        (self.raw_ygrid,self.raw_xgrid),
+                        self.raw_data[itime,ichannel],bounds_error=False
+                    )
+                    self.data[itime,ichannel] = f((ymesh,xmesh)).T
+        elif method in ['tessellate','tessellation']:
+            # make a 2d array of source grid polygons
+            spolygons = np.empty((len(self.raw_ygrid),len(self.raw_xgrid)),dtype=object)
+            for iy,y in enumerate(self.raw_ygrid):
+                for ix,x in enumerate(self.raw_xgrid):
+                    sx = [
+                        x-self.raw_xgrid_size/2,
+                        x-self.raw_xgrid_size/2,
+                        x+self.raw_xgrid_size/2,
+                        x+self.raw_xgrid_size/2
+                    ]
+                    sy = [
+                        y-self.raw_ygrid_size/2,
+                        y+self.raw_ygrid_size/2,
+                        y+self.raw_ygrid_size/2,
+                        y-self.raw_ygrid_size/2
+                    ]
+                    spolygons[iy,ix] = Polygon(np.vstack((sx,sy)).T)
+            # complex 2d array, each element is a 2d array for a target grid cell
+            # each row of that 2d array corresponds to an overlapping grid cell
+            # columns are y/x index and fractional area of all overlapping cells
+            source_weights = np.empty((len(ygrid),len(xgrid)),dtype=object)
+            # loop over each target grid
+            for iy,y in enumerate(ygrid):
+                for ix,x in enumerate(xgrid):
+                    # make a polygon for each target grid
+                    tx = [x-xgrid_size/2,x-xgrid_size/2,x+xgrid_size/2,x+xgrid_size/2]
+                    ty = [y-ygrid_size/2,y+ygrid_size/2,y+ygrid_size/2,y-ygrid_size/2]
+                    tpolygon = Polygon(np.vstack((tx,ty)).T)
+                    # identify source grids that may overlap with the target grid
+                    xmask = (bui.raw_xgrid+bui.raw_xgrid_size/2 >= x-xgrid_size/2) &\
+                    (bui.raw_xgrid-bui.raw_xgrid_size/2 <= x+xgrid_size/2)
+                    ymask = (bui.raw_ygrid+bui.raw_ygrid_size/2 >= y-ygrid_size/2) &\
+                    (bui.raw_ygrid-bui.raw_ygrid_size/2 <= y+ygrid_size/2)
+                    xidxs = np.arange(len(xmask),dtype=int)[xmask]
+                    yidxs = np.arange(len(ymask),dtype=int)[ymask]
+                    wts = np.empty((len(yidxs)*len(xidxs),3))
+                    iwt = 0
+                    for yidx in yidxs:
+                        for xidx in xidxs:
+                            spolygon = spolygons[yidx,xidx]
+                            wts[iwt,:2] = [yidx,xidx]
+                            wts[iwt,2] = tpolygon.intersection(spolygon).area
+                            iwt += 1
+                    wts[:,2] = wts[:,2]/wts[:,2].sum()
+                    source_weights[iy,ix] = wts
+            for itime in range(self.raw_data.shape[0]):
+                for ichannel in range(self.raw_data.shape[1]):
+                    raw_map = self.raw_data[itime,ichannel]
+                    for iy,y in enumerate(ygrid):
+                        for ix,x in enumerate(xgrid):
+                            wts = source_weights[iy,ix]
+                            rows,cols = zip(*wts[:,:2].astype(int))
+                            self.data[itime,ichannel,iy,ix] = \
+                            raw_map[rows,cols].dot(wts[:,2])
+        
+        self.add_stats_to_df(raw=False,name=None,stats='mean')
+    
+    def add_stats_to_df(self,raw=True,name=None,stats='mean'):
+        name = name or ''
+        if raw:
+            data = self.raw_data
+            name += 'raw'
+        else:
+            data = self.data
+            name += 'regrid'
+        if stats == 'mean':
+            for ifield,field in enumerate(self.fields):
+                self.df[f'{name}_{field}'] = data[:,ifield,:,:].mean(axis=(-1,-2))
+    
+    def resample(self,rule='month_of_year',offset=None):
+        if rule == 'month_of_year':
+            resampler = self.df.groupby(by=self.df.index.month)
+            # dummy year of 2000 for monthly climatology
+            dt_array = pd.DatetimeIndex(
+                [pd.Timestamp(2000,m,1) for m in resampler.indices.keys()]
+            ).to_period()
+        else:
+            resampler = self.df.resample(rule,offset=offset)
+            dt_array = pd.PeriodIndex(resampler.indices.keys())
+        new_bui = BUI(
+            dt_array=dt_array,name=f'{self.name}_{rule}',
+            west=self.west,east=self.east,south=self.south,north=self.north
+        )
+        new_bui.raw_xgrid,new_bui.raw_ygrid,new_bui.raw_grid_size,new_bui.fields = \
+        self.raw_xgrid,self.raw_ygrid,self.raw_grid_size,self.fields
+        new_bui.raw_data = np.empty(
+            (
+                len(new_bui.df.index),
+                self.raw_data.shape[1],
+                self.raw_data.shape[2],
+                self.raw_data.shape[3]
+            )
+        )
+        for i,(k,v) in enumerate(resampler.indices.items()):
+            new_bui.raw_data[i] = self.raw_data[v].mean(axis=0)
+        new_bui.add_stats_to_df(raw=True,name=None,stats='mean')
+        return new_bui
+    
+    def plot(
+        self,ax=None,plot_raw=True,scale='log',field='sum',dt=None,
+        mask_threshold=None,**kwargs
+    ):
+        if ax is None:
+            fig,ax = plt.subplots(1,1,figsize=(10,5),
+                                  subplot_kw={"projection": ccrs.PlateCarree()})
+        else:
+            fig = plt.gcf()
+        if plot_raw:
+            xgrid,ygrid,data = self.raw_xgrid,self.raw_ygrid,self.raw_data
+        else:
+            xgrid,ygrid,data = self.xgrid,self.ygrid,self.data
+        if mask_threshold:
+            data = data < mask_threshold
+            scale = 'linear'
+        data = data[:,self.fields==field,:,:].squeeze(axis=1)
+        if dt is None:
+            data = data.mean(axis=0)
+        else:
+            data = data[self.df.index==dt,:,:].squeeze(axis=0)
+        if scale == 'log':
+            from matplotlib.colors import LogNorm
+            if 'vmin' in kwargs:
+                inputNorm = LogNorm(vmin=kwargs['vmin'],vmax=kwargs['vmax'])
+                kwargs.pop('vmin');
+                kwargs.pop('vmax');
+            else:
+                inputNorm = LogNorm()
+            pc = ax.pcolormesh(*F_center2edge(xgrid,ygrid),data
+                               ,norm=inputNorm,
+                                         **kwargs)
+        else:
+            pc = ax.pcolormesh(*F_center2edge(xgrid,ygrid),data,**kwargs)
+        ax.set_extent([self.west,self.east,self.south,self.north])
+        ax.coastlines(resolution='50m', color='black', linewidth=1)
+        ax.add_feature(cfeature.STATES.with_scale('50m'), facecolor='None',
+                       edgecolor='black', linewidth=1)
+        cb = fig.colorbar(pc,ax=ax)
+        figout = {'fig':fig,'pc':pc,'ax':ax,'cb':cb}
+        return figout
+
+
+class Inventory(dict):
+    '''class based on dict, representing a gridded emission inventory'''
+    def __init__(self,name='inventory',west=-180,east=180,south=-90,north=90):
+        self.logger = logging.getLogger(__name__)
+        self.logger.warning('Inventory is obsolete. Use BUI instead!')
+        self.name = name
+        self.west = west
+        self.east = east
+        self.south = south
+        self.north = north
+    
+    def read_GFEI(self,filename):
+        nc = Dataset(filename)
+        xgrid = nc['lon'][:].data
+        ygrid = nc['lat'][:].data
+        xgrid_size = np.abs(np.nanmedian(np.diff(xgrid)))
+        ygrid_size = np.abs(np.nanmedian(np.diff(ygrid)))
+        if not np.isclose(xgrid_size,ygrid_size,rtol=1e-03):
+            self.logger.warning(f'x grid size {xgrid_size} does not equal to y grid size {ygrid_size}')
+        self.grid_size = (xgrid_size+ygrid_size)/2
+        xmask = (xgrid >= self.west) & (xgrid <= self.east)
+        ymask = (ygrid >= self.south) & (ygrid <= self.north)
+        self['xgrid'] = xgrid[xmask]
+        self['ygrid'] = ygrid[ymask]
+        xmesh,ymesh = np.meshgrid(self['xgrid'],self['ygrid'])
+        grid_size_in_m2 = np.cos(np.deg2rad(ymesh))*np.square(self.grid_size*111e3)
+        # Mg a-1 km-2 to mol/s/m2: *1e6/16/(365*24*3600)/1e6
+        self['data'] = nc['emis_ch4'][:][np.ix_(ymask,xmask)].filled(np.nan)/16/(365*24*3600)
+        self['grid_size_in_m2'] = grid_size_in_m2
+        return self
+    
+    def read_NEINOX(self,monthly_filenames=None,nei_dir=None,unit='mol/m2/s'):
+        '''read a list of monthly NEI inventory files
+        monthly_filenames:
+            a list of file paths
+        nei_dir:
+            if provided, supersedes monthly_filenames
+        unit:
+            emission will be converted from kg/m2/s (double check) to this unit
+        '''
+        field = 'NOX'
+        monthly_filenames = monthly_filenames or\
+            glob.glob(os.path.join(nei_dir,'2016fh_16j_merge_0pt1degree_month_*.ncf'))
+        mons = []
+        for i,filename in enumerate(monthly_filenames):
+            nc = Dataset(filename)
+            if i == 0:
+                xgrid = nc['lon'][:].data
+                ygrid = nc['lat'][:].data
+                xgrid_size = np.abs(np.nanmedian(np.diff(xgrid)))
+                ygrid_size = np.abs(np.nanmedian(np.diff(ygrid)))
+                self.xgrid_size = xgrid_size
+                self.ygrid_size = ygrid_size
+                if not np.isclose(xgrid_size,ygrid_size,rtol=1e-03):
+                    self.logger.warning(f'x grid size {xgrid_size} does not equal to y grid size {ygrid_size}')
+                self.grid_size = (xgrid_size+ygrid_size)/2
+                xmask = (xgrid >= self.west) & (xgrid <= self.east)
+                ymask = (ygrid >= self.south) & (ygrid <= self.north)
+                self['xgrid'] = xgrid[xmask]
+                self['ygrid'] = ygrid[ymask]
+#                 self.west = self['xgrid'].min()-self.grid_size
+#                 self.east = self['xgrid'].max()+self.grid_size
+#                 self.south = self['ygrid'].min()-self.grid_size
+#                 self.north = self['ygrid'].max()+self.grid_size
+                xmesh,ymesh = np.meshgrid(self['xgrid'],self['ygrid'])
+                monthly_fields = np.zeros((len(self['ygrid']),
+                                           len(self['xgrid']),
+                                           len(monthly_filenames)))
+                self['grid_size_in_m2'] = np.cos(np.deg2rad(ymesh))*np.square(self.grid_size*111e3)
+                nc_unit = nc[field].units
+                if nc_unit in ['kg/m2/s','kgNO2/m2/s'] and unit=='nmol/m2/s':
+                    self.logger.warning(f'unit of {field} will be converted from {nc_unit} to {unit}')
+                    self[f'{field} unit'] = unit
+                    unit_factor = 1e9/0.046
+                elif nc_unit in ['kg/m2/s','kgNO2/m2/s'] and unit=='mol/m2/s':
+                    self.logger.warning(f'unit of {field} will be converted from {nc_unit} to {unit}')
+                    self[f'{field} unit'] = unit
+                    unit_factor = 1/0.046
+                else:
+                    self.logger.warning('no unit conversion is done')
+                    self[f'{field} unit'] = nc_unit
+                    unit_factor = 1.
+            monthly_fields[:,:,i] = unit_factor*nc[field][:].filled(np.nan)[0,0,:,:][np.ix_(ymask,xmask)]# time and lev are singular dimensions
+            mons.append(dt.datetime(int(str(nc.SDATE)[0:4]),1,1)+dt.timedelta(days=-1+int(str(nc.SDATE)[-3:])))
+            nc.close()
+        self[field] = monthly_fields
+        self['mons'] = pd.to_datetime(mons).to_period('1M')
+        self['data'] = np.mean(monthly_fields, axis=2) # mean emission over months, named "data" to match basin_emissions.py
+            
+        return self
+    
+    def regrid_to_l3(self,data=None,l3=None,xgrid=None,ygrid=None,method=None):
+        '''regrid inventory to match the mesh of a l3 data object
+        method:
+            if none, choose from drop_in_the_box and interpolate based on the relative grid size of inventory and l3
+        '''
+        if method is None:
+            if self.grid_size < l3.grid_size/2:
+                method = 'drop_in_the_box'
+#             elif (self.grid_size >= l3.grid_size/2) and (self.grid_size < l3.grid_size*2):
+#                 method = 'tessellate'
+            else:
+                method = 'interpolate'
+            self.logger.warning(f'regridding from {self.grid_size} to {l3.grid_size} using {method}')
+        
+        if xgrid is None:
+            xgrid = l3['xgrid']
+        if ygrid is None:
+            ygrid = l3['ygrid']
+        ymesh,xmesh = np.meshgrid(ygrid,xgrid)
+        if data is None:
+            data = self['data']
+        if method in ['interpolate']:
+            f = RegularGridInterpolator((self['ygrid'],self['xgrid']),data,bounds_error=False)
+            data_interp = f((ymesh,xmesh)).T
+        elif method in ['drop_in_the_box']:
+            data_interp = np.full((len(inv['ygrid']),len(inv['xgrid'])),np.nan)
+            for iy,y in enumerate(inv['ygrid']):
+                ymask = (self['ygrid']>=y-inv.grid_size/2) & (self['ygrid']<y+inv.grid_size/2)
+                for ix,x in enumerate(inv['xgrid']):
+                    xmask = (self['xgrid']>=x-inv.grid_size/2) & (self['xgrid']<x+inv.grid_size/2)
+                    if np.sum(ymask) == 0 and np.sum(xmask) == 0:
+                        continue
+                    data_interp[iy,ix] = np.nanmean(data[np.ix_(ymask,xmask)])
+        
+        return data_interp
+    
+    def plot(self,ax=None,scale='log',**kwargs):
+        if ax is None:
+            fig,ax = plt.subplots(1,1,figsize=(10,5),subplot_kw={"projection": ccrs.PlateCarree()})
+        else:
+            fig = plt.gcf()
+        if scale == 'log':
+            from matplotlib.colors import LogNorm
+            if 'vmin' in kwargs:
+                inputNorm = LogNorm(vmin=kwargs['vmin'],vmax=kwargs['vmax'])
+                kwargs.pop('vmin');
+                kwargs.pop('vmax');
+            else:
+                inputNorm = LogNorm()
+            pc = ax.pcolormesh(*F_center2edge(self['xgrid'],self['ygrid']),self['data'],norm=inputNorm,
+                                         **kwargs)
+        else:
+            pc = ax.pcolormesh(*F_center2edge(self['xgrid'],self['ygrid']),self['data'],**kwargs)
+        ax.set_extent([self.west,self.east,self.south,self.north])
+        ax.coastlines(resolution='50m', color='black', linewidth=1)
+        ax.add_feature(cfeature.STATES.with_scale('50m'), facecolor='None',
+                       edgecolor='black', linewidth=1)
+        cb = fig.colorbar(pc,ax=ax)
+        figout = {'fig':fig,'pc':pc,'ax':ax,'cb':cb}
+        return figout

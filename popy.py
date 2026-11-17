@@ -468,105 +468,6 @@ def F_collocate_l2g(l2g_data1,l2g_data2,hour_difference=0.5,
     l2g_data1_hasnot2 = {k:v[~overlap_mask,] for (k,v) in l2g_data1.items()}
     return l2g_data1_has2, l2g_data1_hasnot2
     
-def F_interp_gcrs(sounding_lon,sounding_lat,sounding_datenum,sounding_ps,
-                  gcrs_dir='/mnt/Data2/GEOS-Chem_Silvern/',
-                  product='NO2',if_monthly=False):
-    """
-    sample a field from GEOS-Chem data by Rachel Silvern (gcrs) in .nc format. 
-    sounding_lon:
-        longitude for interpolation
-    sounding_lat:
-        latitude for interpolation
-    sounding_datenum:
-        time for interpolation in matlab datenum double format
-    sounding_ps:
-        surface pressure for each sounding
-    gcrs_dir:
-        directory where geos chem data are saved
-    if_monthly:
-        if use monthly profile, instead of daily profile
-    created on 2020/03/09
-    """
-    from netCDF4 import Dataset
-    from scipy.interpolate import RegularGridInterpolator
-    from calendar import isleap
-    # hybrid Ap parameter in Pa
-    Ap = np.array([0.000000e+00, 4.804826e-02, 6.593752e+00, 1.313480e+01, 1.961311e+01, 2.609201e+01,
-                   3.257081e+01, 3.898201e+01, 4.533901e+01, 5.169611e+01, 5.805321e+01, 6.436264e+01,
-                   7.062198e+01, 7.883422e+01, 8.909992e+01, 9.936521e+01, 1.091817e+02, 1.189586e+02,
-                   1.286959e+02, 1.429100e+02, 1.562600e+02, 1.696090e+02, 1.816190e+02, 1.930970e+02,
-                   2.032590e+02, 2.121500e+02, 2.187760e+02, 2.238980e+02, 2.243630e+02, 2.168650e+02,
-                   2.011920e+02, 1.769300e+02, 1.503930e+02, 1.278370e+02, 1.086630e+02, 9.236572e+01,
-                   7.851231e+01, 5.638791e+01, 4.017541e+01, 2.836781e+01, 1.979160e+01, 9.292942e+00,
-                   4.076571e+00, 1.650790e+00, 6.167791e-01, 2.113490e-01, 6.600001e-02, 1.000000e-02],dtype=np.float32)*1e2
-    # hybrid Bp parameter
-    Bp = np.array([1.000000e+00, 9.849520e-01, 9.634060e-01, 9.418650e-01, 9.203870e-01, 8.989080e-01,
-                   8.774290e-01, 8.560180e-01, 8.346609e-01, 8.133039e-01, 7.919469e-01, 7.706375e-01,
-                   7.493782e-01, 7.211660e-01, 6.858999e-01, 6.506349e-01, 6.158184e-01, 5.810415e-01,
-                   5.463042e-01, 4.945902e-01, 4.437402e-01, 3.928911e-01, 3.433811e-01, 2.944031e-01,
-                   2.467411e-01, 2.003501e-01, 1.562241e-01, 1.136021e-01, 6.372006e-02, 2.801004e-02,
-                   6.960025e-03, 8.175413e-09, 0.000000e+00, 0.000000e+00, 0.000000e+00, 0.000000e+00,
-                   0.000000e+00, 0.000000e+00, 0.000000e+00, 0.000000e+00, 0.000000e+00, 0.000000e+00,
-                   0.000000e+00, 0.000000e+00, 0.000000e+00, 0.000000e+00, 0.000000e+00, 0.000000e+00],dtype=np.float32)
-    start_datenum = np.amin(sounding_datenum)
-    end_datenum = np.amax(sounding_datenum)
-    start_datetime = datedev_py(start_datenum)
-    end_datetime = datedev_py(end_datenum)
-    nl2 = len(sounding_datenum)
-    nlayer = 47 # layer number in geos chem
-    # claim space for interopolated profiles, at all level 2 pixels
-    sounding_profile = np.zeros((nl2,nlayer),dtype=np.float32)
-    sounding_pEdge = sounding_ps[:,np.newaxis]*Bp+Ap
-    lat_interp = np.tile(sounding_lat,(nlayer,1)).T.astype(np.float32)
-    lon_interp = np.tile(sounding_lon,(nlayer,1)).T.astype(np.float32)
-    layer_interp = np.tile(np.arange(nlayer),(nl2,1)).astype(np.float32)
-    for year in range(start_datetime.year,end_datetime.year+1): 
-        if product == 'NO2' and if_monthly == False:
-            year_sounding_doy = np.floor(sounding_datenum)-(datetime.datetime(year=year,month=1,day=1).toordinal()+365.)
-            year_sounding_doy = year_sounding_doy.astype(int)
-            if isleap(year):
-                nday = 366
-            else:
-                nday = 365
-            loop_sounding_doy = np.unique(year_sounding_doy)
-            f1 = (loop_sounding_doy>=1)
-            f2 = (loop_sounding_doy<=nday)
-            loop_sounding_doy = loop_sounding_doy[f1&f2]
-            gc_fn = os.path.join(gcrs_dir,'NO2_PROF.05x0625_NA.%0d.nc'%year)
-            print('loading '+gc_fn)
-            gc_id = Dataset(gc_fn)
-            gc_gas = gc_id['NO2_ppb'][:].astype(np.float32)
-            gc_lon = gc_id['longitude'][:]
-            gc_lat = gc_id['latitude'][:]
-            for doy in loop_sounding_doy:
-                # remember python is 0-based
-                gc_gas_doy = gc_gas[doy-1,...].squeeze()
-                rowIndex = np.nonzero(year_sounding_doy==doy)
-                f = RegularGridInterpolator((np.arange(nlayer),gc_lat,gc_lon),\
-                                            gc_gas_doy,bounds_error=False,fill_value=np.nan)
-                sounding_profile[rowIndex,:] = f((layer_interp[rowIndex,:],\
-                                lat_interp[rowIndex,:],lon_interp[rowIndex,:]))
-        elif product in {'NH3','HCHO'} or if_monthly == True:
-            sounding_dt = [datedev_py(sounding_datenum[il2]) for il2 in range(nl2)]
-            sounding_year = np.array([dt.year for dt in sounding_dt])
-            sounding_month = np.array([dt.month for dt in sounding_dt])
-            loop_month = np.unique(sounding_month[sounding_year==year])
-            gc_fn = os.path.join(gcrs_dir,'NH3_HCHO_PROF.05x0625_NA.%0d.nc'%year)
-            print('loading '+gc_fn)
-            gc_id = Dataset(gc_fn)
-            gc_gas = gc_id[product+'_ppb'][:].astype(np.float32)
-            gc_lon = gc_id['longitude'][:]
-            gc_lat = gc_id['latitude'][:]
-            for month in loop_month:
-                # remember python is 0-based
-                gc_gas_doy = gc_gas[month-1,...].squeeze()
-                rowIndex = np.nonzero((sounding_year==year)&(sounding_month==month))
-                f = RegularGridInterpolator((np.arange(nlayer),gc_lat,gc_lon),\
-                                            gc_gas_doy,bounds_error=False,fill_value=np.nan)
-                sounding_profile[rowIndex,:] = f((layer_interp[rowIndex,:],\
-                                lat_interp[rowIndex,:],lon_interp[rowIndex,:]))
-    return sounding_profile, sounding_pEdge
-
 def F_interp_merra2_global(sounding_lon,sounding_lat,sounding_datenum,\
                   merra2_dir='/mnt/Data2/MERRA2_2x2.5/',\
                   interp_fields=None,\
@@ -1891,7 +1792,6 @@ class Level3_Data(dict):
                  instrum='unknown',product='unknown',
                  oversampling_list=None,proj=None):
         self.logger = logging.getLogger(__name__)
-        self.logger.info('creating an instance of Level3_Data')
         self.grid_size = grid_size
         if start_python_datetime is not None:
             self.start_python_datetime = start_python_datetime
@@ -2333,7 +2233,7 @@ class Level3_Data(dict):
             return l3_new
         xmask = (self['xgrid'] >= west) & (self['xgrid'] <= east)
         ymask = (self['ygrid'] >= south) & (self['ygrid'] <= north)
-        self.logger.info('l3 trimed from {}, {} to {}, {}'.format(len(self['xgrid']),len(self['ygrid']),np.sum(xmask),np.sum(ymask)))
+        self.logger.debug('l3 trimed from {}, {} to {}, {}'.format(len(self['xgrid']),len(self['ygrid']),np.sum(xmask),np.sum(ymask)))
         
         for key in self.keys():
             if key == 'xgrid':
@@ -2831,13 +2731,13 @@ class Level3_Data(dict):
     
     def merge(self,l3_data1):
         if len(self.keys()) == 0:
-            self.logger.info('orignial level 3 is empty. adopting attributes of the added level 3.')
+            self.logger.debug('orignial level 3 is empty. adopting attributes of the added level 3.')
             self.__dict__.update(l3_data1.__dict__)
             for (k,v) in l3_data1.items():
                 self.add(k,v)
             return self
         if len(l3_data1.keys()) == 0:
-            self.logger.info('added level 3 is empty. returning the orignial level 3.')
+            self.logger.debug('added level 3 is empty. returning the orignial level 3.')
             return self
         common_keys = set(self).intersection(set(l3_data1))
         initial_only_keys = ['xgrid','ygrid','nrows','nrow','ncols','ncol','xmesh','ymesh','lonmesh','latmesh']
@@ -2846,13 +2746,13 @@ class Level3_Data(dict):
                 self.logger.info(k+' is only found in and adopted from the left object')
                 common_keys.append(k)
         merged_grid_size = np.mean([self.grid_size,l3_data1.grid_size])
-        self.logger.info('orginal grid size is {}, added grid size is {}, merged grid size is {}'\
+        self.logger.debug('orginal grid size is {}, added grid size is {}, merged grid size is {}'\
                          .format(self.grid_size,l3_data1.grid_size,merged_grid_size))
         if self.start_python_datetime == datetime.datetime(1900, 1, 1):
             merged_start_datetime = l3_data1.start_python_datetime
         else:
             merged_start_datetime = np.min([self.start_python_datetime,l3_data1.start_python_datetime])
-        self.logger.info('orginal start time is {}, added start time is {}, merged start time is {}'\
+        self.logger.debug('orginal start time is {}, added start time is {}, merged start time is {}'\
                          .format(self.start_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
                                  l3_data1.start_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
                                  merged_start_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')))
@@ -2860,7 +2760,7 @@ class Level3_Data(dict):
             merged_end_datetime = l3_data1.end_python_datetime
         else:
             merged_end_datetime = np.max([self.end_python_datetime,l3_data1.end_python_datetime])
-        self.logger.info('orginal end time is {}, added end time is {}, merged end time is {}'\
+        self.logger.debug('orginal end time is {}, added end time is {}, merged end time is {}'\
                          .format(self.end_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
                                  l3_data1.end_python_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
                                  merged_end_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')))
@@ -2969,9 +2869,9 @@ class Level3_Data(dict):
             self.proj = Proj(nc.getncattr('proj_srs'))
             self.logger.info('the level 3 data appear to be in projection {}'.format(nc.getncattr('proj_srs')))
         except:
-            self.logger.info('no projection found')
+            self.logger.debug('no projection found')
             self.proj = None
-        self.logger.info('Loading level 3 data for instrument {}, product {}, and grid size {:02f}'\
+        self.logger.debug('Loading level 3 data for instrument {}, product {}, and grid size {}'\
                          .format(self.instrum,self.product,self.grid_size))
         for (i,varname) in enumerate(fields_name):
             # the variable names are inconsistent with Level3_Data in CF-compatible nc files
@@ -3355,15 +3255,15 @@ class Level3_Data(dict):
     def block_reduce(self,new_grid_size):
         self.check()
         if new_grid_size <= self.grid_size:
-            self.logger.warning('provide a grid size larger than {}!'.format(self.grid_size))
+            self.logger.info('provide a grid size larger than {}!'.format(self.grid_size))
             return self
         from skimage.measure import block_reduce
         reduce_factor = int(np.rint(new_grid_size/self.grid_size))
         if reduce_factor == 1:
             self.logger.warning('no need to reduce')
             return self
-        self.logger.info('level 3 grid will be coarsened by a factor of {}'.format(reduce_factor))
-        self.logger.info('new grid size is specified as {}, rounded to {}'.format(new_grid_size,self.grid_size*reduce_factor))
+        self.logger.debug('level 3 grid will be coarsened by a factor of {}'.format(reduce_factor))
+        self.logger.debug('new grid size is specified as {}, rounded to {}'.format(new_grid_size,self.grid_size*reduce_factor))
         new_l3 = Level3_Data(grid_size=self.grid_size*reduce_factor,
                              start_python_datetime=self.start_python_datetime,
                              end_python_datetime=self.end_python_datetime,
@@ -3394,7 +3294,7 @@ class Level3_Data(dict):
             elif self[k].shape == (self.nrows,self.ncols) and \
                 k not in ['xmesh','ymesh','lonmesh','latmesh',
                           'total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
-                self.logger.info('block reducing field {}'.format(k))
+                self.logger.debug('block reducing field {}'.format(k))
                 total_sample_weight = self['total_sample_weight'].copy()
                 total_sample_weight[np.isnan(self[k])] = np.nan
                 aggregated_weight = block_reduce(total_sample_weight[:nrows_trim,:ncols_trim],(reduce_factor,reduce_factor),func=np.nansum)
@@ -3586,24 +3486,44 @@ class Level3_Data(dict):
         fig_output['pc'] = pc
         return fig_output
 
+def remove_background_inp2out(inp,percentile,size,kernel):
+    '''used in l3s.remove_background'''
+    from scipy.ndimage import percentile_filter
+    from astropy.convolution import convolve_fft
+    return convolve_fft(percentile_filter(
+        inp,percentile=percentile,size=size,mode='nearest'
+    ),kernel=kernel)
+
 class Level3_List(list):
     '''a list of Level3_Data objects
     started on 2022/10/12
     '''
-    def __init__(self,dt_array,west=-180,east=180,south=-90,north=90):
+    def __init__(self,dt_array,west=-180,east=180,south=-90,north=90,day_offset=0.5):
         '''
         dt_array:
             preferably a pandas PeriodIndex object
+        day_offset:
+            move fractional year by this number of day to be a bit more accurate than 0 am
         '''
         self.logger = logging.getLogger(__name__)
         self.dt_array = dt_array
         self.df = pd.DataFrame({'count':range(len(dt_array))},index=dt_array)
+        try:
+            dti = self.df.index
+            self.df['fractional_year'] = (
+                dti.dayofyear-1+day_offset+dti.hour/24+dti.minute/1440+dti.second/86400
+            )/(365+dti.is_leap_year.astype(int))
+            self.df['fy_sin'] = np.sin(self.df['fractional_year']*2*np.pi)
+            self.df['fy_cos'] = np.cos(self.df['fractional_year']*2*np.pi)
+        except Exception as e:
+            self.logger.warning(e)
+            self.logger.warning('dt_array does not support fractional year calculation')
         self.west = west
         self.east = east
         self.south = south
         self.north = north
     
-    def read_nc_pattern(self,l3_path_pattern=None,l3_list=None,fields_name=None):
+    def read_nc_pattern(self,l3_path_pattern=None,l3_list=None,fields_name=None,block_reduce=None):
         fields_name = fields_name or ['column_amount','surface_altitude','wind_topo','wind_column']
         if l3_list is None and l3_path_pattern is None:
             self.logger.error('either l3_list or l3_path_pattern has to be provided!')
@@ -3616,42 +3536,119 @@ class Level3_List(list):
             if not all(if_exist):
                 self.logger.warning('Not all l3 files exist for the pattern!')
                 dt_len = len(self.dt_array)
-                self.dt_array = self.dt_array.delete(np.arange(dt_len)[~if_exist])
-                self.df = pd.DataFrame({'count':range(len(self.dt_array))},index=self.dt_array)
+                self.df = self.df.loc[if_exist]
+                self.df['count'] = np.arange(self.df.shape[0])
+                self.dt_array = self.df.index
+#                 self.dt_array = self.dt_array.delete(np.arange(dt_len)[~if_exist])
+#                 self.df = pd.DataFrame({'count':range(len(self.dt_array))},index=self.dt_array)
                 self.logger.warning('self.dt_array length is reduced from {} to {}'.format(dt_len,len(self.dt_array)))
         if l3_list is None:
             l3_list = [dt0.strftime(l3_path_pattern) for dt0 in self.dt_array]
             
         for l3_fn in l3_list:
-            self.logger.info('loading {}'.format(l3_fn))
+            self.logger.debug('loading {}'.format(l3_fn))
             l3 = Level3_Data().read_nc(l3_filename=l3_fn,fields_name=fields_name)
+            if block_reduce:
+                l3 = l3.block_reduce(block_reduce)
             self.add(l3)
     
-    def trim(self,west,east,south,north):
-        l3s_new = Level3_List(dt_array=self.dt_array,west=west,east=east,south=south,north=north)
-        for l3 in self:
-            l3s_new.add(l3)
-        l3s_new.df = self.df.copy()
+    def trim(self,west=None,east=None,south=None,north=None,time_mask=None):
+        west = west or self.west
+        east = east or self.east
+        south = south or self.south
+        north = north or self.north
+        if time_mask is None:
+            time_mask = np.ones(len(self.df),dtype=bool)
+        assert len(time_mask) == len(self)
+        l3s_new = Level3_List(dt_array=self.df.index[time_mask],
+                              west=west,east=east,south=south,north=north)
+        for count in self.df['count'][time_mask]:
+            l3s_new.add(self[count])
+        for key in self.df.keys():
+            if key not in 'count':
+                l3s_new.df[key] = self.df[key][time_mask]
         return l3s_new
     
     def add(self,l3):
         self.append(l3.trim(west=self.west,east=self.east,south=self.south,north=self.north))
     
-    def resample(self,rule='month_of_year',half_running_window=0):
+    def resample(self,rule='month_of_year',offset=None,weightwhat=None,weightby=None,adjust_circular=None):
+        '''resample l3s to lower frequency
+        rule:
+            month_of_year or 1D, 1M, 1Q, 1Y...
+        offset:
+            input to DataFrame.resample
+        weightwhat:
+            a list of self.df keys to weight average, e.g., ['fy_cos','fy_sin']
+        weightby:
+            name of a l3 key to nanmean as a weight, e.g., 'total_sample_weight'
+        adjust_circular:
+            a 2D list of df.keys to adjust to unit circle (e.g., [['fy_cos','fy_sin']]. 
+            this makes time-averaged periods like a timestamp
+        '''
+        if weightby is not None:
+            self.df['weight'] = [np.nanmean(l3[weightby]) for l3 in self]
         if rule == 'month_of_year':
             resampler = self.df.groupby(by=self.df.index.month)
         else:
-            resampler = self.df.resample(rule,label='right')
+            resampler = self.df.resample(rule,label='right',offset=offset)
         
-        l3s_resampled = Level3_List(resampler.indices.keys(),west=self.west,east=self.east,south=self.south,north=self.north)
-        for k,v in resampler.indices.items():
+        l3s_resampled = Level3_List(
+            resampler.indices.keys(),west=self.west,east=self.east,south=self.south,north=self.north
+        )
+        if weightwhat is not None:
+            tmp_data = np.zeros((len(l3s_resampled.df),len(weightwhat)))
+        
+        for il3,(k,v) in enumerate(resampler.indices.items()):
             l3 = Level3_Data()
+            if weightwhat is not None:
+                sub_df = self.df.iloc[v]
+                for iw,w in enumerate(weightwhat):
+                    tmp_data[il3,iw] = np.sum(sub_df[w]*sub_df['weight'])/np.sum(sub_df['weight'])
             for v0 in v:
-                for v00 in np.arange(v0-half_running_window,v0+half_running_window+1):
-                    if v00 >=0 and v00 < len(self):
-                        l3 = l3.merge(self[int(v00)])
+                l3 = l3.merge(self[int(v0)])
             l3s_resampled.add(l3)
+            
+        if weightwhat is not None:
+            for iw, w in enumerate(weightwhat):
+                l3s_resampled.df[w] = tmp_data[:,iw]
+            if adjust_circular is not None:
+                for pair in adjust_circular:
+                    r = np.sqrt(np.square(l3s_resampled.df[pair[0]])+np.square(l3s_resampled.df[pair[1]]))
+                    l3s_resampled.df[pair[0]] = l3s_resampled.df[pair[0]]/r
+                    l3s_resampled.df[pair[1]] = l3s_resampled.df[pair[1]]/r
+            
         return l3s_resampled,resampler
+    
+    def remove_background(self,field='column_amount',ncores=0,
+                          vcd_percentile=25,vcd_percentile_window=(50,50),vcd_smoothing_window=None
+                         ):
+        '''remove background from vcd by extracting a running low percentile and then smoothing the results
+        adopted from ACMAP.AQS
+        creates a column_amount_p field (p stands for polluted, from ACMAP work)
+        '''
+        from functools import partial
+        
+        if vcd_smoothing_window is None:
+            vcd_smoothing_window = vcd_percentile_window
+        
+        kernel = np.ones(vcd_smoothing_window)
+        inps = [l3[field] for l3 in self]
+        
+        partial_func = partial(
+            remove_background_inp2out,
+            percentile=vcd_percentile,size=vcd_percentile_window,kernel=kernel
+        )
+        
+        if ncores > 0:
+            import multiprocessing
+            with multiprocessing.Pool(processes=ncores) as pool:
+                outs = pool.map(partial_func,inps)
+        else:
+            outs = [partial_func(inp) for inp in inps]
+        
+        for l3,out in zip(self,outs):
+            l3[f'{field}_p'] = l3[field]-out
     
     def get_local_hour_l3s(self,local_hour_centers,local_hour_spans):
         '''return a separate Level3_List instance defined on local hours.
@@ -3707,7 +3704,41 @@ class Level3_List(list):
         for l3 in l3_lhs:
             l3_ret.add(l3)
         return l3_ret
-        
+    
+    def add_storage(self,vcd_field='column_amount',emission_field='wind_column',
+                    tendency=['c','b','f'], mode='nanmean',nan_tendency_as_zero=True):
+        '''create a "primed" estimator for each scan by adding tendency fields.
+        vcd_field:
+            field name in l3 for the vcd, default column_amount
+        emission_field:
+            field name in l3 for estimated emission, default wind_column, the DD estimator
+        tendency:
+            a list of tendency options generated by Level3_List.get_storage, the order matters
+            for the 'priority' mode
+        mode:
+            'nanmean' or 'priority', which takes valid pixels from tendency terms following the
+            order in the tendency list
+        nan_tendency_as_zero:
+            if true, fill nans in the final storage by zeros to avoid losing pixels by adding
+            the tendency
+        '''
+        for l3 in self:
+            if mode == 'nanmean':
+                storage = np.nanmean([
+                    l3.get(f'storage_{tdcy}_{vcd_field}') for tdcy in tendency
+                ],axis=0)
+            elif mode == 'priority':
+                # initiate using all nan
+                storage = np.full_like(l3['num_samples'], np.nan)
+                for tdcy in tendency:
+                    # Create mask of where merged result has NaN and current tdcy has valid values
+                    mask = np.isnan(storage) & ~np.isnan(l3.get(f'storage_{tdcy}_{vcd_field}'))
+                    # Fill these positions with values from current tdcy array
+                    storage[mask] = l3.get(f'storage_{tdcy}_{vcd_field}')[mask]
+            if nan_tendency_as_zero:
+                storage[np.isnan(storage)] = 0.
+            l3[f'{emission_field}_storage'] = l3[emission_field] + storage
+                
     def get_storage(self,field='column_amount',tendency=['c','b','f'],
                     num_samples_threshold=0.5
                    ):
@@ -3827,8 +3858,8 @@ class Level3_List(list):
         ax.set_ylabel(r'Random error $\sigma$ [mol m$^{-2}$ s$^{-1}$]');
         return dict(precisions=precisions,coverages=coverages,
                     precisions_r=precisions_r,coverages_r=coverages_r,ax=ax,error0=error0)
-        
-    def fit_topography(self,resample_rule=None,half_running_window=0,return_resampled=False,
+    
+    def fit_topography(self,resample_rule=None,return_resampled=False,
                        nbootstrap=None,**kwargs):
         if 'remove_intercept' in kwargs.keys():
             remove_intercept = kwargs['remove_intercept']
@@ -3866,8 +3897,8 @@ class Level3_List(list):
                     l3.topo_fit.bootstrap_params = bootstrap_params
                     l3.topo_fit.nbootstrap = nbootstrap
         else:
-            l3s_resampled,resampler = self.resample(rule=resample_rule,half_running_window=half_running_window)
-            for l3,(ind,sub_df) in zip(l3s_resampled,resampler.__iter__()):
+            l3s_resampled,resampler = self.resample(rule=resample_rule)
+            for l3,(k,v) in zip(l3s_resampled,resampler.indices.items()):
                 if nbootstrap is not None:
                     bootstrap_params = []
                     for i in range(nbootstrap):
@@ -3877,7 +3908,7 @@ class Level3_List(list):
                 if nbootstrap is not None:
                     l3.topo_fit.bootstrap_params = bootstrap_params
                     l3.topo_fit.nbootstrap = nbootstrap
-                for irow,row in sub_df.iterrows():
+                for irow,row in self.df.iloc[v].iterrows():
                     self[int(row['count'])].topo_fit = l3.topo_fit
                     self[int(row['count'])]['wind_column_topo'] = \
                     self[int(row['count'])]['wind_column']\
@@ -3904,15 +3935,15 @@ class Level3_List(list):
         if resample_rule is not None and return_resampled:
             return l3s_resampled
     
-    def fit_chemistry(self,resample_rule=None,half_running_window=0,return_resampled=False,**kwargs):
+    def fit_chemistry(self,resample_rule=None,return_resampled=False,**kwargs):
         if resample_rule is None:
             for l3 in self:
                 l3.fit_chemistry(**kwargs)
         else:
-            l3s_resampled,resampler = self.resample(rule=resample_rule,half_running_window=half_running_window)
-            for l3,(ind,sub_df) in zip(l3s_resampled,resampler.__iter__()):
+            l3s_resampled,resampler = self.resample(rule=resample_rule)
+            for l3,(k,v) in zip(l3s_resampled,resampler.indices.items()):
                 l3.fit_chemistry(**kwargs)
-                for irow,row in sub_df.iterrows():
+                for irow,row in self.df.iloc[v].iterrows():
                     self[int(row['count'])].chem_fit = l3.chem_fit
                     self[int(row['count'])]['wind_column_topo_chem'] = \
                     self[int(row['count'])]['wind_column_topo']\
@@ -3924,7 +3955,7 @@ class Level3_List(list):
         if resample_rule is not None and return_resampled:
             return l3s_resampled
     
-    def fit_bc(self,resample_rule=None,half_running_window=0,return_resampled=False,
+    def fit_bc(self,resample_rule=None,return_resampled=False,
                keys=['albedo'],orders=[[0,1]],nbootstrap=None,if_propagate_bootstrap=False,**kwargs):
         
         if 'remove_intercept' in kwargs.keys():
@@ -3966,8 +3997,8 @@ class Level3_List(list):
                     l3.bc_fit.bootstrap_params = bootstrap_params
                     l3.bc_fit.nbootstrap = nbootstrap
         else:
-            l3s_resampled,resampler = self.resample(rule=resample_rule,half_running_window=half_running_window)
-            for l3,(ind,sub_df) in zip(l3s_resampled,resampler.__iter__()):
+            l3s_resampled,resampler = self.resample(rule=resample_rule)
+            for l3,(k,v) in zip(l3s_resampled,resampler.indices.items()):
                 if nbootstrap is not None:
                     bootstrap_params = []
                     if if_propagate_bootstrap:
@@ -3985,7 +4016,7 @@ class Level3_List(list):
                 if nbootstrap is not None:
                     l3.bc_fit.bootstrap_params = bootstrap_params
                     l3.bc_fit.nbootstrap = nbootstrap
-                for irow,row in sub_df.iterrows():
+                for irow,row in self.df.iloc[v].iterrows():
                     self[int(row['count'])].bc_fit = l3.bc_fit
                     self[int(row['count'])].bc_fields = l3.bc_fields
                     wc_bc = self[int(row['count'])]['wind_column_topo'].copy()
@@ -4796,30 +4827,7 @@ class popy(object):
             self.logger.info('l2g_data will be divided into a list according to {}'.format(unique_layer_identifier))
             unique_values,unique_idx = np.unique(self.l2g_data[unique_layer_identifier],return_inverse=True)
             self.l2g_data = [{k:v[unique_idx==i,] for k,v in self.l2g_data.items()} for i in range(len(unique_values))]
-            
-    def F_load_l3_mat(self,l3_filename,boundary_polygon=None):
-        '''
-        load l3 mat files to l3_data dictionary
-        written by Kang Sun on 2021/02/25
-        '''
-        from scipy.io import loadmat
-        d = loadmat(l3_filename)
-        d.pop('__globals__')
-        d.pop('__header__')
-        d.pop('__version__')
-        
-        l3_data = {k:v.squeeze() for (k,v) in d.items()}
-        if boundary_polygon is not None:
-            self.logger.info('boundary polygon provided, masking out-of-boundary grid cells...')
-            [xmesh,ymesh] = np.meshgrid(l3_data['xgrid'],l3_data['ygrid'])
-            xlin = xmesh.reshape(-1)
-            ylin = ymesh.reshape(-1)
-            mask=~boundary_polygon.contains_points(np.hstack((xlin[:,np.newaxis],ylin[:,np.newaxis]))).reshape(xmesh.shape)
-            for (k,v) in l3_data.items():
-                if len(v.shape) == 2:
-                    l3_data[k][mask] = np.nan
-        return l3_data    
-        
+    
     def F_merge_l2g_data(self,l2g_data0,l2g_data1):
         if not l2g_data0:
             return l2g_data1
@@ -4829,33 +4837,6 @@ class popy(object):
         for key in common_keys:
             l2g_data0[key] = np.concatenate((l2g_data0[key],l2g_data1[key]),0)
         return l2g_data0
-    
-    def F_merge_l3_data(self,l3_data0,l3_data1):
-        if not l3_data0:
-            l3_data = l3_data1
-            return l3_data
-        if not l3_data1:
-            return l3_data0
-        common_keys = set(l3_data0).intersection(set(l3_data1))
-        l3_data = {}
-        for key in common_keys:
-            l3_data0[key][np.isnan(l3_data0[key])] = 0.
-            l3_data1[key][np.isnan(l3_data1[key])] = 0.
-            if key in ['total_sample_weight','pres_total_sample_weight','num_samples','pres_num_samples']:
-                l3_data[key] = l3_data0[key]+l3_data1[key]
-            elif key in ['xmesh','ymesh']:
-                l3_data[key] = l3_data0[key]
-            elif key == 'cloud_pressure':
-                l3_data[key] = (l3_data0[key]*l3_data0['pres_total_sample_weight']
-                +l3_data1[key]*l3_data1['pres_total_sample_weight'])\
-                /(l3_data0['pres_total_sample_weight']
-                +l3_data1['pres_total_sample_weight'])
-            else:
-                l3_data[key] = (l3_data0[key]*l3_data0['total_sample_weight']
-                +l3_data1[key]*l3_data1['total_sample_weight'])\
-                /(l3_data0['total_sample_weight']
-                +l3_data1['total_sample_weight'])
-        return l3_data
     
     def F_tropomi2omi(self,omi_pix_1based=None,tcoverage_threshold=None):
         '''sythesize omi l2g data from tropomi
@@ -5470,7 +5451,8 @@ class popy(object):
     
     def F_subset_TEMPONO2(self,l2_list=None,l2_path_pattern=None,
                           data_fields=None,data_fields_l2g=None,
-                          min_MDQF=0,max_MDQF=0,maxsza=None,maxvza=90,maxcf=None):
+                          min_MDQF=0,max_MDQF=0,maxsza=None,maxvza=90,
+                          max_ecf=0.2,max_crf=None):
         """ 
         function to subset TEMPONO2 level 2 data
         l2_list:
@@ -5484,8 +5466,10 @@ class popy(object):
             shortened data_fields used in the output dictionary l2g_data
         min/max_MDQF:
             bounds of /key_science_data/main_data_quality_flag
-        maxsza/cf:
-            max solar zenith angle and amf_cloud_fraction
+        maxsza:
+            max solar zenith angle 
+        max_ecf/crf:
+            max effective and amf_cloud_fraction
         created on 2023/11/01
         """      
         from netCDF4 import Dataset
@@ -5511,7 +5495,8 @@ class popy(object):
         self.l2_list = l2_list
         
         maxsza = maxsza or self.maxsza
-        maxcf = maxcf or self.maxcf
+        max_ecf = max_ecf or self.maxcf
+        max_crf = max_crf or np.inf
         west = self.west
         east = self.east
         south = self.south
@@ -5555,80 +5540,85 @@ class popy(object):
                 self.logger.warning('{} does not exist!!! Skipping...'.format(fn))
                 continue
             self.logger.info('Loading '+os.path.split(fn)[-1])
-            with Dataset(fn,'r') as nc:
-                with warnings.catch_warnings():
-                    warnings.filterwarnings("ignore",category=DeprecationWarning)
-                    xys = nc.geospatial_bounds.split('((')[-1].split('))')[0].split(',')
-                    ref_dt = datetime.datetime.strptime(nc.time_reference,'%Y-%m-%dT%H:%M:%SZ')
-                    t0 = ref_dt+datetime.timedelta(seconds=nc.time_coverage_start_since_epoch)
-                    t1 = ref_dt+datetime.timedelta(seconds=nc.time_coverage_end_since_epoch)
-                if t0 > self.end_python_datetime or t1 < self.start_python_datetime:
-                    self.logger.info(os.path.split(fn)[-1]+' does not overlap with the given time. Skipping...')
-                    continue
-                granule_bounds = np.array([xy.split(' ')[::-1] for xy in xys]).astype(float)
-                granule_poly = Polygon(granule_bounds)
-                if not polygon.intersects(granule_poly):
-                    self.logger.info(os.path.split(fn)[-1]+' does not intersects with popy domain. Skipping...')
-                    continue
-                if np.max(nc['geolocation/time'][:].mask) == True:
-                    self.logger.info(os.path.split(fn)[-1]+' has invalid time stamp! Fill by even time stamps between start/end')
-                    dn_utc0 = datetime2datenum(datetime.datetime.strptime(nc.time_coverage_start,'%Y-%m-%dT%H:%M:%SZ'))
-                    dn_utc1 = datetime2datenum(datetime.datetime.strptime(nc.time_coverage_end,'%Y-%m-%dT%H:%M:%SZ'))
-                    nmirror_step = nc.dimensions['mirror_step'].size
-                    UTC_matlab_datenum = np.linspace(dn_utc0,dn_utc1,nmirror_step+1)[:nmirror_step]
-                else:
-                    UTC_matlab_datenum = np.array([datetime2datenum(ref_dt+datetime.timedelta(seconds=s)) \
-                                               for s in nc['geolocation/time'][:].data])
-                outp_nc = {}
-                for i,dfld in enumerate(data_fields):
-                    tmp = nc[dfld]
-                    if not data_fields_l2g:
-                        varname = tmp.name
+            try:
+                with Dataset(fn,'r') as nc:
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings("ignore",category=DeprecationWarning)
+                        xys = nc.geospatial_bounds.split('((')[-1].split('))')[0].split(',')
+                        ref_dt = datetime.datetime.strptime(nc.time_reference,'%Y-%m-%dT%H:%M:%SZ')
+                        t0 = ref_dt+datetime.timedelta(seconds=nc.time_coverage_start_since_epoch)
+                        t1 = ref_dt+datetime.timedelta(seconds=nc.time_coverage_end_since_epoch)
+                    if t0 > self.end_python_datetime or t1 < self.start_python_datetime:
+                        self.logger.info(os.path.split(fn)[-1]+' does not overlap with the given time. Skipping...')
+                        continue
+                    granule_bounds = np.array([xy.split(' ')[::-1] for xy in xys]).astype(float)
+                    granule_poly = Polygon(granule_bounds)
+                    if not polygon.intersects(granule_poly):
+                        self.logger.info(os.path.split(fn)[-1]+' does not intersects with popy domain. Skipping...')
+                        continue
+                    if np.max(nc['geolocation/time'][:].mask) == True:
+                        self.logger.info(os.path.split(fn)[-1]+' has invalid time stamp! Fill by even time stamps between start/end')
+                        dn_utc0 = datetime2datenum(datetime.datetime.strptime(nc.time_coverage_start,'%Y-%m-%dT%H:%M:%SZ'))
+                        dn_utc1 = datetime2datenum(datetime.datetime.strptime(nc.time_coverage_end,'%Y-%m-%dT%H:%M:%SZ'))
+                        nmirror_step = nc.dimensions['mirror_step'].size
+                        UTC_matlab_datenum = np.linspace(dn_utc0,dn_utc1,nmirror_step+1)[:nmirror_step]
                     else:
-                        varname = data_fields_l2g[i]
-                    try:
-                        outp_nc[varname] = tmp[:].filled(np.nan)
-                    except:
-                        self.logger.debug('{} cannot be filled by nan or is not a masked array'.format(varname))
-                        outp_nc[varname] = tmp[:].data
-                
-                outp_nc['UTC_matlab_datenum'] = np.broadcast_to(UTC_matlab_datenum[:,np.newaxis],outp_nc['latc'].shape)
-                xtrack = nc.dimensions['xtrack'].size
-                outp_nc['across_track_position'] = np.broadcast_to(np.arange(1.,xtrack+1)[np.newaxis,:],\
-                                                                   outp_nc['latc'].shape).astype(int)
-                outp_nc['scan_num'] = np.full(outp_nc['latc'].shape,nc.scan_num,dtype=int)
-                outp_nc['granule_num'] = np.full(outp_nc['latc'].shape,nc.granule_num,dtype=int)
-                
-            f1 = (outp_nc['SolarZenithAngle'] <= maxsza) & (outp_nc['vza'] <= maxvza)
-            f2 = outp_nc['amf_cloud_fraction'] <= maxcf
-            f3 = (outp_nc['main_data_quality_flag'] <= max_MDQF) & (outp_nc['main_data_quality_flag'] >= min_MDQF)             
-            f4 = outp_nc['latc'] >= south
-            f5 = outp_nc['latc'] <= north
-            tmplon = outp_nc['lonc']-west
-            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
-            f6 = tmplon >= 0
-            f7 = tmplon <= east-west
-            f8 = outp_nc['UTC_matlab_datenum'] >= self.start_matlab_datenum
-            f9 = outp_nc['UTC_matlab_datenum'] <= self.end_matlab_datenum
-            validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
-            self.logger.info('You have {} valid L2 pixels'.format(np.nansum(validmask)))
-            l2g_data0 = {}
-            Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][:,:,2])[validmask]
-            Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][:,:,1])[validmask]
-            Lat_upperright = np.squeeze(outp_nc['latitude_bounds'][:,:,0])[validmask]
-            Lat_lowerright = np.squeeze(outp_nc['latitude_bounds'][:,:,3])[validmask]
-            
-            Lon_lowerleft = np.squeeze(outp_nc['longitude_bounds'][:,:,2])[validmask]
-            Lon_upperleft = np.squeeze(outp_nc['longitude_bounds'][:,:,1])[validmask]
-            Lon_upperright = np.squeeze(outp_nc['longitude_bounds'][:,:,0])[validmask]
-            Lon_lowerright = np.squeeze(outp_nc['longitude_bounds'][:,:,3])[validmask]
-            
-            l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
-            l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
-            for key in outp_nc.keys():
-                if key not in {'latitude_bounds','longitude_bounds','time'}:
-                    l2g_data0[key] = outp_nc[key][validmask]
-            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+                        UTC_matlab_datenum = np.array([datetime2datenum(ref_dt+datetime.timedelta(seconds=s)) \
+                                                   for s in nc['geolocation/time'][:].data])
+                    outp_nc = {}
+                    for i,dfld in enumerate(data_fields):
+                        tmp = nc[dfld]
+                        if not data_fields_l2g:
+                            varname = tmp.name
+                        else:
+                            varname = data_fields_l2g[i]
+                        try:
+                            outp_nc[varname] = tmp[:].filled(np.nan)
+                        except:
+                            self.logger.debug('{} cannot be filled by nan or is not a masked array'.format(varname))
+                            outp_nc[varname] = tmp[:].data
+
+                    outp_nc['UTC_matlab_datenum'] = np.broadcast_to(UTC_matlab_datenum[:,np.newaxis],outp_nc['latc'].shape)
+                    xtrack = nc.dimensions['xtrack'].size
+                    outp_nc['across_track_position'] = np.broadcast_to(np.arange(1.,xtrack+1)[np.newaxis,:],\
+                                                                       outp_nc['latc'].shape).astype(int)
+                    outp_nc['scan_num'] = np.full(outp_nc['latc'].shape,nc.scan_num,dtype=int)
+                    outp_nc['granule_num'] = np.full(outp_nc['latc'].shape,nc.granule_num,dtype=int)
+
+                f1 = (outp_nc['SolarZenithAngle'] <= maxsza) & (outp_nc['vza'] <= maxvza)
+                f2 = outp_nc['amf_cloud_fraction'] <= max_crf
+                f2_ = outp_nc['eff_cloud_fraction'] <= max_ecf
+                f3 = (outp_nc['main_data_quality_flag'] <= max_MDQF) & (outp_nc['main_data_quality_flag'] >= min_MDQF)             
+                f4 = outp_nc['latc'] >= south
+                f5 = outp_nc['latc'] <= north
+                tmplon = outp_nc['lonc']-west
+                tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
+                f6 = tmplon >= 0
+                f7 = tmplon <= east-west
+                f8 = outp_nc['UTC_matlab_datenum'] >= self.start_matlab_datenum
+                f9 = outp_nc['UTC_matlab_datenum'] <= self.end_matlab_datenum
+                validmask = f1 & f2 & f2_ & f3 & f4 & f5 & f6 & f7 & f8 & f9
+                self.logger.info('You have {} valid L2 pixels'.format(np.nansum(validmask)))
+                l2g_data0 = {}
+                Lat_lowerleft = np.squeeze(outp_nc['latitude_bounds'][:,:,2])[validmask]
+                Lat_upperleft = np.squeeze(outp_nc['latitude_bounds'][:,:,1])[validmask]
+                Lat_upperright = np.squeeze(outp_nc['latitude_bounds'][:,:,0])[validmask]
+                Lat_lowerright = np.squeeze(outp_nc['latitude_bounds'][:,:,3])[validmask]
+
+                Lon_lowerleft = np.squeeze(outp_nc['longitude_bounds'][:,:,2])[validmask]
+                Lon_upperleft = np.squeeze(outp_nc['longitude_bounds'][:,:,1])[validmask]
+                Lon_upperright = np.squeeze(outp_nc['longitude_bounds'][:,:,0])[validmask]
+                Lon_lowerright = np.squeeze(outp_nc['longitude_bounds'][:,:,3])[validmask]
+
+                l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
+                l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
+                for key in outp_nc.keys():
+                    if key not in {'latitude_bounds','longitude_bounds','time'}:
+                        l2g_data0[key] = outp_nc[key][validmask]
+                l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
+            except Exception as e:
+                self.logger.warning(f'{fn} gives error!')
+                self.logger.warning(e)
         self.l2g_data = l2g_data
         if not l2g_data:
             self.nl2 = 0
@@ -7373,179 +7363,7 @@ class popy(object):
             self.nl2 = 0
         else:
             self.nl2 = len(l2g_data['latc'])
-    
-    def F_subset_OMH2O(self,path,l2_path_structure=None):
-        """ 
-        function to subset omi h2o level 2 data, calling self.F_read_he5
-        path:
-            l2 data root directory, or path to control file
-        l2_path_structure:
-            None by default, indicating individual files are directly under path
-            '%Y/' if files are like l2_dir/2019/*.he5
-            '%Y/%m/%d/' if files are like l2_dir/2019/05/01/*.he5
-        updated on 2019/06/10
-        """
-        # find out list of l2 files to subset
-        if os.path.isfile(path):
-            self.F_update_popy_with_control_file(path)
-            l2_list = self.l2_list
-            l2_dir = self.l2_dir
-        else:
-            import glob
-            l2_dir = path
-            l2_list = []
-            cwd = os.getcwd()
-            os.chdir(l2_dir)
-            start_date = self.start_python_datetime.date()
-            end_date = self.end_python_datetime.date()
-            days = (end_date-start_date).days+1
-            DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
-            for DATE in DATES:
-                if l2_path_structure == None:
-                    flist = glob.glob('OMI-Aura_L2-OMH2O_'+DATE.strftime("%Ym%m%d")+'*.he5')
-                else:
-                    flist = glob.glob(DATE.strftime(l2_path_structure)+\
-                                      'OMI-Aura_L2-OMH2O_'+DATE.strftime("%Ym%m%d")+'*.he5')
-                l2_list = l2_list+flist
-            
-            os.chdir(cwd)
-            self.l2_dir = l2_dir
-            self.l2_list = l2_list
         
-        data_fields = ['AMFCloudFraction','AMFCloudPressure','AirMassFactor','Albedo',\
-                       'ColumnAmountDestriped','ColumnUncertainty','MainDataQualityFlag',\
-                       'PixelCornerLatitudes','PixelCornerLongitudes','FittingRMS']
-        # omh2o on aura avdc have no ColumnAmountDestriped field?!
-        data_fields = ['AMFCloudFraction','AMFCloudPressure','AirMassFactor','Albedo',\
-                       'ColumnAmount','ColumnUncertainty','MainDataQualityFlag',\
-                       'PixelCornerLatitudes','PixelCornerLongitudes','FittingRMS']
-        data_fields_l2g = ['cloud_fraction','cloud_pressure','amf','albedo',\
-                           'column_amount','column_uncertainty','MainDataQualityFlag',\
-                           'PixelCornerLatitudes','PixelCornerLongitudes','FittingRMS']
-        geo_fields = ['Latitude','Longitude','TimeUTC','SolarZenithAngle','TerrainHeight',\
-                      'nTimes_idx','nXtrack_idx']
-        geo_fields_l2g = ['latc','lonc','TimeUTC','SolarZenithAngle','terrain_height',\
-                      'nTimes_idx','nXtrack_idx']
-        swathname = 'OMI Total Column Amount H2O'
-        maxsza = self.maxsza
-        maxcf = self.maxcf
-        west = self.west
-        east = self.east
-        south = self.south
-        north = self.north
-        start_date = self.start_python_datetime.date()
-        end_date = self.end_python_datetime.date()
-        days = (end_date-start_date).days+1
-        DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
-        l2g_data = {}
-        for fn in l2_list:
-            file_path = os.path.join(l2_dir,fn)
-            self.logger.info('loading '+fn)
-            outp_he5 = self.F_read_he5(file_path,swathname,data_fields,geo_fields,data_fields_l2g,geo_fields_l2g)
-            f1 = outp_he5['SolarZenithAngle'] <= maxsza
-            f2 = outp_he5['cloud_fraction'] <= maxcf
-            f3 = outp_he5['MainDataQualityFlag'] == 0              
-            f4 = outp_he5['latc'] >= south
-            f5 = outp_he5['latc'] <= north
-            tmplon = outp_he5['lonc']-west
-            tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
-            f6 = tmplon >= 0
-            f7 = tmplon <= east-west
-            f8 = outp_he5['UTC_matlab_datenum'] >= self.start_matlab_datenum
-            f9 = outp_he5['UTC_matlab_datenum'] <= self.end_matlab_datenum
-            f10 = outp_he5['FittingRMS'] < 0.005
-            f11 = outp_he5['cloud_pressure'] > 750.
-            validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9 & f10 & f11
-            self.logger.info('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
-            l2g_data0 = {}
-            if np.sum(validmask) == 0:
-                continue
-            # python vs. matlab orders are messed up.
-            Lat_lowerleft = outp_he5['PixelCornerLatitudes'][0:-1,0:-1][validmask]
-            Lat_upperleft = outp_he5['PixelCornerLatitudes'][1:,0:-1][validmask]
-            Lat_lowerright = outp_he5['PixelCornerLatitudes'][0:-1,1:][validmask]
-            Lat_upperright = outp_he5['PixelCornerLatitudes'][1:,1:][validmask]               
-            Lon_lowerleft = outp_he5['PixelCornerLongitudes'][0:-1,0:-1][validmask]
-            Lon_upperleft = outp_he5['PixelCornerLongitudes'][1:,0:-1][validmask]
-            Lon_lowerright = outp_he5['PixelCornerLongitudes'][0:-1,1:][validmask]
-            Lon_upperright = outp_he5['PixelCornerLongitudes'][1:,1:][validmask]
-            l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
-            l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
-            for key in outp_he5.keys():
-                if key not in {'MainDataQualityFlag','PixelCornerLatitudes','PixelCornerLongitudes','TimeUTC'}:
-                    l2g_data0[key] = outp_he5[key][validmask]
-            l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
-        self.l2g_data = l2g_data
-        if not l2g_data:
-            self.nl2 = 0
-        else:
-            self.nl2 = len(l2g_data['latc'])
-    
-    def F_subset_OMCHOCHO(self,l2_dir):
-       import glob
-       data_fields = ['AMFCloudFraction','AMFCloudPressure','AirMassFactor','Albedo',\
-                      'ColumnAmountDestriped','ColumnUncertainty','MainDataQualityFlag',\
-                      'PixelCornerLatitudes','PixelCornerLongitudes']
-       data_fields_l2g = ['cloud_fraction','cloud_pressure','amf','albedo',\
-                          'column_amount','column_uncertainty','MainDataQualityFlag',\
-                          'PixelCornerLatitudes','PixelCornerLongitudes']
-       geo_fields = ['Latitude','Longitude','TimeUTC','SolarZenithAngle','TerrainHeight']
-       geo_fields_l2g = ['latc','lonc','TimeUTC','SolarZenithAngle','terrain_height']
-       swathname = 'OMI Total Column Amount CHOCHO'
-       maxsza = self.maxsza
-       maxcf = self.maxcf
-       west = self.west
-       east = self.east
-       south = self.south
-       north = self.north
-       start_date = self.start_python_datetime.date()
-       end_date = self.end_python_datetime.date()
-       days = (end_date-start_date).days+1
-       DATES = [start_date + datetime.timedelta(days=d) for d in range(days)]
-       l2g_data = {}
-       for DATE in DATES:
-           date_dir = l2_dir+DATE.strftime("%Y/%m/%d/")
-           flist = glob.glob(date_dir+'*.he5')
-           for fn in flist:
-               if self.show_progress:
-                   print('Loading '+fn)
-               outp_he5 = self.F_read_he5(fn,swathname,data_fields,geo_fields,data_fields_l2g,geo_fields_l2g)
-               f1 = outp_he5['SolarZenithAngle'] <= maxsza
-               f2 = outp_he5['cloud_fraction'] <= maxcf
-               f3 = outp_he5['MainDataQualityFlag'] == 0              
-               f4 = outp_he5['latc'] >= south
-               f5 = outp_he5['latc'] <= north
-               tmplon = outp_he5['lonc']-west
-               tmplon[tmplon < 0] = tmplon[tmplon < 0]+360
-               f6 = tmplon >= 0
-               f7 = tmplon <= east-west
-               f8 = outp_he5['UTC_matlab_datenum'] >= self.start_matlab_datenum
-               f9 = outp_he5['UTC_matlab_datenum'] <= self.end_matlab_datenum
-               validmask = f1 & f2 & f3 & f4 & f5 & f6 & f7 & f8 & f9
-               if self.show_progress:
-                   print('You have '+'%s'%np.sum(validmask)+' valid L2 pixels')
-               l2g_data0 = {}
-               # python vs. matlab orders are messed up. 
-               Lat_lowerleft = outp_he5['PixelCornerLatitudes'][0:-1,0:-1][validmask]
-               Lat_upperleft = outp_he5['PixelCornerLatitudes'][1:,0:-1][validmask]
-               Lat_lowerright = outp_he5['PixelCornerLatitudes'][0:-1,1:][validmask]
-               Lat_upperright = outp_he5['PixelCornerLatitudes'][1:,1:][validmask]               
-               Lon_lowerleft = outp_he5['PixelCornerLongitudes'][0:-1,0:-1][validmask]
-               Lon_upperleft = outp_he5['PixelCornerLongitudes'][1:,0:-1][validmask]
-               Lon_lowerright = outp_he5['PixelCornerLongitudes'][0:-1,1:][validmask]
-               Lon_upperright = outp_he5['PixelCornerLongitudes'][1:,1:][validmask]
-               l2g_data0['latr'] = np.column_stack((Lat_lowerleft,Lat_upperleft,Lat_upperright,Lat_lowerright))
-               l2g_data0['lonr'] = np.column_stack((Lon_lowerleft,Lon_upperleft,Lon_upperright,Lon_lowerright))
-               for key in outp_he5.keys():
-                   if key not in {'MainDataQualityFlag','PixelCornerLatitudes','PixelCornerLongitudes','TimeUTC'}:
-                       l2g_data0[key] = outp_he5[key][validmask]
-               l2g_data = self.F_merge_l2g_data(l2g_data,l2g_data0)
-       self.l2g_data = l2g_data
-       if not l2g_data:
-           self.nl2 = 0
-       else:
-           self.nl2 = len(l2g_data['latc'])
-    
     def F_subset_TESNH3(self,path):
         """ 
         function to subset TES NH3 lite files, foreshadowing future work on CrIS
@@ -8303,46 +8121,6 @@ class popy(object):
         fig_output['pc'] = pc
         return fig_output
     
-    def F_plot_l3(self,plot_field='column_amount',l3_data=None,
-                  vmin=None,vmax=None):
-        '''
-        THIS FUNCTION IS NOT SUPPORTED ANY MORE
-        l3 data plotting utility updated from F_plot_oversampled_variable
-        '''
-        if l3_data == None:
-            l3_data = self.C
-        try:
-            from mpl_toolkits.basemap import Basemap
-            if_map = True
-        except:
-            self.logger.warning('Basemap cannot be imported! plot without map')
-            if_map = False
-        import matplotlib.pyplot as plt
-        fig,ax = plt.subplots()
-        if self.error_model == 'log' and plot_field == 'column_amount':
-            plotdata = np.power(10,l3_data[plot_field])
-        else:
-            plotdata = l3_data[plot_field]
-        if if_map:
-            m = Basemap(projection= 'cyl',llcrnrlat=self.south,urcrnrlat=self.north,
-                        llcrnrlon=self.west,urcrnrlon=self.east,resolution='l')
-            m.drawstates(linewidth=0.5)
-            m.drawcoastlines(linewidth=0.5)
-            
-            pc = m.pcolormesh(self.xgrid,self.ygrid,plotdata,latlon=True,cmap='rainbow')
-            cb = fig.colorbar(pc,ax=ax,label=plot_field)
-        else:
-            pc = plt.pcolormesh(self.xgrid,self.ygrid,plotdata)
-            cb = fig.colorbar(pc,ax=ax,label=plot_field)
-            plt.xlim((self.west,self.east))
-            plt.ylim((self.south,self.north))
-            m = None
-        if vmin != None:
-            plt.clim(vmin=vmin)
-        if vmax != None:
-            plt.clim(vmax=vmax)
-        return pc,fig,ax,m,cb
-    
     def F_plot_l2g_cartopy(self,plot_field='column_amount',
                            max_day=1,l2g_data=None,draw_colorbar=True,
                            x_wind_field=None,y_wind_field=None,
@@ -8427,77 +8205,7 @@ class popy(object):
         fig_output['collection'] = collection
         fig_output['quiver'] =quiver
         return fig_output
-    
-    def F_plot_l2g(self,ax=None,plot_field='column_amount',max_day=1,l2g_data=None,
-                   alpha=0.7,vmin=None,vmax=None,
-                   x_wind_field='era5_u100',y_wind_field='era5_v100',
-                   wind_arrow_width=0.01,wind_arrow_scale=20):
-        '''
-        THIS FUNCTION IS NOT SUPPORTED ANY MORE
-        plot l2g pixels as polygons
-        plot_field:
-            which field in l2g_data to plot
-        max_day:
-            only plot limited number of days~layers
-        l2g_data:
-            l2g data dictionary can be supplied externally
-        alpha:
-            1 is opaque
-        vmin, vmax:
-            color limits
-        '''
-        if l2g_data == None:
-            l2g_data = self.l2g_data
-        if x_wind_field not in l2g_data.keys():
-            self.logger.warning('wind field not in l2g_data! will not plot wind')
-            x_wind_field=None
-        try:
-            from mpl_toolkits.basemap import Basemap
-            if_map = True
-        except:
-            self.logger.warning('Basemap cannot be imported! plot without map')
-            if_map = False
-        import matplotlib.pyplot as plt
-        from matplotlib.collections import PolyCollection
-        ax = plt.gca() if ax is None else ax
-        fig = plt.gcf()
-        plot_index = np.where(l2g_data['UTC_matlab_datenum']<=l2g_data['UTC_matlab_datenum'].min()+max_day)
-        if self.instrum in {"OMI","OMPS-NPP","GOME-1","GOME-2A","GOME-2B","SCIAMACHY","TROPOMI"}:
-            verts = [np.array([l2g_data['lonr'][i,:],l2g_data['latr'][i,:]]).T for i in plot_index[0]]
-        elif self.instrum in {"IASI","CrIS"}:
-            verts = [F_ellipse(l2g_data['v'][i],l2g_data['u'][i],l2g_data['t'][i],20,
-                               l2g_data['lonc'][i],l2g_data['latc'][i])[0].T for i in plot_index[0]]
-        collection = PolyCollection(verts,
-                             array=l2g_data[plot_field],cmap='rainbow',edgecolors='none')
-        collection.set_alpha(alpha)
-#        fig,ax = plt.subplots()
-        if if_map:
-            m = Basemap(projection= 'cyl',llcrnrlat=self.south,urcrnrlat=self.north,
-                        llcrnrlon=self.west,urcrnrlon=self.east,resolution='l')
-            m.drawstates(linewidth=0.5)
-            m.drawcoastlines(linewidth=0.5)
-            ax.add_collection(collection)
-            cb = fig.colorbar(collection,ax=ax,label=plot_field)
-        else:
-            ax.add_collection(collection)
-            cb = fig.colorbar(collection,ax=ax,label=plot_field)
-            plt.xlim((self.west,self.east))
-            plt.ylim((self.south,self.north))
-            m = None
-        if vmin != None:
-            collection.set_clim(vmin=vmin)
-        if vmax != None:
-            collection.set_clim(vmax=vmax)
-        if x_wind_field != None:
-            quiver = plt.quiver(l2g_data['lonc'][plot_index[0]],l2g_data['latc'][plot_index[0]],
-                                l2g_data[x_wind_field][plot_index[0]],l2g_data[y_wind_field][plot_index[0]],
-                                units='x',width=wind_arrow_width,scale=wind_arrow_scale)
-        else:
-            quiver=None
-        return collection,fig,ax,m,cb,quiver
             
-
-        
     def F_save_l2g_to_mat(self,file_path,data_fields=None,data_fields_l2g=None):
         """ 
         save l2g dictionary to .mat file
@@ -8626,167 +8334,9 @@ class popy(object):
             return l2g_data
         else:
             self.l2g_data = l2g_data
-        
-    def F_regrid_divergence(self,omega_field='column_amount',
-                            x_wind_field='era5_u100',y_wind_field='era5_v100',
-                            x_surface_wind_field='era5_u10',
-                            y_surface_wind_field='era5_v10',
-                            surface_pressure_field='surface_pressure',
-                            surface_vmr_field='surface_vmr',
-                            l2g_data=None,block_length=200,ncores=0,
-                            simplify_oversampling_list=True,if_daily=True,
-                            do_terrain=False):
-        '''
-        call F_parallel_regrid to oversample x/y-flux daily and calculate d(x-flux)/dx
-        and d(y-flux)dy to form daily divergence map. Average daily divergence to
-        get oversampled divergence map over the entire period defined by l2g_data
-        omega_field:
-            which scalar to calculate divergence
-        x/y_wind_field:
-            pbl representative horizontal wind
-        x/y_surface_wind_field:
-            near surface wind
-        surface_pressure_field:
-            surface pressure
-        surface_vmr_field:
-            surface mixing ratio
-        l2g_data:
-            l2g_data in popy-compatible dict format. by default use self.l2g_data
-        block_length:
-            l3 mesh grid will be cut to square blocks with this length
-        ncores:
-            number of cores, 0 calls non parallel F_regrid_ccm
-        simplify_oversampling_list:
-            if True, only oversampling omega_field and its divergence
-        if_daily:
-            if calculate spatial gradient every day. if False, calculate spatial gradient on the oversampled field
-        do_terrain:
-            calculate the terrain correction term or not
-        created on 2020/08/16
-        added terrain on 2020/09/28
-        '''
-        if l2g_data == None:
-            l2g_data = self.l2g_data
-        if 'UTC_matlab_datenum' not in l2g_data.keys():
-            l2g_data['UTC_matlab_datenum'] = l2g_data.pop('utc')
-        oversampling_list_full = self.oversampling_list.copy()
-        
-        if do_terrain:
-            l2g_data['surface_x_flux'] = l2g_data[surface_vmr_field]*l2g_data[x_surface_wind_field]
-            l2g_data['surface_y_flux'] = l2g_data[surface_vmr_field]*l2g_data[y_surface_wind_field]
-            self.logger.info('calculate the terrain correction term')
-            gravity = 9.8 # m/s2
-            MA = 0.029 # kg/mol
-            if not if_daily:
-                self.logger.error('not compatible with non-daily divergence calculation!')
-        
-        if simplify_oversampling_list:
-            self.oversampling_list = [omega_field,'x_flux','y_flux']
-            if surface_pressure_field not in self.oversampling_list and do_terrain:
-                self.oversampling_list.append(surface_pressure_field)
-            if do_terrain:
-                self.oversampling_list.append('surface_x_flux')
-                self.oversampling_list.append('surface_y_flux')
-        else:
-            self.oversampling_list.append('x_flux')
-            self.oversampling_list.append('y_flux')
-            if surface_pressure_field not in self.oversampling_list and do_terrain:
-                self.oversampling_list.append(surface_pressure_field)
-            if do_terrain:
-                self.oversampling_list.append('surface_x_flux')
-                self.oversampling_list.append('surface_y_flux')
-        
-        l2g_data['x_flux'] = l2g_data[omega_field]*l2g_data[x_wind_field]
-        l2g_data['y_flux'] = l2g_data[omega_field]*l2g_data[y_wind_field]
-        
-        
-        day_list = np.arange(np.floor(l2g_data['UTC_matlab_datenum'].min()),
-                             np.floor(l2g_data['UTC_matlab_datenum'].max())+1)
-        # x-grid size in m
-        dx_vec = np.cos(self.ygrid/180*np.pi)*111e3*self.grid_size
-        # y-grid size in m
-        dy = 111e3*self.grid_size
-        l3_data = {}
-        if not if_daily:
-            l3_data = self.F_parallel_regrid(l2g_data=l2g_data,
-                                             block_length=block_length,
-                                             ncores=ncores)
-            # d(x_flux)/dx
-            xdiv = np.full(l3_data['x_flux'].shape,np.nan,dtype=np.float64)
-            for irow in range(self.nrows):
-                for icol in range(2,self.ncols-2):
-                    xdiv[irow,icol] = (l3_data['x_flux'][irow,icol-2]
-                    -8*l3_data['x_flux'][irow,icol-1]
-                    +8*l3_data['x_flux'][irow,icol+1]
-                    -l3_data['x_flux'][irow,icol+2])/(12*dx_vec[irow])
-            # d(y_flux)/dy
-            ydiv = np.full(l3_data['y_flux'].shape,np.nan,dtype=np.float64)
-            for icol in range(self.ncols):
-                for irow in range(2,self.nrows-2):
-                    ydiv[irow,icol] = (l3_data['y_flux'][irow-2,icol]
-                    -8*l3_data['y_flux'][irow-1,icol]
-                    +8*l3_data['y_flux'][irow+1,icol]
-                    -l3_data['y_flux'][irow+2,icol])/(12*dy)
-            l3_data['div'] = xdiv+ydiv
-            self.oversampling_list = oversampling_list_full
-            return l3_data
-        for day in day_list:
-            mask = np.floor(l2g_data['UTC_matlab_datenum']) == day
-            if np.sum(mask) == 0:
-                continue
-            self.logger.info('regridding daily fluxes on '+datedev_py(day).strftime('%Y%m%d'))
-            self.logger.info('there are %d pixels'%(np.sum(mask)))
-            daily_l2g_data = {k:v[mask,] for (k,v) in l2g_data.items()}
-            daily_l3_data = self.F_parallel_regrid(l2g_data=daily_l2g_data,
-                                                   block_length=block_length,
-                                                   ncores=ncores)
-            # d(x_flux)/dx
-            xdiv = np.full(daily_l3_data['x_flux'].shape,np.nan,dtype=np.float64)
-            for irow in range(self.nrows):
-                for icol in range(2,self.ncols-2):
-                    xdiv[irow,icol] = (daily_l3_data['x_flux'][irow,icol-2]
-                    -8*daily_l3_data['x_flux'][irow,icol-1]
-                    +8*daily_l3_data['x_flux'][irow,icol+1]
-                    -daily_l3_data['x_flux'][irow,icol+2])/(12*dx_vec[irow])
-            # d(y_flux)/dy
-            ydiv = np.full(daily_l3_data['y_flux'].shape,np.nan,dtype=np.float64)
-            for icol in range(self.ncols):
-                for irow in range(2,self.nrows-2):
-                    ydiv[irow,icol] = (daily_l3_data['y_flux'][irow-2,icol]
-                    -8*daily_l3_data['y_flux'][irow-1,icol]
-                    +8*daily_l3_data['y_flux'][irow+1,icol]
-                    -daily_l3_data['y_flux'][irow+2,icol])/(12*dy)
-            daily_l3_data['div'] = xdiv+ydiv
             
-            if do_terrain:
-                # d(p0)/dx
-                xdp = np.full(daily_l3_data['x_flux'].shape,np.nan,dtype=np.float64)
-                for irow in range(self.nrows):
-                    for icol in range(2,self.ncols-2):
-                        xdp[irow,icol] = (daily_l3_data[surface_pressure_field][irow,icol-2]
-                        -8*daily_l3_data[surface_pressure_field][irow,icol-1]
-                        +8*daily_l3_data[surface_pressure_field][irow,icol+1]
-                        -daily_l3_data[surface_pressure_field][irow,icol+2])/(12*dx_vec[irow])
-                # d(p0)/dy
-                ydp = np.full(daily_l3_data['y_flux'].shape,np.nan,dtype=np.float64)
-                for icol in range(self.ncols):
-                    for irow in range(2,self.nrows-2):
-                        ydp[irow,icol] = (daily_l3_data[surface_pressure_field][irow-2,icol]
-                        -8*daily_l3_data[surface_pressure_field][irow-1,icol]
-                        +8*daily_l3_data[surface_pressure_field][irow+1,icol]
-                        -daily_l3_data[surface_pressure_field][irow+2,icol])/(12*dy)
-                daily_l3_data['terrain_correction'] = (daily_l3_data['surface_x_flux']*xdp
-                             +daily_l3_data['surface_y_flux']*ydp)/gravity/MA
-                daily_l3_data.pop('surface_x_flux');
-                daily_l3_data.pop('surface_y_flux');
-            daily_l3_data.pop('x_flux');
-            daily_l3_data.pop('y_flux');
-            l3_data = self.F_merge_l3_data(l3_data,daily_l3_data)
-        
-        self.oversampling_list = oversampling_list_full
-        return l3_data
-        
-    def F_parallel_regrid(self,l2g_data=None,block_length=200,ncores=None):
+    def F_parallel_regrid(
+        self,l2g_data=None,block_length=200,ncores=None,no_nan_fields=None):
         '''
         regrid from l2g to l3 in parallel by cutting the l3 mesh into blocks
         l2g_data:
@@ -8795,16 +8345,38 @@ class popy(object):
             l3 mesh grid will be cut to square blocks with this length
         ncores:
             number of cores
+        no_nan_fields:
+            trim l2 pixels so fields in this list cannot be nan
         created on 2020/07/19
         fix on 2020/08/17 so multiprocess does not consume all the memory
+        revised on 2024/08/04 for compatibility with l2->4 framework
         '''
+        oversampling_list = self.oversampling_list.copy()
+        no_nan_fields = no_nan_fields or ['latc','lonc']
+        
         if l2g_data == None:
             l2g_data = self.l2g_data
+        if isinstance(l2g_data,list):
+            for l2g in l2g_data:
+                mask = np.ones(l2g['latc'].shape,dtype=bool)
+                for field in no_nan_fields:
+                    mask = mask & ~np.isnan(l2g[field])
+                for k,v in l2g.items():
+                    l2g[k] = v[mask,]
+        else:
+            mask = np.ones(l2g_data['latc'].shape,dtype=bool)
+            for field in no_nan_fields:
+                mask = mask & ~np.isnan(l2g_data[field])
+            for k,v in l2g_data.items():
+                l2g_data[k] = v[mask,]
+        
         if isinstance(l2g_data,list):
             self.logger.info('l2g_data appears to be a list. each unique layer will be oversampled, coarsened, flux-generated separately, and then merged')
             l3_object = Level3_Data(proj=self.proj,grid_size=self.flux_grid_size)
             for l2g in l2g_data:
-                l3_orbit = self.F_parallel_regrid(l2g,block_length,ncores).block_reduce(self.flux_grid_size)
+                l3_orbit = self.F_parallel_regrid(
+                    l2g,block_length,ncores,no_nan_fields
+                ).block_reduce(self.flux_grid_size)
                 if hasattr(self,'calculate_flux_divergence_kw'):
                     l3_orbit.calculate_flux_divergence(**self.calculate_flux_divergence_kw)
                 if hasattr(self,'calculate_gradient_kw'):
@@ -8820,7 +8392,6 @@ class popy(object):
         xmargin = self.xmargin ; ymargin = self.ymargin
         start_matlab_datenum = self.start_matlab_datenum
         end_matlab_datenum = self.end_matlab_datenum
-        oversampling_list = self.oversampling_list.copy()
         
         if 'UTC_matlab_datenum' not in l2g_data.keys():
             l2g_data['UTC_matlab_datenum'] = l2g_data.pop('utc')
@@ -9707,39 +9278,7 @@ class popy(object):
             = variance_of_weighted_mean*nl2/(nl2-1)
         
         self.standard_error_of_weighted_mean = np.sqrt(variance_of_weighted_mean)
-    
-    def F_save_l3_to_mat(self,file_path,l3_data=None):
-        """
-        save regridded level 3 data, from F_regrid or F_regrid_ccm to .mat file
-        file_path: 
-            absolute path to the .mat file to save
-        created on 2020/03/15
-        updated on 2020/07/20 to be compatible with external l3_data dictionary
-        """
-        from scipy.io import savemat
-        if l3_data is not None:
-            l3_data['xgrid'] = self.xgrid
-            l3_data['ygrid'] = self.ygrid
-            l3_data['ncol'] = self.ncols
-            l3_data['nrow'] = self.nrows
-            if 'xmesh' in l3_data.keys():
-                l3_data.pop('xmesh');
-                l3_data.pop('ymesh');
-            savemat(file_path,l3_data)    
-            return
-        if not self.C:
-            self.logger.warning('l3_data is empty. Nothing to save.')
-            return        
         
-        C = self.C.copy()
-        C['total_sample_weight'] = self.total_sample_weight
-        C['num_samples'] = self.num_samples
-        C['xgrid'] = self.xgrid
-        C['ygrid'] = self.ygrid
-        C['ncol'] = self.ncols
-        C['nrow'] = self.nrows
-        savemat(file_path,C)
-    
     def F_vertically_weighted_wind(self,which_met,met_dir,
                                  fn_header='',nlevel=10,fix_height=None):
         '''
@@ -10160,39 +9699,3 @@ class popy(object):
             del self.l2g_data
             if hasattr(self,'nl2'):
                 del self.nl2
-    
-    def F_plot_oversampled_variable(self,plot_variable,save_fig_path='',\
-                                    vmin=np.nan,vmax=np.nan,dpi=200):
-        import matplotlib.pyplot as plt
-        # conda install -c anaconda basemap
-        from mpl_toolkits.basemap import Basemap
-        # otherwise won't work at ssh
-        #plt.switch_backend('agg')
-        fig1 = plt.gcf()
-        # Draw an equidistant cylindrical projection using the low resolution
-        # coastline database.
-        m = Basemap(projection='cyl', resolution='l',
-                    llcrnrlat=self.south, urcrnrlat = self.north,
-                    llcrnrlon=self.west, urcrnrlon = self.east)
-        m.drawcoastlines(linewidth=0.5)
-        m.drawparallels(np.arange(-90., 120., 30.), labels=[1, 0, 0, 0])
-        m.drawmeridians(np.arange(-180, 180., 45.), labels=[0, 0, 0, 1])
-        if plot_variable == 'standard_error_of_weighted_mean':
-            data = self.standard_error_of_weighted_mean
-        else:
-            data = self.C[plot_variable]
-        m.pcolormesh(self.xgrid,self.ygrid,data,latlon=True,cmap='jet')
-        vmin0,vmax0 = plt.gci().get_clim()
-        if np.isnan(vmin):
-            vmin = vmin0
-        if np.isnan(vmax):
-            vmax = vmax0
-        plt.clim(vmin,vmax)
-        cb = m.colorbar()
-        cb.set_label(r'molc cm$^{-2}$')
-        plt.title(self.tstart+'-'+self.tend,fontsize=8)
-        if save_fig_path:
-            fig1.savefig(save_fig_path,dpi=dpi)
-        plt.close()
-        
-
