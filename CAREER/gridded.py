@@ -19,6 +19,140 @@ from popy import Level3_Data, F_center2edge, Level3_List
 from scipy.ndimage import gaussian_filter
 from shapely.geometry import Polygon
 
+
+class CAFO:
+    '''CAFO locations (cow, pig, both) from shapefiles, for a named region or any lon/lat box.
+    data_dir:
+        CAFO input directory with CAFOScows.shp, CAFOSpigs.shp, CAFOSboth.shp
+        (or a 'Dataset/' subfolder with them)
+    out_dir:
+        out_dir/cafo_{cow,pig,both}_{domain}.csv, columns: Size (sqm), lon, lat
+        cafo = CAFO(data_dir, out_dir)
+        cafo.run('midwest', plot=False)    # writes out_dir/cafo_{cow,pig,both}_midwest.csv'''
+    import geopandas as gpd
+    
+    REGIONS = {
+        'conus':   (-130.0, -63.0, 23.0, 52.0),
+        'midwest': (-106.0, -84.5, 34.0, 44.0),
+    }
+
+    FILES = {
+        'cow':  'CAFOScows.shp',
+        'pig':  'CAFOSpigs.shp',
+        'both': 'CAFOSboth.shp',
+    }
+
+    COLORS = {'cow': 'saddlebrown', 'pig': 'deeppink', 'both': 'darkred'}
+
+    def __init__(self, data_dir, out_dir, size_col='Size (sqm)'):
+        self.logger = logging.getLogger(__name__)
+        self.data_dir = data_dir
+        self.out_dir = out_dir
+        self.size_col = size_col
+        self._gdf = {}
+        os.makedirs(out_dir, exist_ok=True)
+
+    def run(self, region, name=None, plot=True, save_png=True):
+        name = name or self._name(region)
+        data = {}
+        for animal in self.FILES:
+            gdf = self.get(animal, region)
+            path = os.path.join(self.out_dir, f'cafo_{animal}_{name}.csv')
+            cols = [c for c in (self.size_col, 'lon', 'lat') if c in gdf.columns]
+            gdf[cols].to_csv(path, index=False)
+            self.logger.warning(f'wrote {path}  (n = {len(gdf):,})')
+            data[animal] = gdf
+        if plot:
+            self.plot(data, region, name, save_png)
+        return data
+
+    def get(self, animal, region):
+        '''GeoDataFrame of one animal ('cow', 'pig', 'both') in a region or box.'''
+        west, east, south, north = self._bounds(region)
+        return self.load(animal).cx[west:east, south:north].reset_index(drop=True)
+
+    def load(self, animal):
+        animal = animal.lower().rstrip('s')
+        if animal not in self.FILES:
+            raise ValueError(f"animal must be one of {list(self.FILES)}")
+        if animal in self._gdf:
+            return self._gdf[animal]
+
+        gdf = self.gpd.read_file(self._shp_path(animal))
+        if gdf.crs is None:
+            gdf = gdf.set_crs(epsg=4326)
+
+        gdf = gdf.to_crs(epsg=5070)
+        gdf['geometry'] = gdf.geometry.centroid
+        gdf = gdf.to_crs(epsg=4326)
+
+        gdf['lon'] = gdf.geometry.x
+        gdf['lat'] = gdf.geometry.y
+        gdf['animal'] = animal
+
+        if self.size_col in gdf.columns:
+            gdf = gdf.sort_values(self.size_col, ascending=False)
+
+        west, east, south, north = self.REGIONS['conus']
+        gdf = gdf.cx[west:east, south:north].reset_index(drop=True)
+        self._gdf[animal] = gdf
+        return gdf
+
+    def _shp_path(self, animal):
+        name = self.FILES[animal]
+        for d in (self.data_dir, os.path.join(self.data_dir, 'Dataset')):
+            p = os.path.join(d, name)
+            if os.path.exists(p):
+                return p
+        raise FileNotFoundError(f"{name} not found in {self.data_dir} or its Dataset/ folder")
+
+    def plot(self, data, region, name=None, save_png=True):
+        name = name or self._name(region)
+        west, east, south, north = self._bounds(region)
+        fig, axes = plt.subplots(len(data), 1, figsize=(12, 4.7 * len(data)),
+                                 subplot_kw={'projection': ccrs.PlateCarree()})
+        axes = [axes] if len(data) == 1 else axes
+
+        for ax, (animal, gdf) in zip(axes, data.items()):
+            ax.set_extent([west, east, south, north], crs=ccrs.PlateCarree())
+            ax.add_feature(cfeature.STATES, edgecolor='gray', linewidth=0.5)
+            ax.add_feature(cfeature.LAKES, facecolor='white', edgecolor='gray', linewidth=0.5)
+            ax.add_feature(cfeature.COASTLINE, linewidth=0.6)
+
+            if len(gdf):
+                size = gdf[self.size_col]
+                s = 1 + 15 * (size / size.max()) ** 0.5
+                ax.scatter(gdf.lon, gdf.lat, s=s, color=self.COLORS[animal], alpha=0.6,
+                           edgecolor='none', transform=ccrs.PlateCarree())
+
+            gl = ax.gridlines(draw_labels=True, linewidth=0)
+            gl.top_labels = gl.right_labels = False
+            ax.set_title(f'{animal.capitalize()} CAFOs: {name} (n = {len(gdf):,})', fontsize=14)
+
+        plt.tight_layout()
+        if save_png:
+            plt.savefig(os.path.join(self.out_dir, f'cafo_maps_{name}.png'),
+                        dpi=300, bbox_inches='tight')
+        plt.show()
+
+    def _bounds(self, region):
+        '''region name -> (west, east, south, north); a box is checked and returned'''
+        if isinstance(region, str):
+            return self.REGIONS[region.lower()]
+        west, east, south, north = region
+        assert west < east and south < north, 'box must be (west, east, south, north)'
+        return west, east, south, north
+
+    @staticmethod
+    def _name(region):
+        '''midwest -> midwest;  (-110, -70, 30, 44) -> 110W_70W_30N_44N'''
+        if isinstance(region, str):
+            return region.lower()
+        def lon(v): return f"{abs(v):g}{'W' if v < 0 else 'E'}"
+        def lat(v): return f"{abs(v):g}{'S' if v < 0 else 'N'}"
+        west, east, south, north = region
+        return f"{lon(west)}_{lon(east)}_{lat(south)}_{lat(north)}"
+
 # code hosting classes for gridded, raster like datasets that interact with popy data
 class CDL:
     '''class to handle crop data layer (cdl) data'''
@@ -83,6 +217,64 @@ class CDL:
         new_cdl.xgrid,new_cdl.ygrid,new_cdl.data = self.xgrid,self.ygrid,new_data
         new_cdl.cdl_name_codes = cdl_name_codes
         return new_cdl
+    
+    def combined_cafo(self, cdl_name_codes, cafo_paths):
+        '''a new CDL with C = len(cdl_name_codes) + len(cafo_paths) + 1 categories:
+            the cdl groups, one category per cafo type, and other = 1 - all the rest
+            the same cafo fractions are used for every year'''
+        codes = [c for name_code in cdl_name_codes for c in name_code[1]]
+        duplicates = sorted(set([c for c in codes if codes.count(c) > 1]))
+        assert len(duplicates) == 0, f'codes in more than one group: {duplicates}'
+
+        ngroup = len(cdl_name_codes)
+        ncafo = len(cafo_paths)
+        new_shape = list(self.data.shape)
+        new_shape[1] = ngroup + ncafo + 1
+        new_data = np.zeros(new_shape, dtype=np.float32)
+
+        # cdl groups, same as in combine
+        for i, name_code in enumerate(cdl_name_codes):
+            new_data[:, i] = self.data[:, self.lcc_df['Code'].isin(name_code[1])].sum(axis=1)
+
+        # grid cell area in km2, same as in BUI
+        xgrid_size = np.abs(np.nanmedian(np.diff(self.xgrid)))
+        ygrid_size = np.abs(np.nanmedian(np.diff(self.ygrid)))
+        grid_size = (xgrid_size + ygrid_size) / 2
+        xmesh, ymesh = np.meshgrid(self.xgrid, self.ygrid)
+        grid_size_in_km2 = np.cos(np.deg2rad(ymesh)) * np.square(grid_size * 111.)
+
+        # cafo types: total footprint (km2) of the CAFOs located in each cell / cell area
+        xedges, yedges = F_center2edge(self.xgrid, self.ygrid)
+        for j, cafo_path in enumerate(cafo_paths.values()):
+            cafo_df = pd.read_csv(cafo_path)
+            cafo_df = cafo_df.dropna(subset=['lon', 'lat', 'Size (sqm)'])
+            cafo_km2, _, _ = np.histogram2d(
+                cafo_df['lat'], cafo_df['lon'], bins=[yedges, xedges],
+                weights=cafo_df['Size (sqm)'] / 1e6)
+            new_data[:, ngroup + j] = cafo_km2 / grid_size_in_km2
+
+        # other = 1 - all the rest. where cafo is larger than the remaining area,
+        # other is set to 0 and the cell is rescaled to sum to 1
+        new_data[:, -1] = 1 - new_data[:, :-1].sum(axis=1)
+        n_neg = np.sum(new_data[:, -1] < -1e-5)                  # ignore float rounding
+        if n_neg > 0:
+            self.logger.warning(
+                f'{n_neg} year-cells with cafo > remaining area: other set to 0, cell rescaled')
+        new_data[:, -1] = np.clip(new_data[:, -1], 0, None)
+        new_data = new_data / new_data.sum(axis=1, keepdims=True)
+
+        names = [name_code[0] for name_code in cdl_name_codes] + list(cafo_paths.keys()) + ['other']
+        lcc_df = pd.DataFrame(dict(
+            Code=[name_code[1][0] for name_code in cdl_name_codes]
+            + [999 - j for j in range(ncafo)] + [0],
+            Class_Name=names))
+        new_cdl = CDL(lcc_df=lcc_df)
+        new_cdl.df = self.df.copy()
+        new_cdl.xgrid, new_cdl.ygrid, new_cdl.data = self.xgrid, self.ygrid, new_data
+        new_cdl.cdl_name_codes = cdl_name_codes
+        new_cdl.cafo_paths = cafo_paths
+        return new_cdl
+    
         
     def read_nc(self,filenames,years):
         assert len(filenames) == len(years)
@@ -223,6 +415,7 @@ class CDL:
             self.data[iyear] = self.get_year_fractions(
                 filename,codes,xgrid,ygrid,block_length
             )
+    
 
 
 class CDL_old:
