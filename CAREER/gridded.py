@@ -21,18 +21,16 @@ from shapely.geometry import Polygon
 
 
 class CAFO:
-    ''' data_dir (required): CAFO input directory. It must contain CAFOScows.shp, CAFOSpigs.shp,
-        CAFOSboth.shp (or a 'Dataset/' subfolder with them). out_dir (required): where the CSVs / PNGs are written.
-
-    example:
-        data_dir='/projects/academic/kangsun/data/GIS_data/CAFO',
-        out_dir='/projects/academic/kangsun/......')
-        mw = cafo.run('midwest', plot=False)          # writes cafo_<animal>_midwest.csv
-        cafo.plot(mw, 'midwest', save_png=False)
-        cafo.run((-110, -70, 30, 44))                 # any box: (west, east, south, north)
-    '''
-    import geopandas as gpd         
-
+    '''CAFO locations (cow, pig, both) from shapefiles, for a named region or any lon/lat box.
+    data_dir:
+        CAFO input directory with CAFOScows.shp, CAFOSpigs.shp, CAFOSboth.shp
+        (or a 'Dataset/' subfolder with them)
+    out_dir:
+        out_dir/cafo_{cow,pig,both}_{domain}.csv, columns: Size (sqm), lon, lat
+        cafo = CAFO(data_dir, out_dir)
+        cafo.run('midwest', plot=False)    # writes out_dir/cafo_{cow,pig,both}_midwest.csv'''
+    import geopandas as gpd
+    
     REGIONS = {
         'conus':   (-130.0, -63.0, 23.0, 52.0),
         'midwest': (-106.0, -84.5, 34.0, 44.0),
@@ -220,53 +218,62 @@ class CDL:
         new_cdl.cdl_name_codes = cdl_name_codes
         return new_cdl
     
-    def combined_cafo(self, cdl_name_codes, cafo):
-            ''' a new CDL with C = len(cdl_name_codes)+2 layers: groups..., cafo, other
-                other = 1 - (all groups + cafo); every cell sums to 1
-                the same CAFO map is used for every year
-            '''
-            codes = [c for _, cs in cdl_name_codes for c in cs]
-            dup = sorted({c for c in codes if codes.count(c) > 1})
-            assert not dup, f'codes in more than one group: {dup}'
-    
-            all_codes = self.lcc_df['Code'].values
-            named = np.stack(
-                [self.data[:, np.isin(all_codes, cs)].sum(axis=1) for _, cs in cdl_name_codes],
-                axis=1)                                              
-    
-            # CAFO fraction on this grid: footprint area / cell area
-            if isinstance(cafo, str):
-                cafo = pd.read_csv(cafo)
-            cafo = cafo.dropna(subset=['lon', 'lat', 'Size (sqm)'])
-            xe, ye = F_center2edge(self.xgrid, self.ygrid)
-            area = np.histogram2d(cafo['lat'], cafo['lon'], bins=[ye, xe],
-                                  weights=cafo['Size (sqm)'] / 1e6)[0]     # km2 per cell
-            R = 6371.0088
-            cell = R**2 * np.outer(np.diff(np.sin(np.deg2rad(ye))),
-                                   np.deg2rad(np.diff(xe)))            # km2 per cell
-            cafo_frac = area / cell
-            cafo_layer = np.broadcast_to(cafo_frac, (named.shape[0], 1) + cafo_frac.shape)
-    
-            other = 1 - named.sum(axis=1, keepdims=True) - cafo_layer
-            n_neg = np.sum(other < -1e-5)                             # ignore float rounding
-            if n_neg:
-                self.logger.warning(
-                    f'{n_neg} year-cells with CAFO > remaining area: other set to 0, cell rescaled')
-            other = np.clip(other, 0, None)
-    
-            new_data = np.concatenate([named, cafo_layer, other], axis=1)
-            new_data = (new_data / new_data.sum(axis=1, keepdims=True)).astype(np.float32)
-    
-            #new CDL object, same grid and years
-            names = [n for n, _ in cdl_name_codes] + ['cafo', 'other']
-            lcc_df = pd.DataFrame(dict(Code=[cs[0] for _, cs in cdl_name_codes] + [999, 0],
-                                       Class_Name=names))
-            new_cdl = CDL(lcc_df=lcc_df)
-            new_cdl.df = self.df.copy()
-            new_cdl.xgrid, new_cdl.ygrid, new_cdl.data = self.xgrid, self.ygrid, new_data
-            new_cdl.cdl_name_codes = cdl_name_codes
-            new_cdl.names = names
-            return new_cdl
+    def combined_cafo(self, cdl_name_codes, cafo_paths):
+        '''a new CDL with C = len(cdl_name_codes) + len(cafo_paths) + 1 categories:
+            the cdl groups, one category per cafo type, and other = 1 - all the rest
+            the same cafo fractions are used for every year'''
+        codes = [c for name_code in cdl_name_codes for c in name_code[1]]
+        duplicates = sorted(set([c for c in codes if codes.count(c) > 1]))
+        assert len(duplicates) == 0, f'codes in more than one group: {duplicates}'
+
+        ngroup = len(cdl_name_codes)
+        ncafo = len(cafo_paths)
+        new_shape = list(self.data.shape)
+        new_shape[1] = ngroup + ncafo + 1
+        new_data = np.zeros(new_shape, dtype=np.float32)
+
+        # cdl groups, same as in combine
+        for i, name_code in enumerate(cdl_name_codes):
+            new_data[:, i] = self.data[:, self.lcc_df['Code'].isin(name_code[1])].sum(axis=1)
+
+        # grid cell area in km2, same as in BUI
+        xgrid_size = np.abs(np.nanmedian(np.diff(self.xgrid)))
+        ygrid_size = np.abs(np.nanmedian(np.diff(self.ygrid)))
+        grid_size = (xgrid_size + ygrid_size) / 2
+        xmesh, ymesh = np.meshgrid(self.xgrid, self.ygrid)
+        grid_size_in_km2 = np.cos(np.deg2rad(ymesh)) * np.square(grid_size * 111.)
+
+        # cafo types: total footprint (km2) of the CAFOs located in each cell / cell area
+        xedges, yedges = F_center2edge(self.xgrid, self.ygrid)
+        for j, cafo_path in enumerate(cafo_paths.values()):
+            cafo_df = pd.read_csv(cafo_path)
+            cafo_df = cafo_df.dropna(subset=['lon', 'lat', 'Size (sqm)'])
+            cafo_km2, _, _ = np.histogram2d(
+                cafo_df['lat'], cafo_df['lon'], bins=[yedges, xedges],
+                weights=cafo_df['Size (sqm)'] / 1e6)
+            new_data[:, ngroup + j] = cafo_km2 / grid_size_in_km2
+
+        # other = 1 - all the rest. where cafo is larger than the remaining area,
+        # other is set to 0 and the cell is rescaled to sum to 1
+        new_data[:, -1] = 1 - new_data[:, :-1].sum(axis=1)
+        n_neg = np.sum(new_data[:, -1] < -1e-5)                  # ignore float rounding
+        if n_neg > 0:
+            self.logger.warning(
+                f'{n_neg} year-cells with cafo > remaining area: other set to 0, cell rescaled')
+        new_data[:, -1] = np.clip(new_data[:, -1], 0, None)
+        new_data = new_data / new_data.sum(axis=1, keepdims=True)
+
+        names = [name_code[0] for name_code in cdl_name_codes] + list(cafo_paths.keys()) + ['other']
+        lcc_df = pd.DataFrame(dict(
+            Code=[name_code[1][0] for name_code in cdl_name_codes]
+            + [999 - j for j in range(ncafo)] + [0],
+            Class_Name=names))
+        new_cdl = CDL(lcc_df=lcc_df)
+        new_cdl.df = self.df.copy()
+        new_cdl.xgrid, new_cdl.ygrid, new_cdl.data = self.xgrid, self.ygrid, new_data
+        new_cdl.cdl_name_codes = cdl_name_codes
+        new_cdl.cafo_paths = cafo_paths
+        return new_cdl
     
         
     def read_nc(self,filenames,years):
