@@ -29,7 +29,6 @@ class CAFO:
         out_dir/cafo_{cow,pig,both}_{domain}.csv, columns: Size (sqm), lon, lat
         cafo = CAFO(data_dir, out_dir)
         cafo.run('midwest', plot=False)    # writes out_dir/cafo_{cow,pig,both}_midwest.csv'''
-    import geopandas as gpd
     
     REGIONS = {
         'conus':   (-130.0, -63.0, 23.0, 52.0),
@@ -72,6 +71,7 @@ class CAFO:
         return self.load(animal).cx[west:east, south:north].reset_index(drop=True)
 
     def load(self, animal):
+        import geopandas as gpd
         animal = animal.lower().rstrip('s')
         if animal not in self.FILES:
             raise ValueError(f"animal must be one of {list(self.FILES)}")
@@ -153,6 +153,7 @@ class CAFO:
         west, east, south, north = region
         return f"{lon(west)}_{lon(east)}_{lat(south)}_{lat(north)}"
 
+
 # code hosting classes for gridded, raster like datasets that interact with popy data
 class CDL:
     '''class to handle crop data layer (cdl) data'''
@@ -218,10 +219,12 @@ class CDL:
         new_cdl.cdl_name_codes = cdl_name_codes
         return new_cdl
     
-    def combined_cafo(self, cdl_name_codes, cafo_paths):
-        '''a new CDL with C = len(cdl_name_codes) + len(cafo_paths) + 1 categories:
-            the cdl groups, one category per cafo type, and other = 1 - all the rest
-            the same cafo fractions are used for every year'''
+    def combine_cafo(self, cdl_name_codes, cafo_paths):
+        '''
+        a new CDL with C = len(cdl_name_codes) + len(cafo_paths) + 1 categories:
+        the cdl groups, one category per cafo type, and other = 1 - all the rest
+        the same cafo fractions are used for every year
+        '''
         codes = [c for name_code in cdl_name_codes for c in name_code[1]]
         duplicates = sorted(set([c for c in codes if codes.count(c) > 1]))
         assert len(duplicates) == 0, f'codes in more than one group: {duplicates}'
@@ -254,15 +257,15 @@ class CDL:
             new_data[:, ngroup + j] = cafo_km2 / grid_size_in_km2
 
         # other = 1 - all the rest. where cafo is larger than the remaining area,
-        # other is set to 0 and the cell is rescaled to sum to 1
+        # other is set to 0
         new_data[:, -1] = 1 - new_data[:, :-1].sum(axis=1)
-        n_neg = np.sum(new_data[:, -1] < -1e-5)                  # ignore float rounding
+        n_neg = np.sum(new_data[:, -1] < 0)                  
         if n_neg > 0:
+            new_data[:, -1] = np.clip(new_data[:, -1], 0, None)
+            max_total_frac = new_data.sum(axis=1).max()
             self.logger.warning(
-                f'{n_neg} year-cells with cafo > remaining area: other set to 0, cell rescaled')
-        new_data[:, -1] = np.clip(new_data[:, -1], 0, None)
-        new_data = new_data / new_data.sum(axis=1, keepdims=True)
-
+                f'{n_neg} year-cells with cafo > remaining area. other set to 0. max sum at {max_total_frac:.3f}.')
+        
         names = [name_code[0] for name_code in cdl_name_codes] + list(cafo_paths.keys()) + ['other']
         lcc_df = pd.DataFrame(dict(
             Code=[name_code[1][0] for name_code in cdl_name_codes]
