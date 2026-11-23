@@ -287,6 +287,25 @@ class Stream:
             last[urows] = iunit[len(rows)-1-ilast]
         return first,last
     
+    def estimate_memory(self,nfield,ny,nx,nbyte=4,nbyte_accumulator=8):
+        '''
+        rough memory in GB, e.g., before load
+        frames: float32 aggregated frames of all roles, [nfold,nframe,nfield+2,ny,nx];
+            infer has one fold
+        accumulator: float64 partial sums of open intervals. each unit is in one 
+            interval per spec, so at most one interval per spec is open, holding 
+            sums per val_fold group (nfold+1) and local hour: w*v per field, w, n
+        '''
+        nlh = len(self.local_hours)
+        nfold = max(self.nfold,1)
+        frames,accumulator = 0,0
+        for role,table in self.interval_dfs.items():
+            nfold_role = 1 if role == 'infer' else nfold
+            frames += nfold_role*len(table)*nlh*(nfield+2)*ny*nx*nbyte
+            nspec = table['ispec'].nunique()
+            accumulator += nspec*(nfold+1)*nlh*(nfield+2)*ny*nx*nbyte_accumulator
+        return dict(frames=frames/1e9,accumulator=accumulator/1e9)
+    
     def get_frame_df(self,role='train'):
         '''
         frame table, interval rows crossed with local hours; t and local_hour 
@@ -912,6 +931,14 @@ def build_streams(config,roles=('train','val','infer'),**load_kw):
             val_kw=sc.get('val') if 'val' in needed else None,
             infer_kw=sc.get('infer') if 'infer' in needed else None
         )
+        if config.experiment.interactive:
+            # grid size from the domain, approximately; the exact grid comes with load
+            nx = int(round((sc.domain.east-sc.domain.west)/sc.grid_size))
+            ny = int(round((sc.domain.north-sc.domain.south)/sc.grid_size))
+            memory = stream.estimate_memory(nfield=len(sc.field_names),ny=ny,nx=nx)
+            logging.getLogger(__name__).warning(
+                f'{sc.name} ({", ".join(needed)}): about {memory["frames"]:.2f} GB of '
+                f'frames and {memory["accumulator"]:.2f} GB of accumulators')
         stream.load(
             field_names=sc.field_names,west=sc.domain.west,east=sc.domain.east,
             south=sc.domain.south,north=sc.domain.north,grid_size=sc.grid_size,
