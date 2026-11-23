@@ -64,8 +64,10 @@ class LaplacianLoss(nn.Module):
             lap_BC0 = gradients.abs().mean(dim=[-2,-1])
             lap_BC = lap_BC0*channel_weights*weight
             lap_SC[i] = lap_BC0.cpu().detach().numpy().mean(axis=0)
-            # std across B
-            lap_B_std = lap_BC.mean(dim=-1).std()
+            # std across B; a batch of one has no std (nan, or an error in 
+            # torch 1.13 backward), so it contributes a zero that keeps the graph
+            lap_B = lap_BC.mean(dim=-1)
+            lap_B_std = lap_B.std() if lap_B.shape[0] > 1 else lap_B.sum()*0.
             # mean laplacian per scale
             lap_mean = lap_BC.mean()
             lap_mean_loss += lap_mean
@@ -266,9 +268,14 @@ class Trainer:
         training samples from all datasets, shuffled. v05: do_group and 
         shuffle_level are gone; v04 used shuffle_level='sample' anyway
         '''
+        dataset = ConcatDataset(dss)
         self.data_loader = DataLoader(
-            ConcatDataset(dss),batch_size=batch_size,
-            shuffle=True,pin_memory=(self.device.type=='cuda')
+            dataset,batch_size=batch_size,shuffle=True,
+            # the last partial batch is dropped: reshuffled each epoch, so the 
+            # dropped samples differ, and a tiny batch makes batch stats noisy.
+            # kept if it is the only batch, so an epoch never has zero batches
+            drop_last=len(dataset) > batch_size,
+            pin_memory=(self.device.type=='cuda')
         )
     
     def run_model(self,batch,xnames):
